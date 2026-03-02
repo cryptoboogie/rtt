@@ -20,6 +20,7 @@ add_executable(rtt_tests
     test_benchmark_pop.cpp
     test_address_family.cpp
     test_dual_connection.cpp
+    test_h3_stub.cpp
 )
 target_link_libraries(rtt_tests
     GTest::gtest_main

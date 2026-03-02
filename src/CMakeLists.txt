@@ -11,6 +11,7 @@ add_library(rtt_lib
     executor/maintenance_thread.cpp
     executor/cpu_pin.cpp
     benchmark/benchmark_runner.cpp
+    connection/h3_stub.cpp
 )
 target_include_directories(rtt_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(rtt_lib PUBLIC OpenSSL::SSL OpenSSL::Crypto nghttp2::nghttp2)
