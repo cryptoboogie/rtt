@@ -49,6 +49,7 @@ static void print_usage() {
     std::printf("  --min-interval <ms>     Min inter-arrival for random-cadence (default: 50)\n");
     std::printf("  --max-interval <ms>     Max inter-arrival for random-cadence (default: 500)\n");
     std::printf("  --pin-core <N>          Pin executor to CPU core (default: no pin)\n");
+    std::printf("  --af <auto|v4|v6>       Force address family (default: auto)\n");
 }
 
 static int run_trigger_test() {
@@ -183,6 +184,18 @@ int main(int argc, char* argv[]) {
             config.max_interval_ms = static_cast<uint32_t>(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--pin-core") == 0 && i + 1 < argc) {
             config.pin_core = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--af") == 0 && i + 1 < argc) {
+            ++i;
+            if (std::strcmp(argv[i], "v4") == 0) {
+                config.address_family = AddressFamily::V4;
+            } else if (std::strcmp(argv[i], "v6") == 0) {
+                config.address_family = AddressFamily::V6;
+            } else if (std::strcmp(argv[i], "auto") == 0) {
+                config.address_family = AddressFamily::AUTO;
+            } else {
+                std::fprintf(stderr, "Unknown address family: %s\n", argv[i]);
+                return EXIT_FAILURE;
+            }
         } else if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
             print_usage();
             return EXIT_SUCCESS;

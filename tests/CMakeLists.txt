@@ -18,6 +18,7 @@ add_executable(rtt_tests
     test_benchmark_runner.cpp
     test_benchmark_stats.cpp
     test_benchmark_pop.cpp
+    test_address_family.cpp
 )
 target_link_libraries(rtt_tests
     GTest::gtest_main

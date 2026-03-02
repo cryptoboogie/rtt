@@ -16,8 +16,11 @@ BenchmarkRunner::~BenchmarkRunner() {
 }
 
 bool BenchmarkRunner::setup() {
-    std::printf("[bench] Warming %zu connections...\n", config_.pool_size);
-    pool_ = new ConnectionPool("clob.polymarket.com", 443, config_.pool_size);
+    const char* af_str = config_.address_family == AddressFamily::V4 ? "IPv4" :
+                         config_.address_family == AddressFamily::V6 ? "IPv6" : "auto";
+    std::printf("[bench] Warming %zu connections (AF: %s)...\n", config_.pool_size, af_str);
+    pool_ = new ConnectionPool("clob.polymarket.com", 443, config_.pool_size,
+                                config_.address_family);
     size_t warmed = pool_->warmup();
     std::printf("[bench] Warmed %zu / %zu connections\n", warmed, config_.pool_size);
     if (warmed == 0) return false;

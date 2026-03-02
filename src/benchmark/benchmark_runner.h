@@ -25,6 +25,7 @@ struct BenchmarkConfig {
     uint32_t min_interval_ms = 50;  // RandomCadence min inter-arrival
     uint32_t max_interval_ms = 500; // RandomCadence max inter-arrival
     int pin_core = -1;           // CPU core to pin executor (-1 = no pin)
+    AddressFamily address_family = AddressFamily::AUTO; // Force v4/v6
 };
 
 class BenchmarkRunner {
