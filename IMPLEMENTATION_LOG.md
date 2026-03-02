@@ -246,3 +246,39 @@ The gap comes from architectural differences, not algorithmic ones. Ordered by e
 - Connection pool mutex — only touched once per request, dwarfed by network I/O.
 - DNS resolution — happens once at warmup, not on hot path.
 - cf-ray parsing — happens after response, not on critical path.
+
+## 8.1 — Add connection_index to TimestampRecord
+- **Files changed**: `crates/rtt-core/src/metrics.rs`
+- **Tests run**: `connection_index_defaults_to_zero`, `connection_index_set_and_read` — 2 pass
+- **Commit**: (part of burst contention tightening)
+- **Deviation**: None
+
+## 8.2 — Return connection index from ConnectionPool::send()
+- **Files changed**: `crates/rtt-core/src/connection.rs`
+- **Tests run**: `send_returns_connection_index` — 1 pass
+- **Commit**: (part of burst contention tightening)
+- **Deviation**: None. Changed `acquire()` to return `(Arc<Mutex<H2Connection>>, usize)`, `send()` to return `(Response, usize)`. Updated all callers.
+
+## 8.3 — Thread connection index through executor process_one()
+- **Files changed**: `crates/rtt-core/src/executor.rs`
+- **Tests run**: `process_one_records_connection_index` — 1 pass
+- **Commit**: (part of burst contention tightening)
+- **Deviation**: Test advances round-robin counter before calling process_one to ensure the field is actually set (not just matching default 0).
+
+## 8.4 — Tighten dual_connection_burst_contention test
+- **Files changed**: `crates/rtt-core/src/benchmark.rs`
+- **Tests run**: `dual_connection_burst_contention` — 1 pass; full suite 67 pass
+- **Commit**: feat: tighten burst contention test with connection-level observability
+- **Deviation**: Used `warm_ttfb` (network time only) instead of `trigger_to_wire` for latency comparison. The executor is single-threaded, so trigger_to_wire includes queue wait which is expected to grow in burst mode. warm_ttfb isolates actual network/connection performance.
+
+## 9.1 — Add SendHandle + send_start to ConnectionPool
+- **Files changed**: `crates/rtt-core/src/connection.rs`
+- **Tests run**: `send_start_submits_then_collect_returns_response` — 1 pass; all compile
+- **Commit**: (part of split write/response instrumentation)
+- **Deviation**: None. `send_start` dispatches H2 frame and returns `SendHandle` with boxed response future. `send` rewritten as `send_start` + `collect`.
+
+## 9.2 — Split write/response timestamps in process_one
+- **Files changed**: `crates/rtt-core/src/executor.rs`
+- **Tests run**: `write_duration_is_submicrosecond_not_rtt` — 1 pass; full suite 69 pass
+- **Commit**: feat: split write/response instrumentation for accurate trigger-to-wire
+- **Deviation**: None. `process_one` now uses two `block_on` calls: first for `send_start` (frame dispatch, timestamps t_write_begin/t_write_end), second for `handle.collect()` (network wait, timestamps t_first_resp_byte/t_headers_done). write_duration dropped from ~162ms to <1ms.

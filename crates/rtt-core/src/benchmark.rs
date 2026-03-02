@@ -81,7 +81,7 @@ pub async fn run_benchmark(
 
     // 3. Send one warmup request
     let warmup_req = template.build_request();
-    let warmup_resp = pool.send(warmup_req).await?;
+    let (warmup_resp, _) = pool.send(warmup_req).await?;
     if let Some(cf_ray) = get_cf_ray(&warmup_resp) {
         let pop = extract_pop(&cf_ray);
         eprintln!("POP: {}", pop);
@@ -433,6 +433,16 @@ mod tests {
 
     #[tokio::test]
     async fn dual_connection_burst_contention() {
+        // First, run single-shot as a baseline for latency comparison
+        let baseline_config = BenchmarkConfig {
+            mode: BenchmarkMode::SingleShot,
+            sample_count: 2,
+            pool_size: 2,
+            ..Default::default()
+        };
+        let baseline = run_benchmark(&baseline_config).await.expect("baseline failed");
+
+        // Now run burst with pool_size=2
         let config = BenchmarkConfig {
             mode: BenchmarkMode::BurstRace,
             sample_count: 4,
@@ -442,5 +452,29 @@ mod tests {
         };
         let result = run_benchmark(&config).await.expect("burst benchmark failed");
         assert_eq!(result.records.len(), 4);
+
+        // Assert distribution: both connection indices (0 and 1) must appear
+        let indices: std::collections::HashSet<usize> =
+            result.records.iter().map(|r| r.connection_index).collect();
+        assert!(
+            indices.contains(&0) && indices.contains(&1),
+            "Expected both connections used, got indices: {:?}",
+            indices,
+        );
+
+        // Assert no contention degradation: burst warm_ttfb (write_begin →
+        // first_resp_byte, pure network time excluding queue delay) should not
+        // be dramatically worse than baseline. A 3x blowup would indicate
+        // connection-level contention or deadlock rather than normal queuing.
+        let baseline_ttfb = baseline.report.warm_ttfb.p50;
+        let burst_ttfb = result.report.warm_ttfb.p50;
+        if baseline_ttfb > 0 {
+            assert!(
+                burst_ttfb < baseline_ttfb * 3,
+                "Burst warm_ttfb p50 ({}) >= 3x baseline ({}) — connection contention detected",
+                burst_ttfb,
+                baseline_ttfb,
+            );
+        }
     }
 }

@@ -67,20 +67,37 @@ impl ExecutionThread {
         let req = template.build_request();
         rec.t_write_begin = clock::now_ns();
 
-        let result = rt.block_on(async {
-            pool.send(req).await
+        // Phase 1: Submit frame to H2 pipeline (microseconds)
+        let handle_result = rt.block_on(async {
+            pool.send_start(req).await
         });
 
         rec.t_write_end = clock::now_ns();
 
-        match result {
-            Ok(resp) => {
+        match handle_result {
+            Ok(handle) => {
+                rec.connection_index = handle.connection_index;
+
+                // Phase 2: Await response (network RTT)
+                let resp_result = rt.block_on(async {
+                    handle.collect().await
+                });
+
                 rec.t_first_resp_byte = clock::now_ns();
-                if let Some(cf_ray) = get_cf_ray(&resp) {
-                    rec.cf_ray_pop = extract_pop(&cf_ray);
+
+                match resp_result {
+                    Ok(resp) => {
+                        if let Some(cf_ray) = get_cf_ray(&resp) {
+                            rec.cf_ray_pop = extract_pop(&cf_ray);
+                        }
+                        rec.t_headers_done = clock::now_ns();
+                        rec.is_reconnect = false;
+                    }
+                    Err(_e) => {
+                        rec.t_headers_done = clock::now_ns();
+                        rec.is_reconnect = true;
+                    }
                 }
-                rec.t_headers_done = clock::now_ns();
-                rec.is_reconnect = false;
             }
             Err(_e) => {
                 rec.t_first_resp_byte = clock::now_ns();
@@ -302,6 +319,98 @@ mod tests {
         assert!(rec.t_first_resp_byte > 0);
         assert!(rec.t_headers_done > 0);
         assert!(!rec.cf_ray_pop.is_empty(), "POP should be extracted");
+    }
+
+    #[tokio::test]
+    async fn process_one_records_connection_index() {
+        // Pool with 2 connections
+        let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 2, AddressFamily::Auto);
+        pool.warmup().await.expect("warmup failed");
+
+        // Burn index 0 by sending a dummy request to advance round-robin
+        let dummy_req = http::Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("host", "clob.polymarket.com")
+            .body(bytes::Bytes::new())
+            .unwrap();
+        let _ = pool.send(dummy_req).await;
+
+        let pool = Arc::new(pool);
+
+        let mut template = RequestTemplate::new(
+            http::Method::GET,
+            "/".parse().unwrap(),
+        );
+        template.add_header("host", "clob.polymarket.com");
+
+        let mut msg = make_trigger(1);
+        msg.timestamp_ns = clock::now_ns();
+
+        let pool_clone = pool.clone();
+        let rec = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            ExecutionThread::process_one(&pool_clone, &mut template, &msg, &rt)
+        })
+        .await
+        .unwrap();
+
+        // Round-robin advanced past 0, so process_one should record index 1
+        assert_eq!(rec.connection_index, 1);
+    }
+
+    #[tokio::test]
+    async fn write_duration_is_submicrosecond_not_rtt() {
+        let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 1, AddressFamily::Auto);
+        pool.warmup().await.expect("warmup failed");
+        let pool = Arc::new(pool);
+
+        let mut template = RequestTemplate::new(
+            http::Method::GET,
+            "/".parse().unwrap(),
+        );
+        template.add_header("host", "clob.polymarket.com");
+
+        let mut msg = make_trigger(1);
+        msg.timestamp_ns = clock::now_ns();
+
+        let pool_clone = pool.clone();
+        let rec = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            ExecutionThread::process_one(&pool_clone, &mut template, &msg, &rt)
+        })
+        .await
+        .unwrap();
+
+        // write_duration should be frame submission time (< 1ms),
+        // NOT the full network RTT (~114ms)
+        let wd = rec.write_duration();
+        assert!(
+            wd < 1_000_000, // < 1ms
+            "write_duration {} ns ({:.2} ms) — still measuring full RTT, not wire time",
+            wd, wd as f64 / 1_000_000.0
+        );
+
+        // warm_ttfb should be the actual network time (tens of ms)
+        let ttfb = rec.warm_ttfb();
+        assert!(
+            ttfb > 1_000_000, // > 1ms — real network time
+            "warm_ttfb {} ns — suspiciously low for network RTT",
+            ttfb
+        );
+
+        // write_duration should be orders of magnitude smaller than warm_ttfb
+        assert!(
+            wd < ttfb / 10,
+            "write_duration ({}) should be << warm_ttfb ({})",
+            wd, ttfb
+        );
     }
 
     #[test]

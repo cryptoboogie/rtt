@@ -4,7 +4,9 @@ use http_body_util::{BodyExt, Full};
 use hyper::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::ClientConfig;
+use std::future::Future;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpStream;
@@ -118,6 +120,23 @@ pub fn get_cf_ray(resp: &Response<Bytes>) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Handle returned by `send_start`. The H2 frame has been dispatched;
+/// call `collect()` to await the response.
+pub struct SendHandle {
+    resp_future: Pin<Box<dyn Future<Output = hyper::Result<hyper::Response<hyper::body::Incoming>>> + Send>>,
+    pub connection_index: usize,
+}
+
+impl SendHandle {
+    /// Await the response and collect the body.
+    pub async fn collect(self) -> Result<Response<Bytes>, Box<dyn std::error::Error + Send + Sync>> {
+        let resp = self.resp_future.await?;
+        let (parts, body) = resp.into_parts();
+        let body_bytes = body.collect().await?.to_bytes();
+        Ok(Response::from_parts(parts, body_bytes))
+    }
+}
+
 /// Connection pool with warm HTTP/2 connections.
 pub struct ConnectionPool {
     host: String,
@@ -152,20 +171,40 @@ impl ConnectionPool {
         Ok(pool_size)
     }
 
-    /// Acquire a connection (round-robin). Returns an Arc<Mutex> for internal use.
-    fn acquire(&self) -> Arc<Mutex<H2Connection>> {
+    /// Acquire a connection (round-robin). Returns (connection, index).
+    fn acquire(&self) -> (Arc<Mutex<H2Connection>>, usize) {
         let idx = self.next_index.fetch_add(1, Ordering::Relaxed) % self.connections.len();
-        self.connections[idx].clone()
+        (self.connections[idx].clone(), idx)
     }
 
-    /// Send a request using round-robin connection selection.
+    /// Submit a request to the H2 pipeline. Returns a `SendHandle` immediately
+    /// after the frame is dispatched (no network wait). Call `handle.collect()`
+    /// to await the response.
+    pub async fn send_start(
+        &self,
+        req: Request<Bytes>,
+    ) -> Result<SendHandle, Box<dyn std::error::Error + Send + Sync>> {
+        let (conn, idx) = self.acquire();
+        let mut guard = conn.lock().await;
+        let req = req.map(Full::new);
+        let resp_future = guard.sender.send_request(req);
+        drop(guard);
+        Ok(SendHandle {
+            resp_future: Box::pin(resp_future),
+            connection_index: idx,
+        })
+    }
+
+    /// Send a request and await the full response. Convenience wrapper
+    /// around `send_start` + `collect`. Returns (response, connection_index).
     pub async fn send(
         &self,
         req: Request<Bytes>,
-    ) -> Result<Response<Bytes>, Box<dyn std::error::Error + Send + Sync>> {
-        let conn = self.acquire();
-        let mut guard = conn.lock().await;
-        send_request(&mut guard.sender, req).await
+    ) -> Result<(Response<Bytes>, usize), Box<dyn std::error::Error + Send + Sync>> {
+        let handle = self.send_start(req).await?;
+        let idx = handle.connection_index;
+        let resp = handle.collect().await?;
+        Ok((resp, idx))
     }
 
     /// Reconnect a specific connection index.
@@ -302,8 +341,61 @@ mod tests {
             .header("host", "clob.polymarket.com")
             .body(Bytes::new())
             .unwrap();
-        let resp = pool.send(req).await.expect("send failed");
+        let (resp, _idx) = pool.send(req).await.expect("send failed");
         assert!(resp.status().is_success() || resp.status().is_client_error());
+    }
+
+    #[tokio::test]
+    async fn send_returns_connection_index() {
+        let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 2, AddressFamily::Auto);
+        pool.warmup().await.expect("warmup failed");
+
+        // First send should use index 0, second should use index 1 (round-robin)
+        let req0 = Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("host", "clob.polymarket.com")
+            .body(Bytes::new())
+            .unwrap();
+        let (_resp, idx0) = pool.send(req0).await.expect("send failed");
+        assert_eq!(idx0, 0);
+
+        let req1 = Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("host", "clob.polymarket.com")
+            .body(Bytes::new())
+            .unwrap();
+        let (_resp, idx1) = pool.send(req1).await.expect("send failed");
+        assert_eq!(idx1, 1);
+    }
+
+    #[tokio::test]
+    async fn send_start_submits_then_collect_returns_response() {
+        let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 2, AddressFamily::Auto);
+        pool.warmup().await.expect("warmup failed");
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("host", "clob.polymarket.com")
+            .body(Bytes::new())
+            .unwrap();
+
+        // send_start should return almost immediately (frame dispatched, not waiting for response)
+        let t0 = std::time::Instant::now();
+        let handle = pool.send_start(req).await.expect("send_start failed");
+        let submit_time = t0.elapsed();
+
+        // Frame dispatch should be < 1ms (no network wait)
+        assert!(submit_time.as_millis() < 1, "send_start took {}ms, expected <1ms", submit_time.as_millis());
+        assert_eq!(handle.connection_index, 0);
+
+        // collect waits for the actual response
+        let resp = handle.collect().await.expect("collect failed");
+        assert!(resp.status().is_success() || resp.status().is_client_error());
+        let cf_ray = get_cf_ray(&resp);
+        assert!(cf_ray.is_some(), "cf-ray header missing");
     }
 
     #[tokio::test]

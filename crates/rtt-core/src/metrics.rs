@@ -11,6 +11,7 @@ pub struct TimestampRecord {
     pub t_headers_done: u64,
     pub is_reconnect: bool,
     pub cf_ray_pop: String,
+    pub connection_index: usize,
 }
 
 impl TimestampRecord {
@@ -160,7 +161,21 @@ mod tests {
             t_headers_done: base + 1100,
             is_reconnect: reconnect,
             cf_ray_pop: String::new(),
+            connection_index: 0,
         }
+    }
+
+    #[test]
+    fn connection_index_defaults_to_zero() {
+        let r = TimestampRecord::default();
+        assert_eq!(r.connection_index, 0);
+    }
+
+    #[test]
+    fn connection_index_set_and_read() {
+        let mut r = make_record(0, false);
+        r.connection_index = 1;
+        assert_eq!(r.connection_index, 1);
     }
 
     #[test]

@@ -1,19 +1,5 @@
 # Low-Latency Execution Service
 
-## Current Project Status
-
-The C++ hot executor is **built and functional** through phase 7.3 with **92 tests passing**.
-
-### Completed Phases
-
-1. **Project skeleton** — CMake build system, GoogleTest, OpenSSL + nghttp2 dependencies
-2. **Instrumentation core** — Portable monotonic clock (ns precision), TimestampRecord with 8 checkpoints and 7 derived metrics, percentile statistics aggregator with reconnect filtering
-3. **Trigger pipeline** — Lock-free SPSC ring buffer, fixed-size binary trigger message format, zero-allocation request template with offset patching
-4. **Connection stack** — Raw TCP connector with DNS resolution and address family selection, TLS session with ALPN h2 negotiation, HTTP/2 session via nghttp2 with cf-ray capture, connection pool with 2 warm connections and auto-reconnect
-5. **Threaded executor** — Ingress thread (trigger receiver), execution thread (full hot-path with 8-checkpoint timestamps), maintenance thread (keepalive, reconnect, POP verification), integrated pipeline with CPU pinning
-6. **Benchmark harness** — CLI with three trigger injection modes (single-shot, random cadence, burst race), full pipeline timestamp capture and percentile reporting, cf-ray POP extraction with warm/cold sample separation
-7. **Protocol experiments** — IPv4 vs IPv6 forced path selection, dual-connection benchmark comparison, HTTP/3 stub with alt-svc probe (full QUIC client deferred)
-
 ## Way of Working
 
 All implementation follows this discipline:
@@ -24,6 +10,27 @@ All implementation follows this discipline:
 4. **Once the test passes, move on** — do not gold-plate; proceed to the next sub-task immediately
 5. **Do not stop until all sub-tasks are finished** — unless there is a fatal blocking issue
 6. **Log every sub-task** — for each completed sub-task, append an entry to `IMPLEMENTATION_LOG.md` recording files changed, tests run, commit message, and any deviations from the plan
+
+## Current Project Status
+
+### Rust Implementation — Session 1 (in progress)
+
+**Branch**: `rust-rtt-core` | **67 tests passing** | Workspace: `rtt-core`, `rtt-bench`
+
+Modules implemented:
+- `clock` — monotonic nanosecond timestamps
+- `trigger` — TriggerMessage, Side, OrderType, OrderBookSnapshot, PriceLevel
+- `queue` — SPSC trigger queue (crossbeam-channel)
+- `request` — pre-built request template with zero-allocation patching
+- `metrics` — TimestampRecord (8 checkpoints + connection_index), 7 derived metrics, StatsAggregator with percentile computation, reconnect filtering
+- `connection` — H2 connection via hyper+rustls (TCP_NODELAY, ALPN h2), ConnectionPool with round-robin (returns connection index), DNS resolution with address family selection, cf-ray POP extraction
+- `executor` — IngressThread, ExecutionThread (single-threaded, serial processing), MaintenanceThread, CPU pinning
+- `benchmark` — three modes (single-shot, random-cadence, burst-race), CLI harness, percentile reporting, POP distribution
+- `h3_stub` — alt-svc probe for HTTP/3 detection
+
+### Known Issues
+- **Timestamp instrumentation conflates write + response**: `pool.send()` blocks for the entire request+response cycle. `write_duration` / `warm_ttfb` measure full network RTT (~114ms), not actual wire time. `write_to_first_byte` is ~0ns. Needs split instrumentation to be comparable to C++ ~8us trigger-to-wire.
+- **Executor is single-threaded**: burst mode triggers are processed serially, causing queue_delay to grow with burst depth. This is by design but means burst trigger_to_wire is dominated by queue wait.
 
 # Session Plans: Polymarket Low-Latency Execution System (Rust)
 
@@ -100,13 +107,16 @@ pub struct PriceLevel {
 // === Timestamp record (Session 1 defines, all use for observability) ===
 pub struct TimestampRecord {
     pub t_trigger_rx: u64,
+    pub t_dispatch_q: u64,
     pub t_exec_start: u64,
+    pub t_buf_ready: u64,
     pub t_write_begin: u64,
     pub t_write_end: u64,
     pub t_first_resp_byte: u64,
     pub t_headers_done: u64,
     pub is_reconnect: bool,
     pub cf_ray_pop: String,
+    pub connection_index: usize,
 }
 ```
 
@@ -116,40 +126,36 @@ pub struct TimestampRecord {
 
 **Branch**: `rust-rtt-core`
 **Goal**: Port the C++ hot executor to Rust with equivalent or better performance.
+**Status**: Core complete (67 tests). Instrumentation needs split write/response timestamps.
 
 ### Context for the agent
-Read the C++ implementation at ~/Desktop/claude-plan-claude-impl/ for architecture
-reference. Key files: src/connection/*, src/executor/*, src/benchmark/*, src/main.cpp.
+The C++ implementation at `~/Desktop/claude-plan-claude-impl/` is the architecture reference.
+Key files: `src/connection/*`, `src/executor/*`, `src/benchmark/*`, `src/main.cpp`.
 The C++ version achieves ~8us trigger-to-wire on warm connections.
 
-### Requirements
-1. Cargo workspace with crates: `rtt-core`, `rtt-bench`
-2. Warm HTTP/2 connection pool to clob.polymarket.com (2 connections)
-   - Use hyper + hyper-tls or reqwest with connection pooling
-   - TCP_NODELAY, TLS 1.3, ALPN h2
-3. Lock-free SPSC channel for trigger delivery (crossbeam or custom)
-4. Pre-built request template with zero-allocation patching
-5. Monotonic nanosecond timestamps (std::time::Instant)
-6. TimestampRecord with all 8 checkpoints and 7 derived metrics
-7. Percentile stats aggregator (p50/p95/p99/p99.9)
-8. Benchmark CLI with three modes: single-shot, random-cadence, burst-race
-9. IPv4/IPv6 forced path selection
-10. cf-ray POP extraction from response headers
-11. CPU pinning (core_affinity crate, Linux only)
+### What's done
+1. Cargo workspace: `rtt-core`, `rtt-bench`
+2. Warm HTTP/2 connection pool (hyper + rustls, TCP_NODELAY, ALPN h2, round-robin with index tracking)
+3. SPSC channel (crossbeam-channel)
+4. Request template with zero-allocation patching
+5. Monotonic ns timestamps, TimestampRecord with 8 checkpoints + connection_index
+6. StatsAggregator with percentile computation (p50/p95/p99/p99.9), reconnect filtering
+7. Benchmark CLI: single-shot, random-cadence, burst-race modes
+8. IPv4/IPv6 forced path selection, cf-ray POP extraction
+9. CPU pinning (core_affinity), H3 alt-svc probe stub
+10. Burst contention test with connection distribution + latency assertions
 
-### Success criteria
-- `cargo test` passes all tests
-- Benchmark shows trigger-to-wire <= 10us p50 on warm connection
-- cf-ray shows Cloudflare edge POP (e.g. EWR), but backend is AWS us-east-1 (IAD). TTFB includes the edge→origin hop.
-- All three benchmark modes produce valid percentile reports
+### What's remaining
+- **Split write/response instrumentation** — `send_request()` needs to expose the point where the H2 frame is submitted to the kernel vs when the response arrives. Current `write_duration` = full RTT (~114ms), not wire time.
+- Verify trigger-to-wire <= 10us p50 after instrumentation fix
 
-### Key Rust crates
-- hyper (HTTP/2 client)
-- hyper-tls or rustls (TLS)
+### Key Rust crates (actual)
+- hyper 1.x (HTTP/2 client)
+- rustls + webpki-roots (TLS)
 - tokio (async runtime)
 - crossbeam-channel (SPSC)
 - core_affinity (CPU pinning)
-- criterion (benchmarks)
+- rand (random cadence mode)
 
 ### Test approach
 - Unit tests for each module (timestamp, stats, queue, template)
