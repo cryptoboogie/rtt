@@ -4,6 +4,7 @@ add_executable(rtt_tests
     test_monotonic_clock.cpp
     test_timestamp_record.cpp
     test_stats_aggregator.cpp
+    test_spsc_queue.cpp
 )
 target_link_libraries(rtt_tests
     GTest::gtest_main
