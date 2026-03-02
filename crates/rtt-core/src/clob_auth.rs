@@ -1,0 +1,142 @@
+use base64::engine::general_purpose::URL_SAFE;
+use base64::Engine;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Compute HMAC-SHA256: base64url-decode secret, HMAC message, base64url-encode result.
+pub fn hmac_signature(secret: &str, message: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let decoded_secret = URL_SAFE.decode(secret)?;
+    let mut mac = HmacSha256::new_from_slice(&decoded_secret)?;
+    mac.update(message.as_bytes());
+    let result = mac.finalize().into_bytes();
+    Ok(URL_SAFE.encode(result))
+}
+
+/// L2 API credentials for Polymarket CLOB.
+#[derive(Debug, Clone)]
+pub struct L2Credentials {
+    pub api_key: String,
+    pub secret: String,
+    pub passphrase: String,
+    pub address: String,
+}
+
+/// Build L2 authentication headers for a CLOB API request.
+///
+/// Returns Vec of (header_name, header_value) pairs.
+pub fn build_l2_headers(
+    creds: &L2Credentials,
+    timestamp: &str,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+    let message = format!("{}{}{}{}", timestamp, method, path, body);
+    let signature = hmac_signature(&creds.secret, &message)?;
+
+    Ok(vec![
+        ("POLY_ADDRESS".to_string(), creds.address.clone()),
+        ("POLY_API_KEY".to_string(), creds.api_key.clone()),
+        ("POLY_PASSPHRASE".to_string(), creds.passphrase.clone()),
+        ("POLY_SIGNATURE".to_string(), signature),
+        ("POLY_TIMESTAMP".to_string(), timestamp.to_string()),
+    ])
+}
+
+/// Load L2 credentials from environment variables.
+pub fn load_credentials_from_env() -> Result<(L2Credentials, String), Box<dyn std::error::Error>> {
+    let api_key = std::env::var("POLY_API_KEY")?;
+    let secret = std::env::var("POLY_SECRET")?;
+    let passphrase = std::env::var("POLY_PASSPHRASE")?;
+    let address = std::env::var("POLY_ADDRESS")?;
+    let private_key = std::env::var("POLY_PRIVATE_KEY")?;
+
+    Ok((
+        L2Credentials {
+            api_key,
+            secret,
+            passphrase,
+            address,
+        },
+        private_key,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hmac_computation() {
+        // Known test: use a base64url-encoded secret
+        let secret = URL_SAFE.encode(b"test-secret-key!");
+        let message = "1234567890POST/order{\"test\":true}";
+        let result = hmac_signature(&secret, message).unwrap();
+
+        // Verify it's valid base64url
+        let decoded = URL_SAFE.decode(&result).unwrap();
+        assert_eq!(decoded.len(), 32, "HMAC-SHA256 output should be 32 bytes");
+
+        // Verify deterministic
+        let result2 = hmac_signature(&secret, message).unwrap();
+        assert_eq!(result, result2);
+    }
+
+    #[test]
+    fn test_l2_headers_all_present() {
+        let creds = L2Credentials {
+            api_key: "test-api-key".to_string(),
+            secret: URL_SAFE.encode(b"test-secret"),
+            passphrase: "test-passphrase".to_string(),
+            address: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".to_string(),
+        };
+
+        let headers = build_l2_headers(&creds, "1234567890", "POST", "/order", "{}")
+            .unwrap();
+
+        let names: Vec<&str> = headers.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"POLY_ADDRESS"));
+        assert!(names.contains(&"POLY_API_KEY"));
+        assert!(names.contains(&"POLY_PASSPHRASE"));
+        assert!(names.contains(&"POLY_SIGNATURE"));
+        assert!(names.contains(&"POLY_TIMESTAMP"));
+        assert_eq!(headers.len(), 5);
+
+        // Verify values
+        let find = |name: &str| headers.iter().find(|(n, _)| n == name).unwrap().1.clone();
+        assert_eq!(find("POLY_ADDRESS"), creds.address);
+        assert_eq!(find("POLY_API_KEY"), creds.api_key);
+        assert_eq!(find("POLY_PASSPHRASE"), creds.passphrase);
+        assert_eq!(find("POLY_TIMESTAMP"), "1234567890");
+        // Signature should be non-empty base64url
+        let sig = find("POLY_SIGNATURE");
+        assert!(!sig.is_empty());
+        assert!(URL_SAFE.decode(&sig).is_ok());
+    }
+
+    #[test]
+    fn test_credentials_from_env() {
+        // Set env vars for test
+        std::env::set_var("POLY_API_KEY", "test-key");
+        std::env::set_var("POLY_SECRET", "dGVzdC1zZWNyZXQ=");
+        std::env::set_var("POLY_PASSPHRASE", "test-pass");
+        std::env::set_var("POLY_ADDRESS", "0xdeadbeef");
+        std::env::set_var("POLY_PRIVATE_KEY", "0xprivkey");
+
+        let (creds, pk) = load_credentials_from_env().unwrap();
+        assert_eq!(creds.api_key, "test-key");
+        assert_eq!(creds.secret, "dGVzdC1zZWNyZXQ=");
+        assert_eq!(creds.passphrase, "test-pass");
+        assert_eq!(creds.address, "0xdeadbeef");
+        assert_eq!(pk, "0xprivkey");
+
+        // Clean up
+        std::env::remove_var("POLY_API_KEY");
+        std::env::remove_var("POLY_SECRET");
+        std::env::remove_var("POLY_PASSPHRASE");
+        std::env::remove_var("POLY_ADDRESS");
+        std::env::remove_var("POLY_PRIVATE_KEY");
+    }
+}
