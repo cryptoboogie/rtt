@@ -7,6 +7,7 @@ add_library(rtt_lib
     connection/h2_session.cpp
     connection/connection_pool.cpp
     executor/ingress_thread.cpp
+    executor/execution_thread.cpp
 )
 target_include_directories(rtt_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(rtt_lib PUBLIC OpenSSL::SSL OpenSSL::Crypto nghttp2::nghttp2)
