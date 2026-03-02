@@ -13,6 +13,7 @@ add_executable(rtt_tests
     test_connection_pool.cpp
     test_ingress_thread.cpp
     test_execution_thread.cpp
+    test_maintenance_thread.cpp
 )
 target_link_libraries(rtt_tests
     GTest::gtest_main
