@@ -9,6 +9,7 @@ add_executable(rtt_tests
     test_request_template.cpp
     test_tcp_connector.cpp
     test_tls_session.cpp
+    test_h2_session.cpp
 )
 target_link_libraries(rtt_tests
     GTest::gtest_main
