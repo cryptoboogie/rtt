@@ -7,6 +7,7 @@ add_executable(rtt_tests
     test_spsc_queue.cpp
     test_trigger_message.cpp
     test_request_template.cpp
+    test_tcp_connector.cpp
 )
 target_link_libraries(rtt_tests
     GTest::gtest_main
