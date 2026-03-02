@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/rtt-core", "crates/rtt-bench"]
+resolver = "2"

@@ -125,3 +125,124 @@
 - **Tests**: 2 H3Stub tests — all passed. Status correctly reports NotImplemented. Probe confirms endpoint advertises h3 via alt-svc. 92 total tests.
 - **Commit**: `feat: add HTTP/3 experiment stub with alt-svc probe`
 - **Deviation**: H3 is a stub/probe only; full QUIC client deferred pending library integration.
+
+---
+
+# Rust Port Implementation Log (Session 1)
+
+## R1.1 — Cargo workspace with rtt-core and rtt-bench crates
+- **Files changed**: `Cargo.toml`, `crates/rtt-core/Cargo.toml`, `crates/rtt-core/src/lib.rs`, `crates/rtt-bench/Cargo.toml`, `crates/rtt-bench/src/main.rs`
+- **Tests run**: `sanity` — 1 passed
+- **Commit**: `feat: add Cargo workspace with rtt-core and rtt-bench crates`
+- **Deviation**: None. Dependencies: hyper 1.x, tokio-rustls, crossbeam-channel, clap, core_affinity.
+
+## R2.1 — Monotonic nanosecond clock wrapper
+- **Files changed**: `crates/rtt-core/src/clock.rs`
+- **Tests run**: 4 clock tests — all passed (now_returns_value, is_monotonic, sub_millisecond_resolution, measures_real_time)
+- **Commit**: `feat: add Rust monotonic clock with nanosecond precision`
+- **Deviation**: Uses `std::time::Instant` with OnceLock epoch instead of platform-specific APIs.
+
+## R2.2 — TimestampRecord with 8 checkpoints and 7 derived metrics
+- **Files changed**: `crates/rtt-core/src/metrics.rs`
+- **Tests run**: 9 TimestampRecord tests — all passed
+- **Commit**: `feat: add TimestampRecord with 8 checkpoints and 7 derived metrics`
+- **Deviation**: None.
+
+## R2.3 — Percentile stats aggregator with reconnect filtering
+- **Files changed**: `crates/rtt-core/src/metrics.rs` (same file as R2.2)
+- **Tests run**: 5 StatsAggregator tests — all passed. 14 total metrics tests.
+- **Commit**: `feat: add percentile stats aggregator with reconnect filtering`
+- **Deviation**: Combined with R2.2 in single file for cohesion.
+
+## R3.1 — Shared types (TriggerMessage, Side, OrderType, OrderBookSnapshot, PriceLevel)
+- **Files changed**: `crates/rtt-core/src/trigger.rs`
+- **Tests run**: 4 trigger tests — all passed (construction, serialization, snapshot, enum variants)
+- **Commit**: `feat: add shared types matching interface contracts`
+- **Deviation**: None. All types derive Serialize/Deserialize for cross-session compatibility.
+
+## R3.2 — SPSC channel wrapper (crossbeam-channel)
+- **Files changed**: `crates/rtt-core/src/queue.rs`
+- **Tests run**: 5 queue tests — all passed (push/pop, empty, FIFO, capacity, concurrent)
+- **Commit**: `feat: add SPSC trigger queue via crossbeam-channel`
+- **Deviation**: Uses crossbeam bounded(1024) instead of custom ring buffer. Same semantics.
+
+## R3.3 — Request template with zero-allocation body patching
+- **Files changed**: `crates/rtt-core/src/request.rs`
+- **Tests run**: 6 request tests — all passed (create, set_body, register/patch, multiple patches, headers, build)
+- **Commit**: `feat: add request template with zero-allocation body patching`
+- **Deviation**: Uses fixed [u8; 4096] body array with patch slots matching C++ design.
+
+## R4.1 — HTTP/2 connection with rustls + hyper
+- **Files changed**: `crates/rtt-core/src/connection.rs`, `crates/rtt-core/Cargo.toml`
+- **Tests run**: 9 connection tests — all passed (cf-ray extraction, DNS resolution, H2 connect, session reuse, pool warmup, health check)
+- **Commit**: `feat: add HTTP/2 connection stack with rustls ALPN h2`
+- **Deviation**: Switched from native-tls to rustls for proper ALPN h2 support on macOS. Combines TCP, TLS, H2 session, connection pool, cf-ray extraction, and address family selection in single module.
+
+## R5.1–5.5 — Executor pipeline (ingress, execution, maintenance, CPU pin, integration)
+- **Files changed**: `crates/rtt-core/src/executor.rs`
+- **Tests run**: 6 executor tests — all passed (ingress timestamp, queue delivery, process_one timestamps, CPU pin, maintenance thread, end-to-end pipeline)
+- **Commit**: `feat: add full executor pipeline with ingress/execution/maintenance threads`
+- **Deviation**: Combined all executor components in single module. Execution thread uses tokio current_thread runtime for async H2 I/O from sync thread.
+
+## R6.1–6.3 — Benchmark harness with three modes and percentile reporting
+- **Files changed**: `crates/rtt-core/src/benchmark.rs`, `crates/rtt-bench/src/main.rs`, `crates/rtt-core/src/lib.rs`
+- **Tests run**: 8 benchmark tests — all passed (format_ns, config default, single-shot, random-cadence, burst-race, timestamps populated, POP extracted, warm/cold separation)
+- **Commit**: `feat: add benchmark harness with CLI and three injection modes`
+- **Deviation**: None. CLI matches C++ version flags.
+
+## R7.1–7.2 — Protocol experiments (IPv4/IPv6, dual-connection)
+- **Files changed**: `crates/rtt-core/src/benchmark.rs` (added test cases)
+- **Tests run**: 4 protocol experiment tests — all passed (IPv4 forced path, IPv6 forced path, dual-connection comparison, burst contention)
+- **Commit**: `feat: add IPv4/IPv6 and dual-connection benchmark experiments`
+- **Deviation**: None. IPv6 test allows graceful failure if not available.
+
+## R7.3 — HTTP/3 stub with alt-svc probe
+- **Files changed**: `crates/rtt-core/src/h3_stub.rs`, `crates/rtt-core/src/lib.rs`
+- **Tests run**: 2 H3 stub tests — all passed (status NotImplemented, alt-svc probe detects h3)
+- **Commit**: `feat: add HTTP/3 stub with alt-svc probe`
+- **Deviation**: Stub only, full QUIC deferred. Cloudflare advertises h3 via alt-svc.
+
+---
+
+**Total Rust tests: 63 passed, 0 failed**
+
+**Modules completed:**
+| Module | Tests | Description |
+|--------|-------|-------------|
+| clock | 4 | Monotonic nanosecond timestamps |
+| metrics | 14 | TimestampRecord + StatsAggregator |
+| trigger | 4 | Shared types (TriggerMessage, OrderBookSnapshot) |
+| queue | 5 | SPSC channel (crossbeam) |
+| request | 6 | Zero-allocation request template |
+| connection | 9 | HTTP/2 + TLS + pool + cf-ray + address family |
+| executor | 6 | Ingress + execution + maintenance + CPU pin |
+| benchmark | 12 | 3 modes + percentiles + protocol experiments |
+| h3_stub | 2 | HTTP/3 status + alt-svc probe |
+| sanity | 1 | Workspace verification |
+| **TOTAL** | **63** | |
+
+---
+
+## Optimization Notes (Rust vs C++ latency gap)
+
+Current Rust trigger-to-wire: ~80us p50 (debug build). C++ baseline: ~8us p50.
+The gap comes from architectural differences, not algorithmic ones. Ordered by expected impact:
+
+### High impact
+1. **Release build** — debug build has no inlining, bounds checks everywhere, unoptimized codegen. Expect 5–10x improvement from `--release` alone.
+2. **Async bridge overhead** — The execution thread creates a `tokio::runtime::Runtime` per thread and uses `block_on()` to drive hyper's async H2 client from a sync context. This adds task scheduling, waker allocation, and event loop overhead on every request. Fix: use the `h2` crate directly in synchronous mode, or keep a persistent runtime and use `tokio::runtime::Handle::block_on()` instead of rebuilding.
+3. **hyper framing cost** — hyper builds HTTP/2 frames through multiple abstraction layers (http-body-util, h2 crate, internal buffers). The C++ version writes directly to nghttp2's buffer with zero intermediate copies. Fix: use the `h2` crate directly, bypassing hyper's client abstraction, to get closer to raw frame submission.
+
+### Medium impact
+4. **SPSC queue** — `crossbeam-channel::bounded` is an MPMC channel with more synchronization overhead than needed. The C++ version uses a custom SPSC ring buffer with cache-line-padded atomics and acquire/release ordering only. Fix: replace with a true SPSC ring buffer (e.g. `rtrb` crate or custom implementation with `std::sync::atomic`).
+5. **Request template build** — `template.build_request()` allocates a new `Bytes` and `http::Request` on every call. The C++ version patches an existing nghttp2 header array in-place. Fix: pre-allocate the `http::Request` and only mutate the body bytes, or use the `h2` crate's `SendRequest::send_request` directly with pre-built header maps.
+6. **TLS implementation** — rustls is pure Rust (no asm-optimized crypto). The C++ version uses OpenSSL with hardware-accelerated AES-NI. Fix: enable `aws-lc-rs` backend for rustls (already a transitive dep) which uses assembly-optimized crypto.
+
+### Low impact
+7. **Clock** — `std::time::Instant` goes through `clock_gettime(CLOCK_MONOTONIC)` on Linux. The C++ version uses `CLOCK_MONOTONIC_RAW` which avoids NTP adjustments. Difference is negligible for relative measurements.
+8. **String allocations in TriggerMessage** — `token_id`, `price`, `size` are heap-allocated `String`. The C++ version uses a fixed 64-byte `char[]` payload. Fix: use `ArrayString` or `[u8; N]` for hot-path fields.
+
+### Not worth optimizing
+- Connection pool mutex — only touched once per request, dwarfed by network I/O.
+- DNS resolution — happens once at warmup, not on hot path.
+- cf-ray parsing — happens after response, not on critical path.

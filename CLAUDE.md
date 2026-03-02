@@ -1,1749 +1,366 @@
-# Technical Summary: Low-Latency “Race to API” Execution Service
+# Low-Latency Execution Service
 
-## Core Goal
+## Current Project Status
 
-The real requirement is **not** “make the external API respond in under 100ms.”
+The C++ hot executor is **built and functional** through phase 7.3 with **92 tests passing**.
 
-The goal is:
+### Completed Phases
 
-* An internal trigger like **`EXECUTE_YES`** arrives.
-* Multiple other systems may receive the same trigger.
-* We **cannot control** how long the external API takes *after* receiving the request.
-* We want **our request to arrive at the external API’s ingress before competing requests**.
+1. **Project skeleton** — CMake build system, GoogleTest, OpenSSL + nghttp2 dependencies
+2. **Instrumentation core** — Portable monotonic clock (ns precision), TimestampRecord with 8 checkpoints and 7 derived metrics, percentile statistics aggregator with reconnect filtering
+3. **Trigger pipeline** — Lock-free SPSC ring buffer, fixed-size binary trigger message format, zero-allocation request template with offset patching
+4. **Connection stack** — Raw TCP connector with DNS resolution and address family selection, TLS session with ALPN h2 negotiation, HTTP/2 session via nghttp2 with cf-ray capture, connection pool with 2 warm connections and auto-reconnect
+5. **Threaded executor** — Ingress thread (trigger receiver), execution thread (full hot-path with 8-checkpoint timestamps), maintenance thread (keepalive, reconnect, POP verification), integrated pipeline with CPU pinning
+6. **Benchmark harness** — CLI with three trigger injection modes (single-shot, random cadence, burst race), full pipeline timestamp capture and percentile reporting, cf-ray POP extraction with warm/cold sample separation
+7. **Protocol experiments** — IPv4 vs IPv6 forced path selection, dual-connection benchmark comparison, HTTP/3 stub with alt-svc probe (full QUIC client deferred)
 
-So this is fundamentally a **“win the race to first packet arrival”** problem.
+## Way of Working
 
----
+All implementation follows this discipline:
 
-## Key Architectural Insight
+1. **Break plans into big tasks** — each big task represents a meaningful capability milestone
+2. **Break tasks into sub-tasks** — sub-tasks are atomic units of work
+3. **TDD for every sub-task** — write a failing test first, then write the minimal code to pass the test(s)
+4. **Once the test passes, move on** — do not gold-plate; proceed to the next sub-task immediately
+5. **Do not stop until all sub-tasks are finished** — unless there is a fatal blocking issue
+6. **Log every sub-task** — for each completed sub-task, append an entry to `IMPLEMENTATION_LOG.md` recording files changed, tests run, commit message, and any deviations from the plan
 
-For this kind of race, the biggest factors are:
+# Session Plans: Polymarket Low-Latency Execution System (Rust)
 
-1. **Network path / physical proximity** to the API ingress
-2. **Connection reuse** (avoid DNS/TCP/TLS setup at trigger time)
-3. **Low jitter / no internal queueing**
-4. **Minimal work on the hot path**
-5. Only then: **language/runtime overhead**
+## Overview
 
-### Translation of the problem
+Build a single Rust binary that handles the full pipeline:
+websocket market data → strategy gate → sign order → fire on warm H2 connection
 
-This is not primarily an application “response time” problem. It is a:
+Reference: The C++ executor at `~/Desktop/claude-plan-claude-impl/` proves the
+architecture and has benchmark data. This Rust system replaces it.
 
-* **network ingress race**
-* **socket write latency**
-* **tail-latency / jitter minimization**
+Key external resources:
+- Polymarket Rust SDK: https://github.com/Polymarket/rs-clob-client
+- CLOB API docs: https://docs.polymarket.com
+- Market WebSocket: wss://ws-subscriptions-clob.polymarket.com/ws/market
+- User WebSocket: wss://ws-subscriptions-clob.polymarket.com/ws/user
+- Trading endpoint: POST https://clob.polymarket.com/order
 
-problem.
-
----
-
-## Language / Stack Conclusions
-
-### General guidance
-
-If the service is mostly:
-
-* receive trigger
-* sign/auth request
-* send outbound API call
-* do minimal transform
-
-then it is mostly **I/O-bound**.
-
-In that world:
-
-* **Go** is the most practical default:
-
-  * fast networking
-  * excellent standard library
-  * easy concurrency with goroutines
-  * low enough overhead for this use case
-  * fast to build and maintain
-
-* **Rust** is strongest if:
-
-  * you want the absolute tightest p99/p999
-  * you want lower jitter than Go
-  * you are willing to pay more engineering complexity
-
-* **C++** is usually overkill unless you need ultra-specialized latency work
-
-### Python
-
-Python can work if:
-
-* the path is mostly I/O-bound
-* the service uses a persistent async client
-* traffic/load is moderate
-* you accept somewhat higher jitter
-
-But for a **competitive “arrive first” execution lane**, Python is weaker because of:
-
-* higher per-request overhead
-* more jitter under load
-* process/GIL/event-loop sensitivity
-* easier to lose time to logging/middleware/allocation
-
-### Final language recommendation
-
-For the **actual execution path** (the service that receives `EXECUTE_YES` and fires the API call):
-
-* **Use Go by default**
-* Consider **Rust** if you want maximum tail-latency tightness
-* Avoid using Python for the critical path if the race is competitive
-
-Python is fine for orchestration / control plane / strategy logic, but not ideal for the hot execution lane.
+No staging endpoint exists. Test against prod with small orders or mocked responses.
 
 ---
 
-## Critical Clarification About the 100ms Target
+## Dependency Graph
 
-The earlier “<100ms” target needs to be interpreted correctly.
+```
+Session 1: Rust RTT Core ──────┐
+                                ├──→ Session 4: CLOB Order Integration
+Session 2: WS Data Pipeline ───┤
+                                ├──→ Session 5: Integration
+Session 3: Strategy Framework ──┘
+```
 
-There are 2 different budgets:
-
-1. **Service overhead budget**
-   Time your own system adds before bytes are on the wire.
-
-   * This can absolutely be kept very low (single-digit ms to low tens of ms).
-
-2. **End-to-end response budget**
-   Includes:
-
-   * network to API
-   * handshake cost
-   * CDN/edge processing
-   * origin processing
-   * response back
-
-This second one is often **not under your control**.
-
-For the race, the important metric is closer to:
-
-* **time until first byte of request reaches the external edge/ingress**
-
-not total response completion.
+Sessions 1, 2, 3 run in PARALLEL.
+Session 4 needs Session 1 done.
+Session 5 needs all done.
 
 ---
 
-## Reverse-Engineering the Target Endpoint
+## Shared Interface Contracts
 
-The tested endpoint was:
+ALL sessions must use these shared types. Define them in a `common/` crate
+before starting parallel work, or have Session 1 define them and Sessions 2+3
+code against the same interface.
 
-* **`https://clob.polymarket.com`**
+```rust
+// === Trigger message (Session 1 defines, Session 2+3 produce) ===
+pub struct TriggerMessage {
+    pub trigger_id: u64,
+    pub token_id: String,        // Polymarket asset/token ID
+    pub side: Side,              // BUY or SELL
+    pub price: String,           // Decimal string, e.g. "0.45"
+    pub size: String,            // Decimal string
+    pub order_type: OrderType,   // FOK, GTC, GTD, FAK
+    pub timestamp_ns: u64,       // Monotonic nanoseconds when trigger created
+}
 
-We walked through DNS / HTTP header inspection and determined:
+pub enum Side { Buy, Sell }
+pub enum OrderType { GTC, GTD, FOK, FAK }
 
-### DNS results
+// === Market data snapshot (Session 2 defines, Session 3 consumes) ===
+pub struct OrderBookSnapshot {
+    pub asset_id: String,
+    pub best_bid: Option<PriceLevel>,
+    pub best_ask: Option<PriceLevel>,
+    pub timestamp_ms: u64,
+    pub hash: String,
+}
 
-Returned A records:
+pub struct PriceLevel {
+    pub price: String,
+    pub size: String,
+}
 
-* `104.18.34.205`
-* `172.64.153.51`
-
-Returned AAAA records:
-
-* `2a06:98c1:3104::6812:22cd`
-* `2a06:98c1:3100::ac40:9933`
-
-These IP ranges are consistent with **Cloudflare**.
-
-### DNS trace
-
-The DNS trace showed:
-
-* `polymarket.com` uses Cloudflare nameservers:
-
-  * `logan.ns.cloudflare.com`
-  * `fatima.ns.cloudflare.com`
-
-### HTTP headers
-
-Response headers included:
-
-* `server: cloudflare`
-* `cf-ray: ...-EWR`
-* `alt-svc: h3=":443"; ma=86400`
-
-This tells us:
-
-1. **Cloudflare is in front of the endpoint**
-2. The specific edge POP reached from the user’s location was **EWR** (Newark)
-3. The endpoint supports:
-
-   * **HTTP/2**
-   * advertises **HTTP/3 (QUIC)**
-
-### TLS / curl verbose results
-
-The connection showed:
-
-* TLS 1.3
-* HTTP/2 negotiated via ALPN
-* Cloudflare front door
-* certificate SAN matched `*.polymarket.com`
-
-### Important conclusion
-
-Because the endpoint is behind **Cloudflare**, the externally visible “location” is **Cloudflare’s edge**, not the hidden origin server.
-
-That means:
-
-* We generally **cannot reliably determine the true origin region**
-* For racing purposes, the meaningful target is **Cloudflare’s ingress POP**, which in this case is **EWR**
+// === Timestamp record (Session 1 defines, all use for observability) ===
+pub struct TimestampRecord {
+    pub t_trigger_rx: u64,
+    pub t_exec_start: u64,
+    pub t_write_begin: u64,
+    pub t_write_end: u64,
+    pub t_first_resp_byte: u64,
+    pub t_headers_done: u64,
+    pub is_reconnect: bool,
+    pub cf_ray_pop: String,
+}
+```
 
 ---
 
-## What This Means Strategically
-
-Since `clob.polymarket.com` is Cloudflare-fronted and your requests from the NYC/Hoboken area hit:
-
-* **Cloudflare POP: EWR (Newark)**
-
-the race is effectively:
-
-> Who gets bytes into Cloudflare EWR first?
-
-Not:
-
-> Who gets to the hidden origin first?
-
-So the competition is likely happening at the same Cloudflare edge.
-
-That means the winners are determined by:
-
-1. local network path to EWR
-2. whether their outbound connection is already warm
-3. whether their system has queueing/GC/scheduler delays
-4. whether they use h2/h3 efficiently
-5. only marginally, the language runtime
-
----
-
-## Measured Timing Data
-
-You ran timing probes and got repeated results like:
-
-* `cf-ray: ...-EWR`
-* `time_connect ≈ 18ms–36ms`
-* `time_appconnect ≈ 44ms–82ms`
-* `time_starttransfer ≈ 145ms–225ms`
-* `time_total ≈ 145ms–225ms`
-
-### Approximate interpretation
-
-* **TCP connect:** ~20–30ms
-* **TLS handshake included in appconnect:** total appconnect ~45–80ms
-* **TTFB / total:** ~145–225ms
-
-### Critical insight
-
-These measurements were paying cold-path setup costs on every request:
-
-* DNS resolution
-* TCP handshake
-* TLS handshake
-* ALPN negotiation
-* initial HTTP/2 setup
-
-That means the current benchmark is **not representative of a race-optimized production path**.
-
-### Most important observation
-
-A large chunk of the current time is being spent *before* the actual request payload is meaningfully in flight.
-
-Roughly:
-
-* ~60ms+ is being lost to connection establishment / TLS
-
-This is huge in a race scenario.
-
----
-
-## What Must Change for Production
-
-### 1) Keep outbound connections permanently warm
-
-The hottest requirement is:
-
-> When `EXECUTE_YES` arrives, the system should already have an established socket to the target.
-
-That means:
-
-* long-lived shared HTTP client
-* keep-alives enabled
-* no client recreation per request
-* persistent HTTP/2 connection(s)
-* ideally pre-warmed on startup
-
-The execution path should feel like:
-
-* receive trigger
-* write bytes immediately to an already-open stream/socket
-
-### Why this matters
-
-If you eliminate per-request connect + TLS:
-
-* you can likely remove ~60–80ms of avoidable latency
-
-This is the biggest immediately controllable win.
-
----
-
-## Estimated Effect of Connection Reuse
-
-Given the measured cold timings, a warmed persistent HTTP/2 connection likely changes the rough profile from:
-
-* **~180–220ms cold path**
-
-to something more like:
-
-* **~110–140ms** (rough estimate)
-
-Exact numbers require measurement with a real persistent client, but the principle is clear:
-
-* **connection reuse is mandatory**
-
----
-
-## HTTP/2 / HTTP/3 Notes
-
-### HTTP/2
-
-The endpoint negotiated HTTP/2 successfully.
-
-This is good because:
-
-* one connection can carry many requests
-* reduced connection churn
-* good fit for persistent warm sessions
-
-### HTTP/3
-
-Cloudflare advertises:
-
-* `alt-svc: h3=":443"`
-
-So HTTP/3 / QUIC is available.
-
-Potential benefits:
-
-* lower handshake overhead in some scenarios
-* better behavior under packet loss / jitter
-* possibly lower tail latency
-
-It is worth benchmarking, but the benefit is situational.
-
----
-
-## IPv4 vs IPv6
-
-The verbose curl output showed that the client connected over **IPv6** first and succeeded.
-
-That suggests:
-
-* IPv6 is available end-to-end
-* it may be competitive or better than IPv4 for this path
-
-Action item:
-
-* benchmark **IPv4 vs IPv6**
-* force the faster/more stable path in production if needed
-
----
-
-## Practical “Win the Race” Priorities
-
-### Highest-priority technical optimizations
-
-1. **Dedicated execution-only service / hot path**
-
-   * no shared queue with unrelated work
-   * no low-priority tasks interfering
-
-2. **Persistent warm HTTP/2 connection(s)**
-
-   * zero handshake at trigger time
-
-3. **Deploy on the best network path to Cloudflare EWR**
-
-   * not just “close geographically”
-   * actually benchmark path quality / RTT
-
-4. **Keep the hot path tiny**
-
-   * no DB
-   * no blocking I/O
-   * no extra services
-   * no heavy serialization
-   * no synchronous logging
-
-5. **Minimize jitter**
-
-   * avoid noisy neighbors
-   * avoid burstable CPU if possible
-   * pin enough CPU
-   * reduce lock contention / allocation churn
-
-6. **Benchmark HTTP/3 and v4/v6**
-
-   * only keep what wins in measurement
-
----
-
-## Deployment Guidance
-
-Because the current observed Cloudflare POP is **EWR**, deployment should be tested for lowest-latency routing into that POP.
-
-Candidate ideas that were discussed:
-
-* AWS `us-east-1`
-* NYC/NJ-adjacent providers / POPs
-* providers with strong East Coast routing
-
-Important nuance:
-
-* the “closest cloud region” is not always the best network path
-* the correct choice is determined by **measuring cf-ray POP + RTT + connect time**
-
-The best deployment target is whichever location consistently gives:
-
-* the same optimal POP (EWR or another favorable nearby POP)
-* the lowest `time_connect`
-* the lowest jitter
-
----
-
-## Benchmarking Guidance
-
-To compare candidate environments, use repeated probes that capture:
-
-* the `cf-ray` value (to identify POP)
-* `time_connect`
-* `time_appconnect`
-* `time_starttransfer`
-* `time_total`
-
-The suggested probe loop was:
-
-* request headers
-* extract `cf-ray`
-* record curl timing breakdown
-* repeat multiple times
-
-This lets you compare:
-
-* which POP each region hits
-* how much handshake cost there is
-* whether the path is stable
-* whether you’re actually closer (in practice) to the Cloudflare edge
-
----
-
-## What Actually Determines the Winner
-
-For this endpoint, the likely ranking is:
-
-1. **Who writes to a pre-established socket first**
-2. **Who has the cleanest / shortest path to Cloudflare EWR**
-3. **Who avoids internal scheduling / queueing delays**
-4. **Who has lower runtime jitter**
-5. **Then** language/runtime choice
-
-This is why the core conclusion was:
-
-* **Infra/path dominates**
-* **Language matters only at the margin once the network path is optimized**
-
----
-
-## Recommended Execution Stack
-
-### Best default
-
-For the critical “EXECUTE_YES” path:
-
-* **Go**
-* shared long-lived `http.Client`
-* tuned transport
-* persistent HTTP/2
-* pre-warmed connections
-* dedicated low-jitter process
-
-### If pushing harder
-
-If optimizing the last few ms / p99:
-
-* consider **Rust** for tighter jitter and lower runtime overhead
-
-### Avoid for hot path
-
-* **Python** for the critical race path, unless there is a strong reason and careful discipline
-
----
-
-## Final Mental Model
-
-The correct mental model is:
-
-* The external endpoint (`clob.polymarket.com`) is **Cloudflare-fronted**
-* From the observed location, requests land at **Cloudflare EWR**
-* The real competition is to **reach Cloudflare EWR first**
-* The biggest technical edge comes from:
-
-  * **warm persistent connections**
-  * **minimal internal latency**
-  * **best network path to EWR**
-* Go is the practical default for the execution service; Rust is the high-performance refinement option
-
----
-
-## Immediate Next Technical Planning Steps
-
-A good technical plan should focus on:
-
-1. Build a **dedicated execution service** (not mixed with general workloads)
-2. Use **Go** for the hot path
-3. Maintain **always-warm HTTP/2 connections** to `clob.polymarket.com`
-4. Benchmark:
-
-   * HTTP/2 vs HTTP/3
-   * IPv4 vs IPv6
-   * multiple deployment regions/providers
-5. Choose the deployment environment with the best **connect time + jitter + POP routing**
-6. Measure true production behavior using:
-
-   * persistent client
-   * real trigger simulation
-   * no cold-start handshake cost
-7. Optimize the hot path to:
-
-   * parse trigger
-   * sign/auth
-   * write request immediately
-   * avoid all unnecessary work before send
-
-# Low-Latency Execution Service: Technical Implementation Brief
-
-## Objective
-
-Build a dedicated execution service whose job is to win a race to the external API ingress.
-
-The real requirement is not "make the API respond in under 100 ms." The real requirement is:
-
-- an internal trigger such as `EXECUTE_YES` arrives,
-- other systems may receive the same trigger,
-- we cannot control the vendor's origin processing time,
-- we want our request to arrive at the vendor edge before competing requests.
-
-The primary KPI is therefore:
-
-- **trigger received -> first request bytes handed to the kernel**
-
-Secondary KPIs:
-
-- **request write complete -> first response byte observed**
-- **end-to-end TTFB over a warm connection**
-- **p99 and p99.9 jitter**
-
-## What We Learned About the Target Endpoint
-
-The tested endpoint was:
-
-- `https://clob.polymarket.com`
-
-From DNS and header inspection:
-
-- the hostname resolves to Cloudflare IP space,
-- `server: cloudflare` is present,
-- `cf-ray: ...-EWR` shows the observed edge POP is **EWR** (Newark),
-- the endpoint negotiates **HTTP/2**,
-- the endpoint advertises **HTTP/3** via `alt-svc: h3=":443"`,
-- both IPv4 and IPv6 are available.
-
-Practical consequence:
-
-- the real race target is **Cloudflare EWR**, not the hidden origin,
-- the main question is who gets bytes into Cloudflare EWR first,
-- network path and connection reuse matter more than language until the big millisecond losses are removed.
-
-## Measured Baseline (Cold Path)
-
-Observed repeated probe timings from the current environment:
-
-- `time_connect`: about 18 ms to 36 ms
-- `time_appconnect`: about 44 ms to 82 ms
-- `time_starttransfer`: about 145 ms to 225 ms
-- `time_total`: about 145 ms to 225 ms
-
-Interpretation:
-
-- cold requests are paying TCP connect,
-- cold requests are paying TLS handshake,
-- cold requests are paying ALPN / initial protocol setup,
-- a large avoidable chunk of latency is happening before the hot request is truly in flight.
-
-This means the current probe is useful as a baseline, but it is **not** representative of a race-optimized production path.
-
-## Key Design Principle
-
-The hot path must not pay these costs at trigger time:
-
-- DNS lookup
-- TCP handshake
-- TLS handshake
-- ALPN negotiation
-- client construction
-- dynamic request assembly
-- queueing behind unrelated work
-
-The production path should look like:
-
-1. trigger arrives
-2. execution thread selects an already-warm connection
-3. minimal request bytes are patched into a prebuilt template
-4. bytes are written immediately
-
-## Recommended Architecture
-
-## 1) Split Control Plane and Execution Plane
-
-### Control Plane
-Can be implemented in any language. It handles:
-
-- strategy
-- orchestration
-- configuration
-- telemetry aggregation
-- deployment management
-
-### Execution Plane
-This is the latency-critical component. Its only job:
-
-1. receive `EXECUTE_YES`
-2. map to a prebuilt request template
-3. write request bytes on a warm connection immediately
-
-The execution plane should avoid:
-
-- databases
-- downstream service calls
-- disk I/O
-- heavy logging
-- large dynamic allocations
-- large JSON serialization work
-
-## 2) Language Choice
-
-### Primary recommendation: C++ for the hot executor
-
-Because every microsecond matters and you explicitly want to pursue the last-mile edge, **C++ is a defensible first choice for the hot execution lane**.
-
-Why C++ is reasonable here:
-
-- maximum control over memory layout,
-- maximum control over allocation behavior,
-- tight control over sockets, event loop, and TLS interaction,
-- easier to build a very small transport-oriented process with minimal abstraction overhead.
-
-### Important nuance
-
-C++ does **not automatically** beat a very well-tuned Rust implementation.
-
-The right way to think about it:
-
-- C++ can beat a typical Rust implementation if we exploit lower-level control aggressively.
-- A best-in-class Rust implementation may be very close.
-- The biggest gains are still likely to come from connection reuse, routing, and jitter reduction first.
-
-### Decision rule
-
-- Start with **C++** for the hot executor.
-- Build a fair Rust comparison harness later.
-- Keep C++ only if it wins by a meaningful p99 / p99.9 margin in the real deployment path.
-
-## 3) Trigger Ingress
-
-Preferred hot-path ingress order:
-
-1. in-process function call
-2. shared memory with lock-free ring buffer
-3. Unix domain socket
-4. direct TCP from local strategy process
-5. general-purpose broker only if operationally required
-
-If control and execution are separate processes on the same machine:
-
-- use a fixed binary message format,
-- use a single-producer / single-consumer ring buffer if possible,
-- avoid general broker hops in the hot path.
-
-## 4) Connection Manager
-
-This is the most important module.
+## SESSION 1: Rust RTT Core Executor
+
+**Branch**: `rust-rtt-core`
+**Goal**: Port the C++ hot executor to Rust with equivalent or better performance.
+
+### Context for the agent
+Read the C++ implementation at ~/Desktop/claude-plan-claude-impl/ for architecture
+reference. Key files: src/connection/*, src/executor/*, src/benchmark/*, src/main.cpp.
+The C++ version achieves ~8us trigger-to-wire on warm connections.
 
 ### Requirements
-Maintain always-warm outbound sessions to `clob.polymarket.com`:
+1. Cargo workspace with crates: `rtt-core`, `rtt-bench`
+2. Warm HTTP/2 connection pool to clob.polymarket.com (2 connections)
+   - Use hyper + hyper-tls or reqwest with connection pooling
+   - TCP_NODELAY, TLS 1.3, ALPN h2
+3. Lock-free SPSC channel for trigger delivery (crossbeam or custom)
+4. Pre-built request template with zero-allocation patching
+5. Monotonic nanosecond timestamps (std::time::Instant)
+6. TimestampRecord with all 8 checkpoints and 7 derived metrics
+7. Percentile stats aggregator (p50/p95/p99/p99.9)
+8. Benchmark CLI with three modes: single-shot, random-cadence, burst-race
+9. IPv4/IPv6 forced path selection
+10. cf-ray POP extraction from response headers
+11. CPU pinning (core_affinity crate, Linux only)
 
-- persistent TLS,
-- persistent HTTP/2 connections,
-- optional HTTP/3 path for benchmark comparison,
-- test both IPv4 and IPv6.
+### Success criteria
+- `cargo test` passes all tests
+- Benchmark shows trigger-to-wire <= 10us p50 on warm connection
+- cf-ray shows Cloudflare edge POP (e.g. EWR), but backend is AWS us-east-1 (IAD). TTFB includes the edge→origin hop.
+- All three benchmark modes produce valid percentile reports
 
-### Minimum production shape
+### Key Rust crates
+- hyper (HTTP/2 client)
+- hyper-tls or rustls (TLS)
+- tokio (async runtime)
+- crossbeam-channel (SPSC)
+- core_affinity (CPU pinning)
+- criterion (benchmarks)
 
-Keep at least:
-
-- 2 warm HTTP/2 connections total,
-- preferably test separate pools for:
-  - IPv4,
-  - IPv6.
-
-Why multiple warm connections:
-
-- immediate failover if one socket resets,
-- less contention in the client,
-- less sensitivity to a single stream or transport hiccup.
-
-## 5) Request Construction
-
-Precompute everything possible before any trigger arrives:
-
-- method
-- path
-- host
-- static headers
-- auth header scaffolding
-- serialized body template
-- content-length if fixed
-
-At trigger time, only patch the minimal changing fields.
-
-Hot-path rules:
-
-- no heap allocation,
-- no string concatenation,
-- no map-based header building,
-- no JSON DOM construction,
-- use fixed buffers or pooled memory,
-- use offset patching into prebuilt request templates.
-
-## 6) Threading Model
-
-Suggested simple deterministic layout:
-
-- 1 ingress thread
-- 1 or 2 execution threads
-- 1 maintenance thread
-
-### Execution threads
-Each execution thread should:
-
-- be pinned to a dedicated core,
-- own one or more outbound warm connections,
-- perform minimal work before writing bytes.
-
-### Maintenance thread
-Responsibilities:
-
-- keepalive / prewarm traffic,
-- reconnects,
-- health checks,
-- periodic POP verification,
-- metrics flush.
-
-## 7) Deployment Strategy
-
-The target edge currently appears to be **Cloudflare EWR**.
-
-Deployment should be chosen by measurement, not intuition.
-
-Candidates to test:
-
-- AWS us-east-1
-- NYC / NJ-adjacent low-latency providers
-- any provider with strong Northeast peering
-
-Choose the environment with the best:
-
-- connect time,
-- jitter,
-- packet loss profile,
-- consistency of `cf-ray` POP.
-
-## 8) Protocol Strategy
-
-Benchmark these combinations:
-
-1. HTTP/2 + IPv4
-2. HTTP/2 + IPv6
-3. HTTP/3 + IPv4
-4. HTTP/3 + IPv6
-
-Keep only what wins in real measurements.
-
-Default path should start with **HTTP/2**, because the endpoint is confirmed to accept it and it is simpler to operationalize. HTTP/3 should be treated as an optimization experiment.
-
-## 9) Observability
-
-Capture monotonic timestamps for:
-
-1. trigger received
-2. trigger accepted by execution thread
-3. request buffer ready
-4. first byte handed to socket write path
-5. write completion
-6. first response byte received
-7. full headers received
-8. `cf-ray` extracted
-
-Track:
-
-- p50 / p95 / p99 / p99.9
-- max outliers
-- reconnect count
-- socket resets
-- warm-connection hit rate
-- v4 vs v6 stats
-- H2 vs H3 stats
-- POP distribution from `cf-ray`
-
-## Suggested C++ Stack
-
-A strong first pass:
-
-- C++20 or C++23
-- Linux
-- `epoll` first, with `io_uring` only if it proves materially better
-- OpenSSL or BoringSSL
-- HTTP/2 client framing library such as `nghttp2`
-- optional HTTP/3 benchmark path using a mature QUIC / H3 stack such as quiche, msquic, or ngtcp2-based components
-
-Build approach:
-
-- `-O3`
-- LTO
-- `-march=native` where operationally safe
-- optional PGO for the hot executor
-
-Memory discipline:
-
-- preallocated buffers
-- pooled allocators if needed
-- no exceptions on the hot path if avoidable
-- lock-free SPSC queue between ingress and executor
+### Test approach
+- Unit tests for each module (timestamp, stats, queue, template)
+- Integration tests hitting clob.polymarket.com (warm connection, cf-ray)
+- Benchmark binary with CLI flags matching C++ version
 
 ---
 
-# Benchmarking Appendix: Real-World TTFB and Trigger-to-Wire Test Plan
+## SESSION 2: WebSocket Data Pipeline
 
-This appendix fills the gap in the earlier brief. It gives a concrete way for engineering to measure:
-
-- cold-path TTFB,
-- warm-path TTFB,
-- trigger-to-wire latency,
-- fair C++ vs Rust comparisons.
-
-## A. Definitions
-
-### 1) Cold-path TTFB
-A request that pays all setup costs:
-
-- DNS
-- TCP connect
-- TLS handshake
-- protocol negotiation
-- request send
-- wait for first response byte
-
-This is useful as a baseline only.
-
-### 2) Warm-path TTFB
-A request sent over an already-established, reusable connection.
-
-This is the production-relevant measurement.
-
-### 3) Trigger-to-wire
-Time from when `EXECUTE_YES` is received by the execution process to the moment the first request bytes are handed to the kernel send path.
-
-This is the most important software-side race metric.
-
-### 4) Write-to-first-byte
-Time from request write completion to the first response byte being received.
-
-This is the cleanest "real TTFB" measure once the connection is already warm.
-
-## B. Test Environment Controls
-
-Before any benchmark:
-
-- pin the test process to specific CPU cores,
-- disable unrelated noisy workloads,
-- keep the machine thermally stable,
-- ensure system clock is sane,
-- run enough samples for p99 and p99.9,
-- do not mix cold and warm requests in the same run unless explicitly testing both.
-
-Keep each benchmark run fixed for:
-
-- protocol (H2 or H3)
-- address family (v4 or v6)
-- payload shape
-- deployment region / provider
-- connection pool size
-
-## C. Quick Shell Baselines (Simple, Not Production-Grade)
-
-These are useful for operator sanity checks.
-
-### Cold-path HTTP/2 baseline
-```bash
-curl -o /dev/null -s -w 'connect=%{time_connect} appconnect=%{time_appconnect} starttransfer=%{time_starttransfer} total=%{time_total}\n' https://clob.polymarket.com
-```
-
-### Force IPv4
-```bash
-curl -4 -o /dev/null -s -w 'connect=%{time_connect} appconnect=%{time_appconnect} starttransfer=%{time_starttransfer} total=%{time_total}\n' https://clob.polymarket.com
-```
-
-### Force IPv6
-```bash
-curl -6 -o /dev/null -s -w 'connect=%{time_connect} appconnect=%{time_appconnect} starttransfer=%{time_starttransfer} total=%{time_total}\n' https://clob.polymarket.com
-```
-
-### Try HTTP/3
-```bash
-curl --http3 -o /dev/null -s -w 'connect=%{time_connect} appconnect=%{time_appconnect} starttransfer=%{time_starttransfer} total=%{time_total}\n' https://clob.polymarket.com
-```
-
-### Capture POP and timing together
-```bash
-for i in {1..20}; do
-  ray=$(curl -sI https://clob.polymarket.com | awk -F': ' 'tolower($1)=="cf-ray"{print $2}' | tr -d '\r')
-  t=$(curl -o /dev/null -s -w 'connect=%{time_connect} appconnect=%{time_appconnect} starttransfer=%{time_starttransfer} total=%{time_total}' https://clob.polymarket.com)
-  echo "$ray  $t"
-done
-```
-
-Important: these shell tests are still mostly cold-path checks. They are **not enough** to validate the production race path.
-
-## D. Production-Relevant Warm-Path Test Harness
-
-Engineering should build a dedicated benchmark mode into the executor.
-
-### Harness requirements
-
-The harness must:
-
-1. create and fully establish the outbound connection(s),
-2. confirm the connection is warm,
-3. keep the connection alive,
-4. inject synthetic triggers at controlled times,
-5. record nanosecond timestamps for every step,
-6. repeat enough times to compute tail latency.
-
-### Critical rule
-
-Warm-path tests must **not reconnect between samples**.
-
-If a reconnect happens, mark that sample separately and do not mix it into the warm steady-state distribution.
-
-## E. Exact Timestamps to Record Per Request
-
-For each trigger, record:
-
-- `t_trigger_rx`: trigger received by executor
-- `t_dispatch_q`: trigger placed on execution queue (if any)
-- `t_exec_start`: execution thread begins processing
-- `t_buf_ready`: request buffer fully patched and ready
-- `t_write_begin`: first call into the send/write path
-- `t_write_end`: request write completed for the hot path
-- `t_first_resp_byte`: first response byte received
-- `t_headers_done`: full response headers parsed
-
-Derived metrics:
-
-- `queue_delay = t_exec_start - t_trigger_rx`
-- `prep_time = t_buf_ready - t_exec_start`
-- `trigger_to_wire = t_write_begin - t_trigger_rx`
-- `write_duration = t_write_end - t_write_begin`
-- `write_to_first_byte = t_first_resp_byte - t_write_end`
-- `warm_ttfb = t_first_resp_byte - t_write_begin`
-- `trigger_to_first_byte = t_first_resp_byte - t_trigger_rx`
-
-## F. Clocking Guidance
-
-Use a monotonic high-resolution clock only.
-
-Recommended choices:
-
-- `clock_gettime(CLOCK_MONOTONIC_RAW, ...)` on Linux, or
-- `std::chrono::steady_clock` only if verified to map to a stable monotonic source with enough precision.
-
-Do **not** use wall-clock time for latency measurement.
-
-## G. Warm-Path Benchmark Procedure
-
-### Test 1: Single warm connection steady-state
-
-Purpose:
-
-- measure the minimum realistic hot-path latency for one established connection.
-
-Procedure:
-
-1. start executor
-2. establish exactly 1 H2 connection
-3. send a harmless warm-up request and confirm headers received
-4. wait for a stable idle state
-5. inject N synthetic triggers (example: 10,000) at randomized intervals to avoid artificial batching
-6. record all timestamps
-7. discard samples where reconnect occurred
-8. compute p50 / p95 / p99 / p99.9 for:
-   - trigger_to_wire
-   - write_to_first_byte
-   - trigger_to_first_byte
-
-### Test 2: Dual warm connections steady-state
-
-Purpose:
-
-- see whether two prewarmed connections reduce contention and tail risk.
-
-Procedure:
-
-Same as Test 1, but keep exactly 2 warm connections and route requests according to a deterministic strategy:
-
-- round-robin,
-- per-thread ownership,
-- or connection affinity per executor thread.
-
-Compare against the single-connection result.
-
-### Test 3: Protocol bake-off
-
-Run the exact same harness for:
-
-- H2 + v4
-- H2 + v6
-- H3 + v4
-- H3 + v6
-
-All other conditions must remain identical.
-
-Decision rule:
-
-- keep the protocol and address family with the best p99 / p99.9 `trigger_to_first_byte`,
-- but only if reconnect behavior and operational stability are acceptable.
-
-## H. Realistic Trigger Injection
-
-Do not benchmark with a tight naive loop that fires triggers as fast as possible unless you are specifically measuring saturation behavior.
-
-Instead, benchmark at least three modes:
-
-### Mode 1: Isolated single-shot
-- one trigger
-- long idle before and after
-- measures near-best-case hot-path behavior
-
-### Mode 2: Randomized live cadence
-- randomized inter-arrival (for example 50 ms to 500 ms jittered)
-- best approximation of real event-driven behavior
-
-### Mode 3: Burst race mode
-- short bursts (for example 2 to 20 triggers close together)
-- validates contention and queue behavior under pressure
-
-## I. Fair C++ vs Rust Comparison Plan
-
-To compare C++ and Rust honestly, both implementations must be held constant on everything except implementation language.
-
-Keep identical:
-
-- host machine
-- kernel version
-- CPU pinning
-- deployment provider and region
-- protocol (same H2 or H3 choice)
-- address family (same v4 or v6 choice)
-- connection count
-- payload size and shape
-- auth logic
-- test duration
-- trigger pattern
-
-Compare on:
-
-- p50 / p95 / p99 / p99.9 trigger_to_wire
-- p50 / p95 / p99 / p99.9 write_to_first_byte
-- reconnect rate
-- max outlier latency
-- CPU utilization per request
-- allocation count in the hot path
-
-### The only comparison that matters
-
-If C++ is faster in synthetic microbenchmarks but not meaningfully faster in:
-
-- p99 trigger_to_wire, or
-- p99 trigger_to_first_byte
-
-then the extra complexity may not be justified.
-
-## J. Minimal Logging Rules During Benchmarks
-
-During hot-path benchmarks:
-
-- do not emit synchronous logs on every request,
-- do not print per-request debug lines to stdout,
-- store timestamps in memory,
-- flush aggregated results after the run.
-
-If per-request traces are needed, enable them for a small sampled subset only.
-
-## K. What Success Looks Like
-
-A successful implementation should show:
-
-1. **near-zero setup cost on warm samples**
-   - warm requests must not look like cold `curl` requests
-2. **very low and stable trigger-to-wire latency**
-3. **tight p99 / p99.9 distributions**
-4. **minimal reconnects**
-5. **clear measured winner for H2/H3 and v4/v6**
-6. **clear measured answer on whether C++ meaningfully beats Rust in the real path**
-
-## L. Immediate Engineering Tasks
-
-1. Build the minimal C++ hot executor.
-2. Implement benchmark mode with the timestamp points listed above.
-3. Add persistent H2 warm connections first.
-4. Run steady-state warm-path tests.
-5. Run v4 vs v6 comparisons.
-6. Run H2 vs H3 comparisons.
-7. Test from multiple deployment environments targeting the best route to Cloudflare EWR.
-8. Build a functionally equivalent Rust harness only after the C++ baseline is stable.
-9. Keep C++ only if it wins by a real p99 / p99.9 margin in the production-like benchmark.
-
-## Bottom Line
-
-For this project:
-
-- the race is to **Cloudflare EWR**,
-- the biggest wins are **warm connections, route quality, and jitter control**,
-- C++ is a valid choice for the hot executor because you want to chase the last microseconds,
-- but the final C++ vs Rust decision must be made using the warm-path benchmark harness above, not by intuition.
-
-# Low-Latency Execution Service: Technical Implementation Brief
-
-## Objective
-
-Build a dedicated execution service whose job is to win a race to the external API ingress.
-
-The real requirement is not "make the API respond in under 100 ms." The real requirement is:
-
-- an internal trigger such as `EXECUTE_YES` arrives,
-- other systems may receive the same trigger,
-- we cannot control the vendor's origin processing time,
-- we want our request to arrive at the vendor edge before competing requests.
-
-The primary KPI is therefore:
-
-- **trigger received -> first request bytes handed to the kernel**
-
-Secondary KPIs:
-
-- **request write complete -> first response byte observed**
-- **end-to-end TTFB over a warm connection**
-- **p99 and p99.9 jitter**
-
-## What We Learned About the Target Endpoint
-
-The tested endpoint was:
-
-- `https://clob.polymarket.com`
-
-From DNS and header inspection:
-
-- the hostname resolves to Cloudflare IP space,
-- `server: cloudflare` is present,
-- `cf-ray: ...-EWR` shows the observed edge POP is **EWR** (Newark),
-- the endpoint negotiates **HTTP/2**,
-- the endpoint advertises **HTTP/3** via `alt-svc: h3=":443"`,
-- both IPv4 and IPv6 are available.
-
-Practical consequence:
-
-- the real race target is **Cloudflare EWR**, not the hidden origin,
-- the main question is who gets bytes into Cloudflare EWR first,
-- network path and connection reuse matter more than language until the big millisecond losses are removed.
-
-## Measured Baseline (Cold Path)
-
-Observed repeated probe timings from the current environment:
-
-- `time_connect`: about 18 ms to 36 ms
-- `time_appconnect`: about 44 ms to 82 ms
-- `time_starttransfer`: about 145 ms to 225 ms
-- `time_total`: about 145 ms to 225 ms
-
-Interpretation:
-
-- cold requests are paying TCP connect,
-- cold requests are paying TLS handshake,
-- cold requests are paying ALPN / initial protocol setup,
-- a large avoidable chunk of latency is happening before the hot request is truly in flight.
-
-This means the current probe is useful as a baseline, but it is **not** representative of a race-optimized production path.
-
-## Key Design Principle
-
-The hot path must not pay these costs at trigger time:
-
-- DNS lookup
-- TCP handshake
-- TLS handshake
-- ALPN negotiation
-- client construction
-- dynamic request assembly
-- queueing behind unrelated work
-
-The production path should look like:
-
-1. trigger arrives
-2. execution thread selects an already-warm connection
-3. minimal request bytes are patched into a prebuilt template
-4. bytes are written immediately
-
-## Recommended Architecture
-
-## 1) Split Control Plane and Execution Plane
-
-### Control Plane
-Can be implemented in any language. It handles:
-
-- strategy
-- orchestration
-- configuration
-- telemetry aggregation
-- deployment management
-
-### Execution Plane
-This is the latency-critical component. Its only job:
-
-1. receive `EXECUTE_YES`
-2. map to a prebuilt request template
-3. write request bytes on a warm connection immediately
-
-The execution plane should avoid:
-
-- databases
-- downstream service calls
-- disk I/O
-- heavy logging
-- large dynamic allocations
-- large JSON serialization work
-
-## 2) Language Choice
-
-### Primary recommendation: C++ for the hot executor
-
-Because every microsecond matters and you explicitly want to pursue the last-mile edge, **C++ is a defensible first choice for the hot execution lane**.
-
-Why C++ is reasonable here:
-
-- maximum control over memory layout,
-- maximum control over allocation behavior,
-- tight control over sockets, event loop, and TLS interaction,
-- easier to build a very small transport-oriented process with minimal abstraction overhead.
-
-### Important nuance
-
-C++ does **not automatically** beat a very well-tuned Rust implementation.
-
-The right way to think about it:
-
-- C++ can beat a typical Rust implementation if we exploit lower-level control aggressively.
-- A best-in-class Rust implementation may be very close.
-- The biggest gains are still likely to come from connection reuse, routing, and jitter reduction first.
-
-### Decision rule
-
-- Start with **C++** for the hot executor.
-- Build a fair Rust comparison harness later.
-- Keep C++ only if it wins by a meaningful p99 / p99.9 margin in the real deployment path.
-
-## 3) Trigger Ingress
-
-Preferred hot-path ingress order:
-
-1. in-process function call
-2. shared memory with lock-free ring buffer
-3. Unix domain socket
-4. direct TCP from local strategy process
-5. general-purpose broker only if operationally required
-
-If control and execution are separate processes on the same machine:
-
-- use a fixed binary message format,
-- use a single-producer / single-consumer ring buffer if possible,
-- avoid general broker hops in the hot path.
-
-## 4) Connection Manager
-
-This is the most important module.
+**Branch**: `ws-data-pipeline`
+**Goal**: Maintain a real-time local order book from Polymarket WebSocket feeds.
 
 ### Requirements
-Maintain always-warm outbound sessions to `clob.polymarket.com`:
+1. Cargo crate: `pm-data`
+2. Connect to `wss://ws-subscriptions-clob.polymarket.com/ws/market`
+3. Subscribe to configurable list of asset_ids
+4. Handle all market channel events:
+   - `book` (full snapshot)
+   - `price_change` (delta updates)
+   - `last_trade_price`
+   - `tick_size_change`
+   - `best_bid_ask`
+5. Maintain in-memory order book per subscribed asset
+6. Validate order book hash to detect missed updates
+7. Auto-reconnect on disconnect with re-subscribe
+8. PING every 10 seconds for keepalive
+9. Expose order book state via a thread-safe read interface
+10. Optional: User WebSocket channel for trade lifecycle tracking
 
-- persistent TLS,
-- persistent HTTP/2 connections,
-- optional HTTP/3 path for benchmark comparison,
-- test both IPv4 and IPv6.
+### Shared interface
+- Produce `OrderBookSnapshot` and `PriceLevel` types (see contracts above)
+- Expose a channel or callback that the strategy layer can subscribe to
 
-### Minimum production shape
+### Success criteria
+- `cargo test` passes
+- Integration test: connect, subscribe to a real market, receive book snapshot
+- Order book updates correctly on price_change events
+- Reconnects cleanly after simulated disconnect
+- Keepalive PING works (no timeout disconnects over 60+ seconds)
 
-Keep at least:
+### Key Rust crates
+- tokio-tungstenite (WebSocket client)
+- serde / serde_json (message parsing)
+- tokio (async runtime)
+- dashmap or RwLock<HashMap> (concurrent order book)
 
-- 2 warm HTTP/2 connections total,
-- preferably test separate pools for:
-  - IPv4,
-  - IPv6.
-
-Why multiple warm connections:
-
-- immediate failover if one socket resets,
-- less contention in the client,
-- less sensitivity to a single stream or transport hiccup.
-
-## 5) Request Construction
-
-Precompute everything possible before any trigger arrives:
-
-- method
-- path
-- host
-- static headers
-- auth header scaffolding
-- serialized body template
-- content-length if fixed
-
-At trigger time, only patch the minimal changing fields.
-
-Hot-path rules:
-
-- no heap allocation,
-- no string concatenation,
-- no map-based header building,
-- no JSON DOM construction,
-- use fixed buffers or pooled memory,
-- use offset patching into prebuilt request templates.
-
-## 6) Threading Model
-
-Suggested simple deterministic layout:
-
-- 1 ingress thread
-- 1 or 2 execution threads
-- 1 maintenance thread
-
-### Execution threads
-Each execution thread should:
-
-- be pinned to a dedicated core,
-- own one or more outbound warm connections,
-- perform minimal work before writing bytes.
-
-### Maintenance thread
-Responsibilities:
-
-- keepalive / prewarm traffic,
-- reconnects,
-- health checks,
-- periodic POP verification,
-- metrics flush.
-
-## 7) Deployment Strategy
-
-The target edge currently appears to be **Cloudflare EWR**.
-
-Deployment should be chosen by measurement, not intuition.
-
-Candidates to test:
-
-- AWS us-east-1
-- NYC / NJ-adjacent low-latency providers
-- any provider with strong Northeast peering
-
-Choose the environment with the best:
-
-- connect time,
-- jitter,
-- packet loss profile,
-- consistency of `cf-ray` POP.
-
-## 8) Protocol Strategy
-
-Benchmark these combinations:
-
-1. HTTP/2 + IPv4
-2. HTTP/2 + IPv6
-3. HTTP/3 + IPv4
-4. HTTP/3 + IPv6
-
-Keep only what wins in real measurements.
-
-Default path should start with **HTTP/2**, because the endpoint is confirmed to accept it and it is simpler to operationalize. HTTP/3 should be treated as an optimization experiment.
-
-## 9) Observability
-
-Capture monotonic timestamps for:
-
-1. trigger received
-2. trigger accepted by execution thread
-3. request buffer ready
-4. first byte handed to socket write path
-5. write completion
-6. first response byte received
-7. full headers received
-8. `cf-ray` extracted
-
-Track:
-
-- p50 / p95 / p99 / p99.9
-- max outliers
-- reconnect count
-- socket resets
-- warm-connection hit rate
-- v4 vs v6 stats
-- H2 vs H3 stats
-- POP distribution from `cf-ray`
-
-## Suggested C++ Stack
-
-A strong first pass:
-
-- C++20 or C++23
-- Linux
-- `epoll` first, with `io_uring` only if it proves materially better
-- OpenSSL or BoringSSL
-- HTTP/2 client framing library such as `nghttp2`
-- optional HTTP/3 benchmark path using a mature QUIC / H3 stack such as quiche, msquic, or ngtcp2-based components
-
-Build approach:
-
-- `-O3`
-- LTO
-- `-march=native` where operationally safe
-- optional PGO for the hot executor
-
-Memory discipline:
-
-- preallocated buffers
-- pooled allocators if needed
-- no exceptions on the hot path if avoidable
-- lock-free SPSC queue between ingress and executor
+### Data flow
+```
+WebSocket → parse JSON → update local order book → notify strategy via channel
+```
 
 ---
 
-# Benchmarking Appendix: Real-World TTFB and Trigger-to-Wire Test Plan
+## SESSION 3: Strategy Framework
 
-This appendix fills the gap in the earlier brief. It gives a concrete way for engineering to measure:
+**Branch**: `strategy-framework`
+**Goal**: Build a pluggable strategy engine that consumes market data and emits triggers.
 
-- cold-path TTFB,
-- warm-path TTFB,
-- trigger-to-wire latency,
-- fair C++ vs Rust comparisons.
+### Requirements
+1. Cargo crate: `pm-strategy`
+2. Define a Strategy trait:
+   ```rust
+   pub trait Strategy: Send + Sync {
+       fn on_book_update(&mut self, snapshot: &OrderBookSnapshot) -> Option<TriggerMessage>;
+       fn on_trade(&mut self, trade: &TradeEvent) -> Option<TriggerMessage>;
+       fn name(&self) -> &str;
+   }
+   ```
+3. Implement at least two example strategies:
+   - `ThresholdStrategy`: fires when best_bid or best_ask crosses a configured price
+   - `SpreadStrategy`: fires when spread narrows below a threshold
+4. Strategy runner that:
+   - Receives OrderBookSnapshot from a channel (produced by Session 2)
+   - Calls the active strategy
+   - If trigger returned, sends TriggerMessage to executor channel (consumed by Session 1)
+5. Configuration via TOML or JSON:
+   - Which strategy to use
+   - Strategy-specific parameters
+   - Target asset_id / token_id
+   - Order parameters (side, size, order_type)
+6. Backtesting mode: replay saved order book snapshots through strategy
 
-## A. Definitions
+### Shared interface
+- Consumes `OrderBookSnapshot` (from Session 2)
+- Produces `TriggerMessage` (consumed by Session 1)
 
-### 1) Cold-path TTFB
-A request that pays all setup costs:
+### Success criteria
+- `cargo test` passes
+- ThresholdStrategy correctly fires trigger at configured price
+- SpreadStrategy correctly fires trigger at configured spread
+- Strategy runner processes a sequence of mock snapshots
+- Config loads from TOML file
 
-- DNS
-- TCP connect
-- TLS handshake
-- protocol negotiation
-- request send
-- wait for first response byte
+### Key Rust crates
+- tokio (async channels)
+- serde / toml (config)
+- chrono (timestamps for backtesting)
 
-This is useful as a baseline only.
+---
 
-### 2) Warm-path TTFB
-A request sent over an already-established, reusable connection.
+## SESSION 4: CLOB Order Integration
 
-This is the production-relevant measurement.
+**Branch**: `clob-order-integration`
+**Depends on**: Session 1 (rust-rtt-core)
 
-### 3) Trigger-to-wire
-Time from when `EXECUTE_YES` is received by the execution process to the moment the first request bytes are handed to the kernel send path.
+**Goal**: Replace the generic GET / request with actual Polymarket order placement.
 
-This is the most important software-side race metric.
+### Context
+The Polymarket order flow requires:
+1. EIP-712 signing of order struct (secp256k1 ECDSA)
+2. HMAC-SHA256 L2 authentication headers
+3. POST to /order with signed JSON payload
 
-### 4) Write-to-first-byte
-Time from request write completion to the first response byte being received.
+### Requirements
+1. Extend rtt-core with CLOB-specific order building
+2. EIP-712 order signing:
+   - Domain: { name: "Polymarket CTF Exchange", version: "1", chainId: 137,
+     verifyingContract: <exchange_address> }
+   - Order struct: salt, maker, signer, taker, tokenId, makerAmount, takerAmount,
+     expiration, nonce, feeRateBps, side, signatureType
+   - Sign with ethers-rs or alloy (secp256k1)
+3. HMAC-SHA256 L2 auth header computation:
+   - Message = timestamp + method + path + body
+   - Key = base64-decoded API secret
+   - Result = URL-safe base64 HMAC-SHA256
+4. Build complete POST /order request:
+   - Headers: POLY_API_KEY, POLY_ADDRESS, POLY_SIGNATURE, POLY_PASSPHRASE, POLY_TIMESTAMP
+   - Body: { order: {..., signature: "0x..."}, owner: "<uuid>", orderType: "FOK" }
+5. Pre-sign optimization: sign orders for known parameters before trigger,
+   only patch salt/timestamp at trigger time
+6. Parse order response: { success, orderID, status, transactionsHashes, tradeIDs }
 
-This is the cleanest "real TTFB" measure once the connection is already warm.
+### Existing Rust SDK reference
+Check https://github.com/Polymarket/rs-clob-client for reference implementation.
+You may use it directly or extract the signing logic.
 
-## B. Test Environment Controls
+### Success criteria
+- Can construct a valid signed order payload
+- HMAC auth headers pass server validation
+- POST /order returns a valid response (test with a tiny real order or verify
+  the request format matches what the TypeScript SDK produces)
+- Pre-signed orders work correctly
+- Trigger-to-wire latency stays under 50us with signing included
 
-Before any benchmark:
+### Key Rust crates
+- alloy or ethers (EIP-712 signing, secp256k1)
+- hmac + sha2 (HMAC-SHA256)
+- base64 (secret decoding)
+- serde_json (payload serialization)
 
-- pin the test process to specific CPU cores,
-- disable unrelated noisy workloads,
-- keep the machine thermally stable,
-- ensure system clock is sane,
-- run enough samples for p99 and p99.9,
-- do not mix cold and warm requests in the same run unless explicitly testing both.
+### Critical detail for hot path
+The EIP-712 signature is the most expensive operation (~100-500us for secp256k1).
+Options to minimize impact:
+1. Pre-sign batch of orders with different salts before trigger
+2. Sign in parallel on a dedicated thread, hand signed payload to executor
+3. Accept the ~500us cost (still very fast)
 
-Keep each benchmark run fixed for:
+---
 
-- protocol (H2 or H3)
-- address family (v4 or v6)
-- payload shape
-- deployment region / provider
-- connection pool size
+## SESSION 5: Integration
 
-## C. Quick Shell Baselines (Simple, Not Production-Grade)
+**Branch**: `integration`
+**Depends on**: All other sessions complete
 
-These are useful for operator sanity checks.
+**Goal**: Merge all crates into a single workspace binary.
 
-### Cold-path HTTP/2 baseline
+### Requirements
+1. Cargo workspace: `pm-executor` (binary) depending on all crates
+2. Single binary startup flow:
+   a. Load config (credentials, target markets, strategy, connection params)
+   b. Establish warm HTTP/2 connections to clob.polymarket.com
+   c. Connect WebSocket to market data feed
+   d. Start strategy runner
+   e. Strategy emits trigger → executor fires signed order on warm connection
+3. Graceful shutdown (Ctrl+C)
+4. Logging (tracing crate) with levels: hot path = off, everything else = info
+5. Config file (TOML): credentials, markets, strategy, pool size, address family
+6. Health monitoring: connection pool health, WebSocket state, POP verification
+
+### Success criteria
+- Single `cargo run` starts the full pipeline
+- WebSocket receives market data
+- Strategy processes updates
+- When strategy fires, order is signed and sent on warm connection
+- End-to-end latency from WebSocket event to order-on-wire is measurable
+- Clean shutdown on SIGINT
+
+---
+
+## Running Sessions
+
+For each parallel session (1, 2, 3), open a terminal:
+
 ```bash
-curl -o /dev/null -s -w 'connect=%{time_connect} appconnect=%{time_appconnect} starttransfer=%{time_starttransfer} total=%{time_total}\n' https://clob.polymarket.com
+cd ~/Desktop
+mkdir pm-executor && cd pm-executor  # or wherever
+git init && git checkout -b <branch-name>
+
+claude --dangerously-skip-permissions
 ```
 
-### Force IPv4
-```bash
-curl -4 -o /dev/null -s -w 'connect=%{time_connect} appconnect=%{time_appconnect} starttransfer=%{time_starttransfer} total=%{time_total}\n' https://clob.polymarket.com
-```
+Then paste the relevant session plan above as the first message.
 
-### Force IPv6
-```bash
-curl -6 -o /dev/null -s -w 'connect=%{time_connect} appconnect=%{time_appconnect} starttransfer=%{time_starttransfer} total=%{time_total}\n' https://clob.polymarket.com
-```
+Sessions 4 and 5 run after their dependencies are complete.
 
-### Try HTTP/3
-```bash
-curl --http3 -o /dev/null -s -w 'connect=%{time_connect} appconnect=%{time_appconnect} starttransfer=%{time_starttransfer} total=%{time_total}\n' https://clob.polymarket.com
-```
+ ### Note:
+ For polymarket api related code you can go to:
+ 
+ https://docs.polymarket.com/market-data/overview
 
-### Capture POP and timing together
-```bash
-for i in {1..20}; do
-  ray=$(curl -sI https://clob.polymarket.com | awk -F': ' 'tolower($1)=="cf-ray"{print $2}' | tr -d '\r')
-  t=$(curl -o /dev/null -s -w 'connect=%{time_connect} appconnect=%{time_appconnect} starttransfer=%{time_starttransfer} total=%{time_total}' https://clob.polymarket.com)
-  echo "$ray  $t"
-done
-```
+ https://github.com/Polymarket/rs-clob-client
 
-Important: these shell tests are still mostly cold-path checks. They are **not enough** to validate the production race path.
-
-## D. Production-Relevant Warm-Path Test Harness
-
-Engineering should build a dedicated benchmark mode into the executor.
-
-### Harness requirements
-
-The harness must:
-
-1. create and fully establish the outbound connection(s),
-2. confirm the connection is warm,
-3. keep the connection alive,
-4. inject synthetic triggers at controlled times,
-5. record nanosecond timestamps for every step,
-6. repeat enough times to compute tail latency.
-
-### Critical rule
-
-Warm-path tests must **not reconnect between samples**.
-
-If a reconnect happens, mark that sample separately and do not mix it into the warm steady-state distribution.
-
-## E. Exact Timestamps to Record Per Request
-
-For each trigger, record:
-
-- `t_trigger_rx`: trigger received by executor
-- `t_dispatch_q`: trigger placed on execution queue (if any)
-- `t_exec_start`: execution thread begins processing
-- `t_buf_ready`: request buffer fully patched and ready
-- `t_write_begin`: first call into the send/write path
-- `t_write_end`: request write completed for the hot path
-- `t_first_resp_byte`: first response byte received
-- `t_headers_done`: full response headers parsed
-
-Derived metrics:
-
-- `queue_delay = t_exec_start - t_trigger_rx`
-- `prep_time = t_buf_ready - t_exec_start`
-- `trigger_to_wire = t_write_begin - t_trigger_rx`
-- `write_duration = t_write_end - t_write_begin`
-- `write_to_first_byte = t_first_resp_byte - t_write_end`
-- `warm_ttfb = t_first_resp_byte - t_write_begin`
-- `trigger_to_first_byte = t_first_resp_byte - t_trigger_rx`
-
-## F. Clocking Guidance
-
-Use a monotonic high-resolution clock only.
-
-Recommended choices:
-
-- `clock_gettime(CLOCK_MONOTONIC_RAW, ...)` on Linux, or
-- `std::chrono::steady_clock` only if verified to map to a stable monotonic source with enough precision.
-
-Do **not** use wall-clock time for latency measurement.
-
-## G. Warm-Path Benchmark Procedure
-
-### Test 1: Single warm connection steady-state
-
-Purpose:
-
-- measure the minimum realistic hot-path latency for one established connection.
-
-Procedure:
-
-1. start executor
-2. establish exactly 1 H2 connection
-3. send a harmless warm-up request and confirm headers received
-4. wait for a stable idle state
-5. inject N synthetic triggers (example: 10,000) at randomized intervals to avoid artificial batching
-6. record all timestamps
-7. discard samples where reconnect occurred
-8. compute p50 / p95 / p99 / p99.9 for:
-   - trigger_to_wire
-   - write_to_first_byte
-   - trigger_to_first_byte
-
-### Test 2: Dual warm connections steady-state
-
-Purpose:
-
-- see whether two prewarmed connections reduce contention and tail risk.
-
-Procedure:
-
-Same as Test 1, but keep exactly 2 warm connections and route requests according to a deterministic strategy:
-
-- round-robin,
-- per-thread ownership,
-- or connection affinity per executor thread.
-
-Compare against the single-connection result.
-
-### Test 3: Protocol bake-off
-
-Run the exact same harness for:
-
-- H2 + v4
-- H2 + v6
-- H3 + v4
-- H3 + v6
-
-All other conditions must remain identical.
-
-Decision rule:
-
-- keep the protocol and address family with the best p99 / p99.9 `trigger_to_first_byte`,
-- but only if reconnect behavior and operational stability are acceptable.
-
-## H. Realistic Trigger Injection
-
-Do not benchmark with a tight naive loop that fires triggers as fast as possible unless you are specifically measuring saturation behavior.
-
-Instead, benchmark at least three modes:
-
-### Mode 1: Isolated single-shot
-- one trigger
-- long idle before and after
-- measures near-best-case hot-path behavior
-
-### Mode 2: Randomized live cadence
-- randomized inter-arrival (for example 50 ms to 500 ms jittered)
-- best approximation of real event-driven behavior
-
-### Mode 3: Burst race mode
-- short bursts (for example 2 to 20 triggers close together)
-- validates contention and queue behavior under pressure
-
-## I. Fair C++ vs Rust Comparison Plan
-
-To compare C++ and Rust honestly, both implementations must be held constant on everything except implementation language.
-
-Keep identical:
-
-- host machine
-- kernel version
-- CPU pinning
-- deployment provider and region
-- protocol (same H2 or H3 choice)
-- address family (same v4 or v6 choice)
-- connection count
-- payload size and shape
-- auth logic
-- test duration
-- trigger pattern
-
-Compare on:
-
-- p50 / p95 / p99 / p99.9 trigger_to_wire
-- p50 / p95 / p99 / p99.9 write_to_first_byte
-- reconnect rate
-- max outlier latency
-- CPU utilization per request
-- allocation count in the hot path
-
-### The only comparison that matters
-
-If C++ is faster in synthetic microbenchmarks but not meaningfully faster in:
-
-- p99 trigger_to_wire, or
-- p99 trigger_to_first_byte
-
-then the extra complexity may not be justified.
-
-## J. Minimal Logging Rules During Benchmarks
-
-During hot-path benchmarks:
-
-- do not emit synchronous logs on every request,
-- do not print per-request debug lines to stdout,
-- store timestamps in memory,
-- flush aggregated results after the run.
-
-If per-request traces are needed, enable them for a small sampled subset only.
-
-## K. What Success Looks Like
-
-A successful implementation should show:
-
-1. **near-zero setup cost on warm samples**
-   - warm requests must not look like cold `curl` requests
-2. **very low and stable trigger-to-wire latency**
-3. **tight p99 / p99.9 distributions**
-4. **minimal reconnects**
-5. **clear measured winner for H2/H3 and v4/v6**
-6. **clear measured answer on whether C++ meaningfully beats Rust in the real path**
-
-## L. Immediate Engineering Tasks
-
-1. Build the minimal C++ hot executor.
-2. Implement benchmark mode with the timestamp points listed above.
-3. Add persistent H2 warm connections first.
-4. Run steady-state warm-path tests.
-5. Run v4 vs v6 comparisons.
-6. Run H2 vs H3 comparisons.
-7. Test from multiple deployment environments targeting the best route to Cloudflare EWR.
-8. Build a functionally equivalent Rust harness only after the C++ baseline is stable.
-9. Keep C++ only if it wins by a real p99 / p99.9 margin in the production-like benchmark.
-
-## Bottom Line
-
-For this project:
-
-- the race is to **Cloudflare EWR**,
-- the biggest wins are **warm connections, route quality, and jitter control**,
-- C++ is a valid choice for the hot executor because you want to chase the last microseconds,
-- but the final C++ vs Rust decision must be made using the warm-path benchmark harness above, not by intuition.
+ The rust client is only for clob, which is the trade-execution orderbook. There are other categories of polymarket API's - for the sessions described above we may not need any other external libraries for data, websockets etc, but if you do need it, look for the official polymarket rust client for that category of API.

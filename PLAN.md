@@ -4,7 +4,7 @@
 
 - **Source of truth**: AGENTS.md exclusively. No invented requirements.
 - **Language**: C++ (C++20) for the hot executor.
-- **Target endpoint**: `https://clob.polymarket.com` (Cloudflare-fronted, EWR POP).
+- **Target endpoint**: `https://clob.polymarket.com` (Cloudflare edge → AWS us-east-1 origin). cf-ray POP (e.g. EWR) is the Cloudflare edge; actual CLOB backend is in IAD/us-east-1.
 - **Production OS**: Linux. **Development OS**: macOS (darwin).
 - **Dependencies**: OpenSSL, nghttp2, GoogleTest.
 - **HTTP/2 first**. HTTP/3 post-baseline. Rust post-baseline.
