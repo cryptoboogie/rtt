@@ -5,6 +5,7 @@ add_executable(rtt_tests
     test_timestamp_record.cpp
     test_stats_aggregator.cpp
     test_spsc_queue.cpp
+    test_trigger_message.cpp
 )
 target_link_libraries(rtt_tests
     GTest::gtest_main
