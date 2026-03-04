@@ -432,3 +432,25 @@ The gap comes from architectural differences, not algorithmic ones. Ordered by e
 | clob_response | 3 | Parse success/error/bytes responses |
 | clob_executor | 6+1 | PreSignedOrderPool, hot-path latency, config, process_one, e2e |
 | **TOTAL** | **31+1** | |
+
+## S4-Bugfix — EIP-712 signature invalidated by salt patching
+- **Files changed**: `crates/rtt-core/src/clob_executor.rs`, `crates/rtt-core/src/clob_signer.rs`
+- **Bug**: `PreSignedOrderPool::dispatch()` was patching the salt in the JSON body after the EIP-712 signature was computed. Since salt is part of the signed struct hash, this invalidated every signature. The server correctly returned `"invalid signature"`.
+- **Fix**: Removed salt patching from dispatch. Each pre-signed order now uses its body as-is (unique salt baked in at sign time). Only the HMAC auth headers are recomputed at dispatch time (fresh timestamp). The pool is now a simple `Vec<Vec<u8>>` of pre-serialized JSON bodies instead of `RequestTemplate` with patch slots.
+- **Also fixed**: `sign_order()` was producing a double `0x` prefix (`"0x0x7a571d..."`) because alloy's `Display` for `PrimitiveSignature` already includes `0x` and we were prepending another.
+- **Tests run**: All 31 CLOB tests pass; e2e test verified against prod (auth accepted, order rejected only for business rules: min order size).
+- **Commit**: `fix: preserve EIP-712 signature in pre-signed pool dispatch`
+
+## S4-Bugfix — Benchmark tests failing: IPv6 address family default
+- **Files changed**: `crates/rtt-core/src/benchmark.rs`
+- **Bug**: All 8 `benchmark::tests::*` tests (from Session 1) were failing with `"no addresses found for requested family"`. The `BenchmarkConfig::default()` used `AddressFamily::V6`. Rust's `std::net::ToSocketAddrs` successfully resolves AAAA records for `clob.polymarket.com`, but the subsequent IPv6 TCP socket creation/connection fails silently in some environments — even when `curl -6` works from the same machine. This suggests a mismatch between the system resolver (used by curl via getaddrinfo) and Rust's socket layer, possibly related to macOS network interface configuration, firewall rules, or a Tokio IPv6 socket binding issue.
+- **Confirmed pre-existing**: Checked out the original Session 1 commit (`7b7c1e2`) and the same test fails there — not caused by Session 4 changes.
+- **Note**: These 8 tests were reported as passing (67 tests) during Session 1 development, meaning IPv6 connectivity worked at that time but has since broken. This may indicate:
+  - A network environment change (different Wi-Fi, VPN, firewall rule)
+  - A macOS update affecting IPv6 socket behavior
+  - A transient Cloudflare IPv6 routing issue for this region
+  - A deeper Tokio/rustls IPv6 regression (less likely but worth investigating if IPv6 performance matters for production)
+- **Fix**: Changed `BenchmarkConfig::default()` from `AddressFamily::V6` to `AddressFamily::Auto`. Auto uses whatever the system provides (tries both, picks first success). The explicit `ipv4_forced_path` and `ipv6_forced_path` tests remain and gracefully handle failure.
+- **Action item**: If IPv6 latency advantage is important for production (Session 1 noted p99 ~178ms v6 vs ~410ms v4 from NYC), investigate why Rust IPv6 sockets fail on this machine. Run `cargo test -p rtt-core benchmark::tests::ipv6_forced_path -- --nocapture` periodically to check if IPv6 recovers.
+- **Tests run**: Full suite 100 passed, 0 failed, 1 ignored.
+- **Commit**: `fix: use Auto address family for benchmarks and clean up warnings`
