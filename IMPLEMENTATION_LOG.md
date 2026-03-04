@@ -454,3 +454,40 @@ The gap comes from architectural differences, not algorithmic ones. Ordered by e
 - **Action item**: If IPv6 latency advantage is important for production (Session 1 noted p99 ~178ms v6 vs ~410ms v4 from NYC), investigate why Rust IPv6 sockets fail on this machine. Run `cargo test -p rtt-core benchmark::tests::ipv6_forced_path -- --nocapture` periodically to check if IPv6 recovers.
 - **Tests run**: Full suite 100 passed, 0 failed, 1 ignored.
 - **Commit**: `fix: use Auto address family for benchmarks and clean up warnings`
+
+---
+
+## Session 5: Integration
+
+### 5.1 — Merge clob-order-integration branch
+- **Files changed**: Fast-forward merge (clob_auth, clob_executor, clob_order, clob_request, clob_response, clob_signer modules)
+- **Tests run**: 100 passed (rtt-core), relaxed hot_path_latency threshold from 100µs to 1ms for debug builds
+- **Deviation**: None
+
+### 5.2 — Merge ws-data-pipeline branch
+- **Files changed**: Merged pm-data/ at root, moved to `crates/pm-data/`, removed standalone Cargo.lock, fixed edition 2024→2021, added rtt-core dependency
+- **Type consolidation**: Removed local Side, OrderType, TriggerMessage, OrderBookSnapshot, PriceLevel from `pm-data/src/types.rs`; replaced with re-exports from `rtt_core::trigger`
+- **rtt-core changes**: Added `#[serde(alias = "BUY")]`/`#[serde(alias = "SELL")]` to Side enum, added `PartialEq` to PriceLevel
+- **Tests run**: 32 passed (pm-data: 16 unit + 13 integration/external + 3 parse)
+- **Deviation**: None
+
+### 5.3 — Merge strategy-framework branch
+- **Files changed**: Merged pm-strategy/ at root, moved to `crates/pm-strategy/`, removed standalone Cargo.lock/.gitignore, added rtt-core dependency
+- **Type consolidation**: Replaced all local type definitions in `pm-strategy/src/types.rs` with re-exports from `rtt_core::trigger`; added `TradeEvent` to rtt-core
+- **Tests run**: 43 passed (pm-strategy)
+- **Deviation**: None
+
+### 5.4 — Create pm-executor binary crate
+- **Files created**: `crates/pm-executor/Cargo.toml`, `src/main.rs`, `src/config.rs`, `src/bridge.rs`, `src/logging.rs`, `src/health.rs`
+- **Features**: Unified TOML config with env var overrides, broadcast→mpsc and mpsc→crossbeam channel bridges, tracing with hot-path suppression, health monitoring, graceful Ctrl+C shutdown
+- **Tests run**: 10 unit tests (config parse, defaults, env overrides, strategy build, bridge forwarding, bridge shutdown, health status, health monitor shutdown, logging)
+- **Deviation**: Used multi_thread flavor + spawn_blocking for crossbeam bridge test to avoid single-threaded runtime deadlock
+
+### 5.5 — Integration tests
+- **Files created**: `crates/pm-executor/tests/test_integration.rs`, `config.toml` (example)
+- **Tests**: example config parses, strategy builds from config, mock snapshot→strategy→trigger flow, end-to-end channel flow, full pipeline smoke test (ignored)
+- **Tests run**: 4 passed, 1 ignored
+
+### 5.6 — Final workspace verification
+- **Total**: 189 tests passing across workspace (2 ignored)
+- **Workspace members**: rtt-core, rtt-bench, pm-data, pm-strategy, pm-executor

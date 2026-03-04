@@ -1,0 +1,23 @@
+[package]
+name = "pm-executor"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "pm-executor"
+path = "src/main.rs"
+
+[dependencies]
+rtt-core = { path = "../rtt-core" }
+pm-data = { path = "../pm-data" }
+pm-strategy = { path = "../pm-strategy" }
+tokio = { version = "1", features = ["full"] }
+crossbeam-channel = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

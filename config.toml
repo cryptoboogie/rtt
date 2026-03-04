@@ -1,0 +1,42 @@
+# pm-executor configuration
+# Credentials can also be set via environment variables:
+#   POLY_API_KEY, POLY_API_SECRET, POLY_PASSPHRASE,
+#   POLY_PRIVATE_KEY, POLY_MAKER_ADDRESS, POLY_SIGNER_ADDRESS
+
+[credentials]
+api_key = ""
+api_secret = ""
+passphrase = ""
+private_key = ""
+maker_address = ""
+signer_address = ""
+
+[connection]
+pool_size = 2
+address_family = "auto"  # "auto", "ipv4", or "ipv6"
+
+[websocket]
+# Active Polymarket token IDs to monitor
+asset_ids = [
+    "48825140812430902098404528620382945035793471220915259967486864813738884055220"
+]
+ws_channel_capacity = 1024
+snapshot_channel_capacity = 256
+
+[strategy]
+strategy = "threshold"
+token_id = "48825140812430902098404528620382945035793471220915259967486864813738884055220"
+side = "Buy"
+size = "5"
+order_type = "FOK"
+
+[strategy.params]
+threshold = 0.45
+
+[execution]
+presign_count = 100
+is_neg_risk = false
+fee_rate_bps = 0
+
+[logging]
+level = "info"

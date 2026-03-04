@@ -1,48 +1,7 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-// === Shared interface contracts (from CLAUDE.md) ===
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum Side {
-    #[serde(alias = "BUY")]
-    Buy,
-    #[serde(alias = "SELL")]
-    Sell,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum OrderType {
-    GTC,
-    GTD,
-    FOK,
-    FAK,
-}
-
-#[derive(Debug, Clone)]
-pub struct TriggerMessage {
-    pub trigger_id: u64,
-    pub token_id: String,
-    pub side: Side,
-    pub price: String,
-    pub size: String,
-    pub order_type: OrderType,
-    pub timestamp_ns: u64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct PriceLevel {
-    pub price: String,
-    pub size: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct OrderBookSnapshot {
-    pub asset_id: String,
-    pub best_bid: Option<PriceLevel>,
-    pub best_ask: Option<PriceLevel>,
-    pub timestamp_ms: u64,
-    pub hash: String,
-}
+// Re-export shared types from rtt-core
+pub use rtt_core::trigger::{OrderBookSnapshot, OrderType, PriceLevel, Side, TriggerMessage};
 
 // === WebSocket message types ===
 

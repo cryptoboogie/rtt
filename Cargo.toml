@@ -1,3 +1,3 @@
 [workspace]
-members = ["crates/rtt-core", "crates/rtt-bench"]
+members = ["crates/rtt-core", "crates/rtt-bench", "crates/pm-data", "crates/pm-strategy", "crates/pm-executor"]
 resolver = "2"

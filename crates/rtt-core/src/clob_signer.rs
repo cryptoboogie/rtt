@@ -9,7 +9,7 @@ use crate::clob_order::{
     EXCHANGE_ADDRESS, NEG_RISK_EXCHANGE_ADDRESS,
     compute_amounts, generate_salt,
 };
-use crate::trigger::{OrderType, TriggerMessage};
+use crate::trigger::TriggerMessage;
 
 const CHAIN_ID: u64 = 137; // Polygon mainnet
 
@@ -97,7 +97,7 @@ pub async fn presign_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trigger::Side;
+    use crate::trigger::{OrderType, Side};
     use alloy::primitives::address;
     use alloy::signers::local::PrivateKeySigner;
 

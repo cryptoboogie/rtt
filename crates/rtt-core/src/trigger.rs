@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Side {
+    #[serde(alias = "BUY")]
     Buy,
+    #[serde(alias = "SELL")]
     Sell,
 }
 
@@ -27,7 +29,7 @@ pub struct TriggerMessage {
 }
 
 /// Single price level in an order book.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PriceLevel {
     pub price: String,
     pub size: String,
@@ -41,6 +43,16 @@ pub struct OrderBookSnapshot {
     pub best_ask: Option<PriceLevel>,
     pub timestamp_ms: u64,
     pub hash: String,
+}
+
+/// Trade event from WebSocket feed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradeEvent {
+    pub asset_id: String,
+    pub price: String,
+    pub size: String,
+    pub side: Side,
+    pub timestamp_ms: u64,
 }
 
 #[cfg(test)]

@@ -1,15 +1,15 @@
 [package]
-name = "pm-data"
+name = "pm-strategy"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
-futures-util = "0.3"
+rtt-core = { path = "../rtt-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tracing = "0.1"
+toml = "0.8"
+tokio = { version = "1", features = ["full"] }
+chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

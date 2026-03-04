@@ -10,6 +10,7 @@ All implementation follows this discipline:
 4. **Once the test passes, move on** — do not gold-plate; proceed to the next sub-task immediately
 5. **Do not stop until all sub-tasks are finished** — unless there is a fatal blocking issue
 6. **Log every sub-task** — for each completed sub-task, append an entry to `IMPLEMENTATION_LOG.md` recording files changed, tests run, commit message, and any deviations from the plan
+7. **When finished, run and verify ALL project test suites pass**
 
 ## Current Project Status
 
