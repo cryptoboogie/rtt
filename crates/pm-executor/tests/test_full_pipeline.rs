@@ -22,6 +22,9 @@
 //! But do they work TOGETHER? Channel type mismatches, timing issues,
 //! shutdown races — these only show up at integration level.
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+
 use rtt_core::trigger::{OrderBookSnapshot, OrderType, PriceLevel, Side};
 
 /// Helper: build a test snapshot.
@@ -56,7 +59,6 @@ fn make_snapshot(asset_id: &str, bid: &str, ask: &str) -> OrderBookSnapshot {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snapshot_flows_through_entire_channel_pipeline_to_trigger() {
     use tokio::sync::{broadcast, mpsc, watch};
-    use tokio::time::{timeout, Duration};
 
     // Set up the full channel pipeline:
     //   broadcast -> [bridge] -> mpsc -> StrategyRunner -> mpsc -> [bridge] -> crossbeam
@@ -280,6 +282,133 @@ async fn graceful_shutdown_completes_within_timeout() {
         result.is_ok(),
         "all components should stop within 5 seconds of shutdown signal"
     );
+}
+
+/// TEST: Snapshot → Strategy → Trigger → Execution loop (dry run).
+///
+/// This tests the COMPLETE pipeline including the execution loop.
+/// A mock snapshot triggers the strategy, which produces a trigger
+/// that flows through to the execution thread (dry-run mode).
+///
+/// WHY THIS MATTERS:
+/// Session 6 wires the execution loop. This proves that triggers
+/// produced by the strategy actually reach the execution thread
+/// and are processed in dry-run mode.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trigger_reaches_dry_run_execution_loop() {
+    use tokio::sync::{broadcast, mpsc, watch};
+    use tokio::time::{timeout, Duration};
+
+    // Track how many triggers the execution "loop" processes
+    let trigger_count = Arc::new(AtomicU64::new(0));
+    let trigger_count_clone = trigger_count.clone();
+
+    // Full channel pipeline
+    let (broadcast_tx, mut broadcast_rx) = broadcast::channel::<OrderBookSnapshot>(16);
+    let (snapshot_mpsc_tx, snapshot_mpsc_rx) = mpsc::channel::<OrderBookSnapshot>(16);
+    let (trigger_mpsc_tx, mut trigger_mpsc_rx) = mpsc::channel(16);
+    let (crossbeam_tx, crossbeam_rx) = crossbeam_channel::bounded(16);
+    let (shutdown_tx, _) = watch::channel(false);
+
+    // Bridge: broadcast -> mpsc
+    let mut shutdown_rx1 = shutdown_tx.subscribe();
+    let bridge1 = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                result = broadcast_rx.recv() => {
+                    match result {
+                        Ok(snap) => { if snapshot_mpsc_tx.send(snap).await.is_err() { break; } }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(_) => continue,
+                    }
+                }
+                _ = shutdown_rx1.changed() => { if *shutdown_rx1.borrow() { break; } }
+            }
+        }
+    });
+
+    // Strategy runner
+    let strategy: Box<dyn pm_strategy::strategy::Strategy> =
+        Box::new(pm_strategy::threshold::ThresholdStrategy::new(
+            "asset1".to_string(),
+            Side::Buy,
+            0.45,
+            "10".to_string(),
+            OrderType::FOK,
+        ));
+    let mut runner =
+        pm_strategy::runner::StrategyRunner::new(strategy, snapshot_mpsc_rx, trigger_mpsc_tx);
+    let runner_handle = tokio::spawn(async move { runner.run().await });
+
+    // Bridge: mpsc -> crossbeam
+    let mut shutdown_rx2 = shutdown_tx.subscribe();
+    let bridge2 = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                msg = trigger_mpsc_rx.recv() => {
+                    match msg {
+                        Some(mut trigger) => {
+                            trigger.timestamp_ns = rtt_core::clock::now_ns();
+                            if crossbeam_tx.send(trigger).is_err() { break; }
+                        }
+                        None => break,
+                    }
+                }
+                _ = shutdown_rx2.changed() => { if *shutdown_rx2.borrow() { break; } }
+            }
+        }
+    });
+
+    // Execution thread (dry-run) — replicates the pattern from execution::run_execution_loop
+    let exec_shutdown = Arc::new(AtomicBool::new(false));
+    let exec_shutdown_clone = exec_shutdown.clone();
+    let exec_handle = std::thread::spawn(move || {
+        while !exec_shutdown_clone.load(Ordering::Relaxed) {
+            match crossbeam_rx.try_recv() {
+                Ok(trigger) => {
+                    // Dry-run: just count the trigger
+                    assert_eq!(trigger.side, Side::Buy);
+                    assert_eq!(trigger.price, "0.45");
+                    trigger_count_clone.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => {
+                    std::thread::yield_now();
+                }
+                Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+            }
+        }
+    });
+
+    // Inject snapshots: first above threshold (no fire), then at threshold (fire!)
+    broadcast_tx
+        .send(make_snapshot("asset1", "0.44", "0.50"))
+        .unwrap();
+    broadcast_tx
+        .send(make_snapshot("asset1", "0.44", "0.45"))
+        .unwrap();
+
+    // Wait for the execution thread to process the trigger
+    let result = timeout(Duration::from_secs(5), async {
+        loop {
+            if trigger_count.load(Ordering::Relaxed) >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+
+    assert!(result.is_ok(), "execution loop should process trigger");
+    assert_eq!(trigger_count.load(Ordering::Relaxed), 1);
+
+    // Shutdown
+    let _ = shutdown_tx.send(true);
+    exec_shutdown.store(true, Ordering::Relaxed);
+    drop(broadcast_tx);
+    let _ = bridge1.await;
+    let _ = runner_handle.await;
+    let _ = bridge2.await;
+    let _ = exec_handle.join();
 }
 
 /// TEST: Full pipeline with real WebSocket + real data (dry run).

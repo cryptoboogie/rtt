@@ -2212,6 +2212,7 @@ dependencies = [
 name = "pm-executor"
 version = "0.1.0"
 dependencies = [
+ "alloy",
  "crossbeam-channel",
  "pm-data",
  "pm-strategy",

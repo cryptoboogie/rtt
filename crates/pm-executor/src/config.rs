@@ -54,6 +54,8 @@ pub struct ExecutionConfig {
     pub is_neg_risk: bool,
     #[serde(default)]
     pub fee_rate_bps: u64,
+    #[serde(default = "default_dry_run")]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +78,9 @@ fn default_snapshot_channel_capacity() -> usize {
 }
 fn default_presign_count() -> usize {
     100
+}
+fn default_dry_run() -> bool {
+    true
 }
 fn default_log_level() -> String {
     "info".to_string()
@@ -147,6 +152,7 @@ threshold = 0.45
 presign_count = 50
 is_neg_risk = false
 fee_rate_bps = 0
+dry_run = true
 
 [logging]
 level = "debug"
@@ -160,6 +166,7 @@ level = "debug"
         assert_eq!(config.websocket.asset_ids.len(), 2);
         assert_eq!(config.strategy.strategy, "threshold");
         assert_eq!(config.execution.presign_count, 50);
+        assert!(config.execution.dry_run);
         assert_eq!(config.logging.level, "debug");
     }
 
@@ -220,6 +227,51 @@ threshold = 0.5
         config.apply_env_overrides();
         assert_eq!(config.credentials.api_key, "from_env");
         std::env::remove_var("POLY_API_KEY");
+    }
+
+    #[test]
+    fn dry_run_defaults_to_true() {
+        let minimal_toml = r#"
+[credentials]
+[connection]
+[websocket]
+asset_ids = ["asset1"]
+[strategy]
+strategy = "threshold"
+token_id = "asset1"
+side = "Buy"
+size = "10"
+order_type = "FOK"
+[strategy.params]
+threshold = 0.45
+[execution]
+[logging]
+"#;
+        let config: ExecutorConfig = toml::from_str(minimal_toml).unwrap();
+        assert!(config.execution.dry_run, "dry_run should default to true");
+    }
+
+    #[test]
+    fn dry_run_parses_false() {
+        let toml_with_dry_run = r#"
+[credentials]
+[connection]
+[websocket]
+asset_ids = ["asset1"]
+[strategy]
+strategy = "threshold"
+token_id = "asset1"
+side = "Buy"
+size = "10"
+order_type = "FOK"
+[strategy.params]
+threshold = 0.45
+[execution]
+dry_run = false
+[logging]
+"#;
+        let config: ExecutorConfig = toml::from_str(toml_with_dry_run).unwrap();
+        assert!(!config.execution.dry_run);
     }
 
     #[test]

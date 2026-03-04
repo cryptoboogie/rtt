@@ -18,6 +18,7 @@ serde_json = "1"
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+alloy = { version = "1", default-features = false, features = ["signer-local", "signers"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

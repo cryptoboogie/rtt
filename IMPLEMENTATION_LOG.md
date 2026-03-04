@@ -575,3 +575,57 @@ The gap comes from architectural differences, not algorithmic ones. Ordered by e
 | **TOTAL** | | **16** | **7** | |
 
 **Workspace totals after 5B: 201 passed, 0 failed, 12 ignored**
+
+---
+
+# Session 6: Wire Executor + Dry-Run Mode
+
+## 6.1 — Add dry_run flag to config
+- **Files changed**: `crates/pm-executor/src/config.rs`, `config.toml`
+- **Tests run**: `dry_run_defaults_to_true`, `dry_run_parses_false`, `parse_valid_config` (updated) — 11 pass
+- **Commit**: (batched)
+- **Deviation**: None. `dry_run` defaults to `true` via `default_dry_run()`.
+
+## 6.2 — Create execution.rs with build_credentials + validation
+- **Files changed**: `crates/pm-executor/src/execution.rs` (new), `crates/pm-executor/src/main.rs` (mod declaration), `crates/pm-executor/Cargo.toml` (alloy dep)
+- **Tests run**: `build_credentials_dry_run_allows_empty`, `build_credentials_live_rejects_empty_private_key`, `build_credentials_live_rejects_empty_api_key`, `build_credentials_live_valid` — 4 pass
+- **Commit**: (batched)
+- **Deviation**: None. Maps `CredentialsConfig.api_secret` → `L2Credentials.secret`, `maker_address` → `address`.
+
+## 6.3/6.4 — Implement run_execution_loop in execution.rs
+- **Files changed**: `crates/pm-executor/src/execution.rs`
+- **Tests run**: `dry_run_execution_loop_logs_and_exits` — 1 pass (5 total execution tests)
+- **Commit**: (batched)
+- **Deviation**: Combined 6.3 (ConnectionPool+PreSignedOrderPool setup) and 6.4 (execution loop) since the setup logic lives in main.rs and the loop is in execution.rs. The loop uses `try_recv()` spin with `yield_now()` matching the rtt-core executor pattern.
+
+## 6.5 — Wire everything into main.rs
+- **Files changed**: `crates/pm-executor/src/main.rs`
+- **Tests run**: All 16 pm-executor unit tests pass, all 9 integration tests pass
+- **Commit**: (batched)
+- **Deviation**: None. Replaced `_trigger_crossbeam_rx` with actual consumption. Execution thread spawned on dedicated OS thread. Pre-signing uses strategy threshold as price. `Arc<AtomicBool>` for shutdown coordination.
+
+## 6.6 — Update integration tests
+- **Files changed**: `crates/pm-executor/tests/test_full_pipeline.rs`
+- **Tests run**: `trigger_reaches_dry_run_execution_loop` — 1 new pass; full workspace 196 pass, 1 ignored
+- **Commit**: (batched)
+- **Deviation**: Integration test replicates execution loop pattern inline (bin crate not importable). Verifies trigger flows from snapshot → strategy → crossbeam → execution thread (dry-run).
+
+---
+
+**Session 6 Test Summary: 8 new tests, 196 total (1 ignored)**
+
+| Module | New Tests | Description |
+|--------|-----------|-------------|
+| config | 2 | dry_run defaults true, parses false |
+| execution | 5 | build_credentials (4 variants), dry_run loop |
+| test_full_pipeline | 1 | End-to-end dry-run execution integration |
+| **TOTAL** | **8** | |
+
+**Pipeline now complete:**
+```
+WebSocket → Pipeline → broadcast<OrderBookSnapshot>
+  → bridge → mpsc<OrderBookSnapshot>
+  → StrategyRunner → mpsc<TriggerMessage>
+  → bridge → crossbeam<TriggerMessage>
+  → ExecutionLoop (OS thread) → [DRY RUN] log / process_one_clob()
+```

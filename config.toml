@@ -37,6 +37,7 @@ threshold = 0.45
 presign_count = 100
 is_neg_risk = false
 fee_rate_bps = 0
+dry_run = true   # SAFETY: set to false only when ready for real orders
 
 [logging]
 level = "info"
