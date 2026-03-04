@@ -37,7 +37,12 @@ pub async fn sign_order(
     let domain = make_domain(is_neg_risk);
     let hash = order.eip712_signing_hash(&domain);
     let signature = signer.sign_hash(&hash).await?;
-    Ok(format!("0x{}", signature))
+    let sig_hex = signature.to_string();
+    if sig_hex.starts_with("0x") {
+        Ok(sig_hex)
+    } else {
+        Ok(format!("0x{}", sig_hex))
+    }
 }
 
 /// Build an Order from a TriggerMessage.
