@@ -46,8 +46,9 @@ impl Default for BenchmarkConfig {
             min_interval_ms: 50,
             max_interval_ms: 500,
             pin_core: None,
-            // IPv6 default: tighter tail latency (p99 ~178ms vs IPv4 ~410ms from NYC)
-            address_family: AddressFamily::V6,
+            // Auto: use whatever address family the system provides.
+            // V6 has tighter tail latency but not all environments support it.
+            address_family: AddressFamily::Auto,
         }
     }
 }
