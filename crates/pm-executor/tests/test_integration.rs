@@ -136,14 +136,3 @@ async fn end_to_end_channel_flow() {
     let _ = shutdown_tx.send(true);
     let _ = runner_handle.await;
 }
-
-/// Full pipeline smoke test — requires network + credentials.
-#[tokio::test]
-#[ignore]
-async fn full_pipeline_smoke_test() {
-    // This test requires:
-    // 1. Network access to Polymarket WebSocket
-    // 2. Valid credentials in environment variables
-    // Run with: cargo test -p pm-executor --test test_integration full_pipeline -- --ignored
-    eprintln!("Full pipeline smoke test would start here");
-}

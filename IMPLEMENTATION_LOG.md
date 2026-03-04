@@ -491,3 +491,87 @@ The gap comes from architectural differences, not algorithmic ones. Ordered by e
 ### 5.6 — Final workspace verification
 - **Total**: 189 tests passing across workspace (2 ignored)
 - **Workspace members**: rtt-core, rtt-bench, pm-data, pm-strategy, pm-executor
+
+---
+
+## Session 5B: Integration Tests as Living Documentation
+
+### 5B.1 — rtt-core: Connection Pipeline
+- **File created**: `crates/rtt-core/tests/test_connection_pipeline.rs`
+- **Tests**: 3 (all `#[ignore]` — network required)
+  - `warm_connection_reaches_polymarket_and_identifies_datacenter`
+  - `connection_pool_distributes_requests_across_connections`
+  - `frame_submission_is_microseconds_network_roundtrip_is_milliseconds`
+- **Commit**: (batched)
+
+### 5B.2 — rtt-core: Order Pipeline
+- **File created**: `crates/rtt-core/tests/test_order_pipeline.rs`
+- **Tests**: 4 (all local, no network)
+  - `trade_signal_becomes_signed_order`
+  - `presigned_batch_has_unique_salts_and_valid_signatures`
+  - `hmac_auth_headers_are_complete_and_correctly_signed`
+  - `complete_order_request_has_correct_structure`
+- **Commit**: (batched)
+
+### 5B.3 — rtt-core: Execution Pipeline
+- **File created**: `crates/rtt-core/tests/test_execution_pipeline.rs`
+- **Tests**: 3 (1 `#[ignore]`, 2 local)
+  - `hot_path_dispatch_is_fast`
+  - `full_execution_records_all_timestamps_in_order` (`#[ignore]`)
+  - `pool_exhaustion_returns_none_not_panic`
+- **Commit**: (batched)
+
+### 5B.4 — pm-data: Live Market Data
+- **File created**: `crates/pm-data/tests/test_live_data.rs`
+- **Tests**: 2 (1 `#[ignore]`, 1 local)
+  - `connects_to_polymarket_and_receives_book_snapshot` (`#[ignore]`)
+  - `price_change_updates_local_orderbook`
+- **Commit**: (batched)
+
+### 5B.5 — pm-data: Order Book Lifecycle
+- **File created**: `crates/pm-data/tests/test_orderbook_lifecycle.rs`
+- **Tests**: 3 (all local)
+  - `orderbook_tracks_full_lifecycle_of_updates`
+  - `multiple_assets_tracked_independently`
+  - `concurrent_read_during_write_is_safe`
+- **Commit**: (batched)
+
+### 5B.6 — pm-strategy: Strategy Scenarios
+- **File created**: `crates/pm-strategy/tests/test_strategy_scenarios.rs`
+- **Tests**: 4 (all local)
+  - `buy_threshold_fires_when_ask_drops_to_target`
+  - `strategy_ignores_snapshots_for_other_assets`
+  - `strategy_runner_produces_trigger_from_snapshot_stream`
+  - `trigger_contains_correct_order_parameters`
+- **Commit**: (batched)
+
+### 5B.7 — pm-executor: Full Pipeline
+- **File created**: `crates/pm-executor/tests/test_full_pipeline.rs`
+- **Tests**: 4 (1 `#[ignore]`, 3 local)
+  - `snapshot_flows_through_entire_channel_pipeline_to_trigger`
+  - `config_loads_and_all_components_construct`
+  - `graceful_shutdown_completes_within_timeout`
+  - `full_pipeline_live_dry_run` (`#[ignore]`)
+- **Commit**: (batched)
+
+### 5B.8 — Pre-existing test fixes
+- **Files changed**: `crates/pm-data/tests/test_integration.rs`, `crates/pm-data/tests/test_ws_debug.rs`
+- **Fix**: Added `#[ignore]` to 4 pre-existing network tests that were running without it (causing CI failures when no network is available)
+- **Commit**: (batched)
+
+---
+
+**Session 5B Test Summary: 23 new integration tests (16 local + 7 ignored/network)**
+
+| Crate | File | Local | Ignored | Description |
+|-------|------|-------|---------|-------------|
+| rtt-core | test_connection_pipeline.rs | 0 | 3 | Warm connections, pool round-robin, split instrumentation |
+| rtt-core | test_order_pipeline.rs | 4 | 0 | Signing, pre-sign batch, HMAC, request structure |
+| rtt-core | test_execution_pipeline.rs | 2 | 1 | Dispatch speed, timestamp chain, pool exhaustion |
+| pm-data | test_live_data.rs | 1 | 1 | WS book snapshot, price change updates |
+| pm-data | test_orderbook_lifecycle.rs | 3 | 0 | Full lifecycle, multi-asset, concurrency |
+| pm-strategy | test_strategy_scenarios.rs | 4 | 0 | Threshold fire/no-fire, wrong asset, runner, params |
+| pm-executor | test_full_pipeline.rs | 3 | 1 | Full channel pipeline, config, shutdown, live dry run |
+| **TOTAL** | | **16** | **7** | |
+
+**Workspace totals after 5B: 201 passed, 0 failed, 12 ignored**
