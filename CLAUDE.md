@@ -12,6 +12,43 @@ All implementation follows this discipline:
 6. **Log every sub-task** — for each completed sub-task, append an entry to `IMPLEMENTATION_LOG.md` recording files changed, tests run, commit message, and any deviations from the plan
 7. **When finished, run and verify ALL project test suites pass**
 
+## Running Tests
+
+### All tests (entire workspace)
+
+```bash
+cargo test --workspace
+```
+
+### Unit tests only (no network)
+
+```bash
+cargo test --workspace --lib
+```
+
+### Integration tests only (some require network)
+
+```bash
+cargo test --workspace --test '*'
+```
+
+### Single crate
+
+```bash
+cargo test -p rtt-core
+cargo test -p pm-data
+cargo test -p pm-strategy
+cargo test -p pm-executor
+```
+
+### Ignored tests (real orders — costs money)
+
+```bash
+cargo test --workspace -- --ignored
+```
+
+Only `test_clob_end_to_end_pipeline` in rtt-core is ignored. It sends a real order and requires `POLY_API_KEY`, `POLY_SECRET`, `POLY_PASSPHRASE`, `POLY_ADDRESS`, and `POLY_PRIVATE_KEY` environment variables.
+
 ## Current Project Status
 
 ### Rust Implementation — Session 1 (in progress)
