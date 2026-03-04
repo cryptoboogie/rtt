@@ -3,6 +3,7 @@ mod config;
 mod execution;
 mod health;
 mod logging;
+mod safety;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -134,12 +135,29 @@ async fn run(config: ExecutorConfig) {
     // Create shutdown signal
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
 
+    // Build safety rails
+    let circuit_breaker = safety::CircuitBreaker::new(
+        config.safety.max_orders,
+        config.safety.max_usd_exposure,
+    );
+    let rate_limiter = safety::RateLimiter::new(config.safety.max_triggers_per_second);
+    let order_guard = safety::OrderGuard::new();
+
+    tracing::info!(
+        max_orders = config.safety.max_orders,
+        max_usd = config.safety.max_usd_exposure,
+        max_triggers_per_sec = config.safety.max_triggers_per_second,
+        require_confirmation = config.safety.require_confirmation,
+        "Safety rails configured"
+    );
+
     // Spawn execution thread (dedicated OS thread, not tokio)
     let exec_shutdown = Arc::new(AtomicBool::new(false));
     let exec_shutdown_clone = exec_shutdown.clone();
     let conn_pool = Arc::new(conn_pool);
     let exec_dry_run = config.execution.dry_run;
     let exec_creds = l2_creds;
+    let exec_cb = circuit_breaker.clone();
     let exec_handle = std::thread::spawn(move || {
         execution::run_execution_loop(
             trigger_crossbeam_rx,
@@ -147,6 +165,9 @@ async fn run(config: ExecutorConfig) {
             presigned_pool,
             exec_creds,
             exec_dry_run,
+            exec_cb,
+            &rate_limiter,
+            order_guard,
             exec_shutdown_clone,
         );
     });
@@ -191,8 +212,10 @@ async fn run(config: ExecutorConfig) {
 
     // Start health monitoring
     let shutdown_rx_health = shutdown_tx.subscribe();
+    let health_cb = circuit_breaker.clone();
     let health_handle = tokio::spawn(health::run_health_monitor(
         config.websocket.asset_ids.clone(),
+        Some(health_cb),
         shutdown_rx_health,
     ));
 

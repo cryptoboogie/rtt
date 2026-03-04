@@ -39,5 +39,11 @@ is_neg_risk = false
 fee_rate_bps = 0
 dry_run = true   # SAFETY: set to false only when ready for real orders
 
+[safety]
+max_orders = 10          # Circuit breaker: max orders before stopping
+max_usd_exposure = 50.0  # Circuit breaker: max total USD committed
+max_triggers_per_second = 2  # Rate limit
+require_confirmation = true  # Wait for order response before next
+
 [logging]
 level = "info"

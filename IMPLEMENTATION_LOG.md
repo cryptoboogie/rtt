@@ -629,3 +629,79 @@ WebSocket → Pipeline → broadcast<OrderBookSnapshot>
   → bridge → crossbeam<TriggerMessage>
   → ExecutionLoop (OS thread) → [DRY RUN] log / process_one_clob()
 ```
+
+---
+
+# Session 7: Safety Rails (Circuit Breaker, Rate Limiter)
+
+## 7.1 — CircuitBreaker (lock-free, atomic)
+- **Files changed**: `crates/pm-executor/src/safety.rs` (new), `crates/pm-executor/src/main.rs` (mod declaration)
+- **Tests run**: `circuit_breaker_fires_up_to_max_orders_then_trips`, `circuit_breaker_fires_up_to_max_usd_then_trips`, `circuit_breaker_once_tripped_all_subsequent_fail`, `circuit_breaker_manual_trip`, `circuit_breaker_stats`, `circuit_breaker_thread_safe` — 6 pass
+- **Commit**: (batched)
+- **Deviation**: None. Uses `Arc<AtomicU64>` for orders/usd, `Arc<AtomicBool>` for trip state. USD tracked in cents to avoid floating point atomics. Once tripped, stays tripped (restart required).
+
+## 7.2 — RateLimiter (sliding window, lock-free)
+- **Files changed**: `crates/pm-executor/src/safety.rs`
+- **Tests run**: `rate_limiter_allows_up_to_max_per_second`, `rate_limiter_rejects_after_limit`, `rate_limiter_resets_after_window` — 3 pass
+- **Commit**: (batched)
+- **Deviation**: None. Uses SystemTime for wall-clock nanoseconds. Window resets after 1 second. Excess triggers dropped (not queued).
+
+## 7.3 — OrderGuard (in-flight mutex via AtomicBool)
+- **Files changed**: `crates/pm-executor/src/safety.rs`
+- **Tests run**: `order_guard_first_acquire_succeeds`, `order_guard_second_acquire_fails_while_held`, `order_guard_acquire_after_release_succeeds` — 3 pass
+- **Commit**: (batched)
+- **Deviation**: None. Uses `compare_exchange` for acquire, `store` for release.
+
+## 7.4 — SafetyConfig with conservative defaults
+- **Files changed**: `crates/pm-executor/src/config.rs`, `config.toml`
+- **Tests run**: `safety_defaults_applied_without_section`, `safety_config_parses_custom_values` — 2 pass (8 total config tests pass)
+- **Commit**: (batched)
+- **Deviation**: None. Defaults: max_orders=10, max_usd_exposure=50.0, max_triggers_per_second=1, require_confirmation=true. SafetyConfig implements Default, serde(default) on ExecutorConfig field so [safety] section is optional.
+
+## 7.5 — Integrate safety into execution loop
+- **Files changed**: `crates/pm-executor/src/execution.rs`
+- **Tests run**: `circuit_breaker_stops_execution_loop`, `rate_limiter_drops_excess_triggers`, `order_guard_prevents_concurrent_orders`, `dry_run_execution_loop_logs_and_exits` — 4 pass (8 total execution tests pass)
+- **Commit**: (batched)
+- **Deviation**: None. Safety checks applied in order: (1) circuit breaker trip check, (2) rate limiter, (3) order guard, (4) circuit breaker amount check. Order guard released after response. Circuit breaker tripped on `is_reconnect` (dispatch failure).
+
+## 7.6 — Pre-signed pool auto-refill
+- **Files changed**: `crates/pm-executor/src/execution.rs`
+- **Tests run**: Existing tests pass (no separate refill test — refill only triggers in live mode with real pool bodies)
+- **Commit**: (batched)
+- **Deviation**: Used Option A (simple cursor reset). When pool drops below 20% remaining, `reset_cursor()` is called. Safe for dry-run/rejected orders (unique salts reused). For accepted orders, exchange rejects duplicate salts, so circuit breaker catches failures.
+
+## 7.7 — Wire safety into main.rs
+- **Files changed**: `crates/pm-executor/src/main.rs`
+- **Tests run**: All integration tests pass
+- **Commit**: (batched)
+- **Deviation**: None. CircuitBreaker, RateLimiter, OrderGuard created from SafetyConfig. CircuitBreaker cloned to execution loop and health monitor. RateLimiter passed by reference to execution thread. Logs safety config at startup.
+
+## 7.8 — Health monitor reports safety stats
+- **Files changed**: `crates/pm-executor/src/health.rs`
+- **Tests run**: `health_monitor_stops_on_shutdown`, `health_monitor_reports_safety_stats` — 2 pass
+- **Commit**: (batched)
+- **Deviation**: None. Health monitor accepts `Option<CircuitBreaker>` (backward compatible). When present, logs orders_fired/max, usd_committed/max, and tripped status every 30s.
+
+---
+
+**Session 7 Test Summary: 10 new tests, 206 total (1 ignored)**
+
+| Module | New Tests | Description |
+|--------|-----------|-------------|
+| safety | 12 | CircuitBreaker (6), RateLimiter (3), OrderGuard (3) |
+| config | 2 | Safety defaults, custom values |
+| execution | 3 | CB stops loop, RL drops triggers, OG prevents concurrent |
+| health | 1 | Health reports safety stats |
+| **TOTAL** | **18** | (6 net new — 12 in new module, 6 replaced existing) |
+
+**Safety pipeline:**
+```
+Trigger received
+  → Circuit breaker trip check (break if tripped)
+  → Rate limiter (drop if exceeded)
+  → Order guard (drop if in-flight)
+  → Circuit breaker amount check (record + break if limits exceeded)
+  → [DRY RUN] log / process_one_clob()
+  → Order guard release
+  → Pool auto-refill if <20% remaining
+```

@@ -11,6 +11,8 @@ pub struct ExecutorConfig {
     pub strategy: StrategyConfig,
     pub execution: ExecutionConfig,
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub safety: SafetyConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +64,42 @@ pub struct ExecutionConfig {
 pub struct LoggingConfig {
     #[serde(default = "default_log_level")]
     pub level: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SafetyConfig {
+    #[serde(default = "default_max_orders")]
+    pub max_orders: u64,
+    #[serde(default = "default_max_usd_exposure")]
+    pub max_usd_exposure: f64,
+    #[serde(default = "default_max_triggers_per_second")]
+    pub max_triggers_per_second: u64,
+    #[serde(default = "default_require_confirmation")]
+    pub require_confirmation: bool,
+}
+
+impl Default for SafetyConfig {
+    fn default() -> Self {
+        Self {
+            max_orders: default_max_orders(),
+            max_usd_exposure: default_max_usd_exposure(),
+            max_triggers_per_second: default_max_triggers_per_second(),
+            require_confirmation: default_require_confirmation(),
+        }
+    }
+}
+
+fn default_max_orders() -> u64 {
+    10
+}
+fn default_max_usd_exposure() -> f64 {
+    50.0
+}
+fn default_max_triggers_per_second() -> u64 {
+    1
+}
+fn default_require_confirmation() -> bool {
+    true
 }
 
 fn default_pool_size() -> usize {
@@ -280,5 +318,60 @@ dry_run = false
         let strategy = config.strategy.build_strategy();
         assert!(strategy.is_ok());
         assert_eq!(strategy.unwrap().name(), "threshold");
+    }
+
+    #[test]
+    fn safety_defaults_applied_without_section() {
+        let minimal_toml = r#"
+[credentials]
+[connection]
+[websocket]
+asset_ids = ["asset1"]
+[strategy]
+strategy = "threshold"
+token_id = "asset1"
+side = "Buy"
+size = "10"
+order_type = "FOK"
+[strategy.params]
+threshold = 0.45
+[execution]
+[logging]
+"#;
+        let config: ExecutorConfig = toml::from_str(minimal_toml).unwrap();
+        assert_eq!(config.safety.max_orders, 10);
+        assert!((config.safety.max_usd_exposure - 50.0).abs() < 0.01);
+        assert_eq!(config.safety.max_triggers_per_second, 1);
+        assert!(config.safety.require_confirmation);
+    }
+
+    #[test]
+    fn safety_config_parses_custom_values() {
+        let toml_with_safety = r#"
+[credentials]
+[connection]
+[websocket]
+asset_ids = ["asset1"]
+[strategy]
+strategy = "threshold"
+token_id = "asset1"
+side = "Buy"
+size = "10"
+order_type = "FOK"
+[strategy.params]
+threshold = 0.45
+[execution]
+[safety]
+max_orders = 20
+max_usd_exposure = 100.0
+max_triggers_per_second = 5
+require_confirmation = false
+[logging]
+"#;
+        let config: ExecutorConfig = toml::from_str(toml_with_safety).unwrap();
+        assert_eq!(config.safety.max_orders, 20);
+        assert!((config.safety.max_usd_exposure - 100.0).abs() < 0.01);
+        assert_eq!(config.safety.max_triggers_per_second, 5);
+        assert!(!config.safety.require_confirmation);
     }
 }
