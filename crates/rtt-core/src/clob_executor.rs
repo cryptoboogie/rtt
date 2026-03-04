@@ -103,14 +103,15 @@ pub struct ClobExecutionConfig {
 }
 
 /// Process a single CLOB trigger: dispatch pre-signed order on warm connection.
-/// Returns a TimestampRecord with all checkpoints populated.
+/// Returns a TimestampRecord with all checkpoints populated, plus the response body
+/// (if available) for logging/parsing by the caller.
 pub fn process_one_clob(
     pool: &ConnectionPool,
     presigned: &mut PreSignedOrderPool,
     creds: &L2Credentials,
     msg: &TriggerMessage,
     rt: &tokio::runtime::Runtime,
-) -> TimestampRecord {
+) -> (TimestampRecord, Option<Vec<u8>>) {
     let mut rec = TimestampRecord::default();
     rec.t_trigger_rx = msg.timestamp_ns;
     rec.t_dispatch_q = clock::now_ns();
@@ -128,7 +129,7 @@ pub fn process_one_clob(
             rec.t_first_resp_byte = rec.t_write_begin;
             rec.t_headers_done = rec.t_write_begin;
             rec.is_reconnect = true;
-            return rec;
+            return (rec, None);
         }
         Err(_) => {
             rec.t_write_begin = clock::now_ns();
@@ -136,7 +137,7 @@ pub fn process_one_clob(
             rec.t_first_resp_byte = rec.t_write_begin;
             rec.t_headers_done = rec.t_write_begin;
             rec.is_reconnect = true;
-            return rec;
+            return (rec, None);
         }
     };
 
@@ -161,10 +162,13 @@ pub fn process_one_clob(
                     }
                     rec.t_headers_done = clock::now_ns();
                     rec.is_reconnect = false;
+                    let body = resp.into_body().to_vec();
+                    (rec, Some(body))
                 }
                 Err(_) => {
                     rec.t_headers_done = clock::now_ns();
                     rec.is_reconnect = true;
+                    (rec, None)
                 }
             }
         }
@@ -172,10 +176,9 @@ pub fn process_one_clob(
             rec.t_first_resp_byte = clock::now_ns();
             rec.t_headers_done = clock::now_ns();
             rec.is_reconnect = true;
+            (rec, None)
         }
     }
-
-    rec
 }
 
 #[cfg(test)]

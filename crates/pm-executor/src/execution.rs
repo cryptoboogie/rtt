@@ -5,6 +5,7 @@ use alloy::signers::local::PrivateKeySigner;
 use crossbeam_channel::Receiver;
 use rtt_core::clob_auth::L2Credentials;
 use rtt_core::clob_executor::{PreSignedOrderPool, process_one_clob};
+use rtt_core::clob_response::parse_order_response;
 use rtt_core::connection::ConnectionPool;
 use rtt_core::trigger::TriggerMessage;
 
@@ -130,7 +131,7 @@ pub fn run_execution_loop(
                     continue;
                 }
 
-                let rec = process_one_clob(&pool, &mut presigned, &creds, &trigger, &rt);
+                let (rec, resp_body) = process_one_clob(&pool, &mut presigned, &creds, &trigger, &rt);
 
                 // Release order guard after response received
                 order_guard.release();
@@ -145,6 +146,33 @@ pub fn run_execution_loop(
                     reconnect = rec.is_reconnect,
                     "Order dispatched"
                 );
+
+                // Log order response
+                if let Some(body) = &resp_body {
+                    match parse_order_response(body) {
+                        Ok(resp) => {
+                            if resp.success {
+                                tracing::info!(
+                                    order_id = %resp.order_id,
+                                    status = %resp.status,
+                                    "Order accepted"
+                                );
+                            } else {
+                                tracing::error!(
+                                    error = ?resp.error_msg,
+                                    "Order rejected by server"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                body = %String::from_utf8_lossy(body),
+                                error = %e,
+                                "Failed to parse order response"
+                            );
+                        }
+                    }
+                }
 
                 // Trip circuit breaker on pool exhaustion (server error equivalent)
                 if rec.is_reconnect {

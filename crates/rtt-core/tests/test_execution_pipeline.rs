@@ -157,7 +157,7 @@ async fn full_execution_records_all_timestamps_in_order() {
     };
 
     // Run process_one_clob on a blocking thread (it uses block_on internally).
-    let rec = tokio::task::spawn_blocking(move || {
+    let (rec, _body) = tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
