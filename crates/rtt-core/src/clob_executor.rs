@@ -333,6 +333,7 @@ mod tests {
     async fn test_clob_end_to_end_pipeline() {
         use crate::clob_auth::load_credentials_from_env;
         use crate::clob_signer::{build_order, sign_order};
+        use crate::clob_order::SignatureType;
         use crate::clob_response::parse_order_response;
         use crate::connection::AddressFamily;
         use alloy::signers::local::PrivateKeySigner;
@@ -382,11 +383,21 @@ mod tests {
             .parse()
             .unwrap_or(false);
 
-        println!("            fee_rate_bps={} neg_risk={}", fee_rate_bps, is_neg_risk);
+        let sig_type: u8 = std::env::var("SIG_TYPE")
+            .unwrap_or_else(|_| "1".to_string())
+            .parse()
+            .unwrap_or(1);
+        let signature_type = match sig_type {
+            0 => SignatureType::Eoa,
+            2 => SignatureType::GnosisSafe,
+            _ => SignatureType::Poly,
+        };
+
+        println!("            fee_rate_bps={} neg_risk={} sig_type={}", fee_rate_bps, is_neg_risk, sig_type);
 
         // maker = proxy wallet (POLY_ADDRESS), signer = EOA (from POLY_PRIVATE_KEY)
         let maker_addr: Address = creds.address.parse().expect("invalid POLY_ADDRESS");
-        let order = build_order(&trigger, maker_addr, signer_addr, fee_rate_bps);
+        let order = build_order(&trigger, maker_addr, signer_addr, fee_rate_bps, signature_type);
         let sig = sign_order(&signer, &order, is_neg_risk).await.unwrap();
         println!("Signature:  {}...{}", &sig[..10], &sig[sig.len()-6..]);
 

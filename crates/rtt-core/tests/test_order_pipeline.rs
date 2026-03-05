@@ -74,7 +74,7 @@ async fn trade_signal_becomes_signed_order() {
     // Step 1: Build the Order struct from the trigger.
     // This converts price/size into USDC fixed-point amounts:
     //   BUY 100 @ 0.50 -> makerAmount=50_000_000 (USDC), takerAmount=100_000_000 (tokens)
-    let order = build_order(&trigger, maker, maker, 0);
+    let order = build_order(&trigger, maker, maker, 0, rtt_core::clob_order::SignatureType::Eoa);
     assert_eq!(order.tokenId, U256::from(1234u64));
     assert_eq!(order.makerAmount, U256::from(50_000_000u64));
     assert_eq!(order.takerAmount, U256::from(100_000_000u64));
@@ -127,7 +127,7 @@ async fn presigned_batch_has_unique_salts_and_valid_signatures() {
     };
 
     // Pre-sign 10 orders — each gets a unique random salt.
-    let batch = presign_batch(&signer, &trigger, maker, maker, 0, false, "owner-uuid", 10)
+    let batch = presign_batch(&signer, &trigger, maker, maker, 0, false, rtt_core::clob_order::SignatureType::Eoa, "owner-uuid", 10)
         .await
         .expect("presign_batch failed");
 

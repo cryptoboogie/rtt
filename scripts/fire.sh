@@ -39,6 +39,7 @@ export TOKEN_ID
 export PRICE
 export FEE_RATE_BPS
 export NEG_RISK
+export SIG_TYPE=1  # POLY_PROXY (proxy wallet as maker, EOA as signer)
 
 # Build test binary once, cache the path
 CACHE_FILE=".test_binary_path"

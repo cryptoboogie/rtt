@@ -109,6 +109,7 @@ async fn run(config: ExecutorConfig) {
             signer_addr,
             config.execution.fee_rate_bps,
             config.execution.is_neg_risk,
+            rtt_core::clob_order::SignatureType::Poly,
             &config.credentials.api_key,
             config.execution.presign_count,
         )

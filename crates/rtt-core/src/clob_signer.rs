@@ -51,6 +51,7 @@ pub fn build_order(
     maker: Address,
     signer_addr: Address,
     fee_rate_bps: u64,
+    signature_type: SignatureType,
 ) -> Order {
     let clob_side = ClobSide::from(trigger.side);
     let (maker_amount, taker_amount) = compute_amounts(&trigger.price, &trigger.size, clob_side);
@@ -69,7 +70,7 @@ pub fn build_order(
         nonce: U256::ZERO,
         feeRateBps: U256::from(fee_rate_bps),
         side: clob_side as u8,
-        signatureType: SignatureType::Eoa as u8,
+        signatureType: signature_type as u8,
     }
 }
 
@@ -81,12 +82,13 @@ pub async fn presign_batch(
     signer_addr: Address,
     fee_rate_bps: u64,
     is_neg_risk: bool,
+    signature_type: SignatureType,
     owner: &str,
     count: usize,
 ) -> Result<Vec<SignedOrderPayload>, Box<dyn std::error::Error + Send + Sync>> {
     let mut results = Vec::with_capacity(count);
     for _ in 0..count {
-        let order = build_order(trigger, maker, signer_addr, fee_rate_bps);
+        let order = build_order(trigger, maker, signer_addr, fee_rate_bps, signature_type);
         let sig = sign_order(signer, &order, is_neg_risk).await?;
         let payload = SignedOrderPayload::new(&order, &sig, trigger.order_type, owner);
         results.push(payload);
@@ -180,7 +182,7 @@ mod tests {
             timestamp_ns: 0,
         };
         let maker = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-        let order = build_order(&trigger, maker, maker, 0);
+        let order = build_order(&trigger, maker, maker, 0, SignatureType::Eoa);
 
         assert_eq!(order.maker, maker);
         assert_eq!(order.signer, maker);
@@ -206,7 +208,7 @@ mod tests {
             order_type: OrderType::FOK,
             timestamp_ns: 0,
         };
-        let batch = presign_batch(&signer, &trigger, maker, maker, 0, false, "owner-uuid", 10)
+        let batch = presign_batch(&signer, &trigger, maker, maker, 0, false, SignatureType::Eoa, "owner-uuid", 10)
             .await
             .unwrap();
         assert_eq!(batch.len(), 10);
