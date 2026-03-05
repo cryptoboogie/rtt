@@ -373,8 +373,19 @@ mod tests {
             timestamp_ns: clock::now_ns(),
         };
 
-        let order = build_order(&trigger, signer_addr, signer_addr, 0);
-        let sig = sign_order(&signer, &order, false).await.unwrap();
+        let fee_rate_bps: u64 = std::env::var("FEE_RATE_BPS")
+            .unwrap_or_else(|_| "0".to_string())
+            .parse()
+            .unwrap_or(0);
+        let is_neg_risk: bool = std::env::var("NEG_RISK")
+            .unwrap_or_else(|_| "false".to_string())
+            .parse()
+            .unwrap_or(false);
+
+        println!("            fee_rate_bps={} neg_risk={}", fee_rate_bps, is_neg_risk);
+
+        let order = build_order(&trigger, signer_addr, signer_addr, fee_rate_bps);
+        let sig = sign_order(&signer, &order, is_neg_risk).await.unwrap();
         println!("Signature:  {}...{}", &sig[..10], &sig[sig.len()-6..]);
 
         let payload = SignedOrderPayload::new(&order, &sig, trigger.order_type, &creds.api_key);
