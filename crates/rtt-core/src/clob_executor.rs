@@ -384,7 +384,9 @@ mod tests {
 
         println!("            fee_rate_bps={} neg_risk={}", fee_rate_bps, is_neg_risk);
 
-        let order = build_order(&trigger, signer_addr, signer_addr, fee_rate_bps);
+        // maker = proxy wallet (POLY_ADDRESS), signer = EOA (from POLY_PRIVATE_KEY)
+        let maker_addr: Address = creds.address.parse().expect("invalid POLY_ADDRESS");
+        let order = build_order(&trigger, maker_addr, signer_addr, fee_rate_bps);
         let sig = sign_order(&signer, &order, is_neg_risk).await.unwrap();
         println!("Signature:  {}...{}", &sig[..10], &sig[sig.len()-6..]);
 
