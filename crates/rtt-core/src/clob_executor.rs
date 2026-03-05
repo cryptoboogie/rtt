@@ -356,13 +356,18 @@ mod tests {
         let warm_count = conn_pool.warmup().await.expect("warmup failed");
         println!("Pool:       {} warm connection(s)", warm_count);
 
-        // --- Build & sign a real order (will be rejected — fake token ID) ---
+        // --- Build & sign a real order ---
+        // TOKEN_ID and PRICE from env; everything else hardcoded for a minimal test trade.
+        let token_id = std::env::var("TOKEN_ID")
+            .expect("TOKEN_ID env var required — the condition token to buy");
+        let price = std::env::var("PRICE")
+            .unwrap_or_else(|_| "0.95".to_string());
+
         let trigger = TriggerMessage {
             trigger_id: 1,
-            // Real active market token (BitBoy convicted? — Yes outcome)
-            token_id: "75467129615908319583031474642658885479135630431889036121812713428992454630178".to_string(),
+            token_id,
             side: Side::Buy,
-            price: "0.50".to_string(),
+            price,
             size: "2".to_string(),
             order_type: OrderType::FOK,
             timestamp_ns: clock::now_ns(),
