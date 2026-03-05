@@ -4,13 +4,10 @@ set -euo pipefail
 # Fire a single real order on a warm H2 connection and print latency stats.
 #
 # Usage:
-#   ./scripts/fire.sh <token_id> [price]
+#   ./scripts/fire.sh <token_id> [price] [fee_rate_bps] [neg_risk]
 #
-# Example:
-#   ./scripts/fire.sh 12345678901234567890 0.95
-#
-# Defaults: price=0.95, size=2 ($1.90), side=Buy, FOK
-# Credentials loaded from .env (POLY_API_KEY, POLY_SECRET, etc.)
+# First run builds the test binary (~3-5 min). Subsequent runs are instant.
+# To force rebuild: rm .test_binary_path
 
 if [ $# -lt 1 ]; then
     echo "Usage: ./scripts/fire.sh <token_id> [price] [fee_rate_bps] [neg_risk]"
@@ -43,6 +40,25 @@ export PRICE
 export FEE_RATE_BPS
 export NEG_RISK
 
+# Build test binary once, cache the path
+CACHE_FILE=".test_binary_path"
+if [ ! -f "$CACHE_FILE" ] || [ ! -f "$(cat "$CACHE_FILE" 2>/dev/null)" ]; then
+    echo "Building test binary (one-time)..."
+    BINARY=$(cargo test --release -p rtt-core --no-run --message-format=json 2>/dev/null \
+        | grep '"executable"' \
+        | grep 'rtt.core' \
+        | tail -1 \
+        | sed 's/.*"executable":"\([^"]*\)".*/\1/')
+    if [ -z "$BINARY" ]; then
+        echo "Error: could not find test binary"
+        exit 1
+    fi
+    echo "$BINARY" > "$CACHE_FILE"
+    echo "Cached: $BINARY"
+fi
+
+BINARY=$(cat "$CACHE_FILE")
+
 echo "=== fire.sh ==="
 echo "token_id:      ${TOKEN_ID:0:12}...${TOKEN_ID: -6}"
 echo "price:         $PRICE"
@@ -52,4 +68,4 @@ echo "fee_rate_bps:  $FEE_RATE_BPS"
 echo "neg_risk:      $NEG_RISK"
 echo ""
 
-cargo test --release -p rtt-core test_clob_end_to_end_pipeline -- --ignored --nocapture
+"$BINARY" test_clob_end_to_end_pipeline --ignored --nocapture
