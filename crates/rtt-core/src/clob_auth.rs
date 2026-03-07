@@ -37,7 +37,7 @@ pub fn build_l2_headers(
     let signature = hmac_signature(&creds.secret, &message)?;
 
     Ok(vec![
-        ("POLY_ADDRESS".to_string(), creds.address.clone()),
+        ("POLY_ADDRESS".to_string(), creds.address.to_lowercase()),
         ("POLY_API_KEY".to_string(), creds.api_key.clone()),
         ("POLY_PASSPHRASE".to_string(), creds.passphrase.clone()),
         ("POLY_SIGNATURE".to_string(), signature),
@@ -112,7 +112,7 @@ mod tests {
 
         // Verify values
         let find = |name: &str| headers.iter().find(|(n, _)| n == name).unwrap().1.clone();
-        assert_eq!(find("POLY_ADDRESS"), creds.address);
+        assert_eq!(find("POLY_ADDRESS"), creds.address.to_lowercase());
         assert_eq!(find("POLY_API_KEY"), creds.api_key);
         assert_eq!(find("POLY_PASSPHRASE"), creds.passphrase);
         assert_eq!(find("POLY_TIMESTAMP"), "1234567890");
