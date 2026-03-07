@@ -347,7 +347,8 @@ mod tests {
         let signer_addr = signer.address();
 
         println!("\n=== CLOB End-to-End Pipeline Test ===");
-        println!("Address:    {}", creds.address);
+        println!("Auth addr:  {}", creds.address);
+        println!("Proxy addr: {}", proxy_address);
         println!("Signer:     {:?}", signer_addr);
         println!("API Key:    {}...", &creds.api_key[..8.min(creds.api_key.len())]);
 
