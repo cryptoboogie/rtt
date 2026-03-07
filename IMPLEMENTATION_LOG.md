@@ -128,6 +128,10 @@
 
 ---
 
+> **NOTE:** The C++ prototype code (`src/`, `cmake/`, `CMakeLists.txt`, `tests/*.cpp`) was removed from the repo after all functionality was ported to Rust. The log entries above (1.1–7.3) are preserved as historical reference. All 92 C++ tests have equivalent or superior Rust coverage in the `crates/` workspace.
+
+---
+
 # Rust Port Implementation Log (Session 1)
 
 ## R1.1 — Cargo workspace with rtt-core and rtt-bench crates
@@ -705,3 +709,49 @@ Trigger received
   → Order guard release
   → Pool auto-refill if <20% remaining
 ```
+
+---
+
+# Session 8: First Live Trade + Auth Fixes
+
+## 8.1 — fire.sh script and TOKEN_ID/PRICE env vars
+- **Files changed**: `scripts/fire.sh` (new), `crates/rtt-core/src/clob_executor.rs`
+- **Changes**: e2e test reads TOKEN_ID (required) and PRICE (default 0.95) from env. `fire.sh` wraps the test with `.env` sourcing and binary caching.
+- **Commit**: `feat: enhance order execution with new script and dynamic token handling`
+
+## 8.2 — Fee rate and neg_risk support
+- **Files changed**: `crates/rtt-core/src/clob_executor.rs`, `scripts/fire.sh`
+- **Changes**: CLOB rejects fee_rate_bps=0 on markets with taker fees. Added FEE_RATE_BPS and NEG_RISK env vars. Default fee 1000 bps.
+- **Commit**: `fix: pass fee_rate_bps and neg_risk to fire.sh`
+
+## 8.3 — Proxy wallet signature type (POLY_PROXY)
+- **Files changed**: `crates/rtt-core/src/clob_signer.rs`, `crates/rtt-core/src/clob_order.rs`, `crates/rtt-core/src/clob_executor.rs`, `crates/pm-executor/src/main.rs`, `crates/rtt-core/tests/test_order_pipeline.rs`, `scripts/fire.sh`
+- **Changes**: Added `signature_type` param to `build_order()` and `presign_batch()`. Polymarket proxy wallets require signatureType=1 or 2. Default SIG_TYPE=2 (Gnosis Safe) in fire.sh.
+- **Commit**: `fix: support proxy wallet signature type (POLY_PROXY=1)`
+
+## 8.4 — Separate EOA and proxy addresses
+- **Files changed**: `crates/rtt-core/src/clob_auth.rs`, `crates/rtt-core/src/clob_executor.rs`
+- **Changes**: POLY_ADDRESS = EOA (for auth headers), POLY_PROXY_ADDRESS = proxy wallet (for order maker). Previously one address was used for both, causing 401s.
+- **Commit**: `fix: use EOA address in auth headers, proxy address as order maker`
+
+## 8.5 — Lowercase POLY_ADDRESS in auth headers
+- **Files changed**: `crates/rtt-core/src/clob_auth.rs`
+- **Changes**: Polymarket's official Rust client sends lowercase hex addresses. Checksummed addresses from .env caused 401 on case-sensitive API key lookups.
+- **Commit**: `fix: lowercase POLY_ADDRESS in auth headers`
+
+## 8.6 — On-chain approvals script
+- **Files created**: `scripts/approve.js`
+- **Changes**: One-time script to set USDC + conditional token approvals for all 3 Polymarket exchange contracts on Polygon. Checks existing approvals before sending.
+
+## 8.7 — Remove C++ prototype
+- **Files removed**: `src/` (31 files), `cmake/` (1 file), `CMakeLists.txt`, `tests/*.cpp` (22 files)
+- **Changes**: All C++ code fully ported to Rust. 54 files removed, 0 functionality lost.
+
+## 8.8 — First successful live trade
+- **Result**: FOK buy order filled on 5-min BTC market from Ireland EC2
+- **Latency**: trigger_to_wire=1.0ms, warm_ttfb=365ms (server processing under high load)
+- **Note**: 365ms server response expected for real fills on busy markets; rejected orders return in ~28ms
+
+---
+
+**Session 8 Totals: 100 unit tests pass, 1 ignored. First real trade executed.**
