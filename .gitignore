@@ -9,3 +9,8 @@ compile_commands.json
 .DS_Store
 target/
 .env
+.claude/settings.local.json
+SESSION_*.md
+DEPLOY_*.md
+BTC_UPDOWN_*.md
+.test_binary_path
