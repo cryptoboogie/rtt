@@ -46,21 +46,27 @@ pub fn build_l2_headers(
 }
 
 /// Load L2 credentials from environment variables.
-pub fn load_credentials_from_env() -> Result<(L2Credentials, String), Box<dyn std::error::Error>> {
+/// Returns (creds, private_key, proxy_address).
+/// - POLY_ADDRESS = EOA signer address (used in auth headers)
+/// - POLY_PROXY_ADDRESS = proxy/funder address (used as maker in orders)
+/// - POLY_PRIVATE_KEY = EOA private key
+pub fn load_credentials_from_env() -> Result<(L2Credentials, String, String), Box<dyn std::error::Error>> {
     let api_key = std::env::var("POLY_API_KEY")?;
     let secret = std::env::var("POLY_SECRET")?;
     let passphrase = std::env::var("POLY_PASSPHRASE")?;
     let address = std::env::var("POLY_ADDRESS")?;
     let private_key = std::env::var("POLY_PRIVATE_KEY")?;
+    let proxy_address = std::env::var("POLY_PROXY_ADDRESS")?;
 
     Ok((
         L2Credentials {
             api_key,
             secret,
             passphrase,
-            address,
+            address, // EOA address — used in auth headers
         },
         private_key,
+        proxy_address, // proxy wallet — used as maker/funder
     ))
 }
 
@@ -124,13 +130,15 @@ mod tests {
         std::env::set_var("POLY_PASSPHRASE", "test-pass");
         std::env::set_var("POLY_ADDRESS", "0xdeadbeef");
         std::env::set_var("POLY_PRIVATE_KEY", "0xprivkey");
+        std::env::set_var("POLY_PROXY_ADDRESS", "0xproxyaddr");
 
-        let (creds, pk) = load_credentials_from_env().unwrap();
+        let (creds, pk, proxy) = load_credentials_from_env().unwrap();
         assert_eq!(creds.api_key, "test-key");
         assert_eq!(creds.secret, "dGVzdC1zZWNyZXQ=");
         assert_eq!(creds.passphrase, "test-pass");
         assert_eq!(creds.address, "0xdeadbeef");
         assert_eq!(pk, "0xprivkey");
+        assert_eq!(proxy, "0xproxyaddr");
 
         // Clean up
         std::env::remove_var("POLY_API_KEY");
@@ -138,5 +146,6 @@ mod tests {
         std::env::remove_var("POLY_PASSPHRASE");
         std::env::remove_var("POLY_ADDRESS");
         std::env::remove_var("POLY_PRIVATE_KEY");
+        std::env::remove_var("POLY_PROXY_ADDRESS");
     }
 }

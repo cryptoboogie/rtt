@@ -339,8 +339,8 @@ mod tests {
         use alloy::signers::local::PrivateKeySigner;
 
         // --- Load real credentials from env ---
-        let (creds, private_key) = load_credentials_from_env()
-            .expect("Set POLY_API_KEY, POLY_SECRET, POLY_PASSPHRASE, POLY_ADDRESS, POLY_PRIVATE_KEY");
+        let (creds, private_key, proxy_address) = load_credentials_from_env()
+            .expect("Set POLY_API_KEY, POLY_SECRET, POLY_PASSPHRASE, POLY_ADDRESS, POLY_PRIVATE_KEY, POLY_PROXY_ADDRESS");
 
         let pk_hex = private_key.strip_prefix("0x").unwrap_or(&private_key);
         let signer: PrivateKeySigner = pk_hex.parse().expect("invalid POLY_PRIVATE_KEY");
@@ -395,8 +395,8 @@ mod tests {
 
         println!("            fee_rate_bps={} neg_risk={} sig_type={}", fee_rate_bps, is_neg_risk, sig_type);
 
-        // maker = proxy wallet (POLY_ADDRESS), signer = EOA (from POLY_PRIVATE_KEY)
-        let maker_addr: Address = creds.address.parse().expect("invalid POLY_ADDRESS");
+        // maker = proxy wallet (POLY_PROXY_ADDRESS), signer = EOA (from POLY_PRIVATE_KEY)
+        let maker_addr: Address = proxy_address.parse().expect("invalid POLY_PROXY_ADDRESS");
         let order = build_order(&trigger, maker_addr, signer_addr, fee_rate_bps, signature_type);
         let sig = sign_order(&signer, &order, is_neg_risk).await.unwrap();
         println!("Signature:  {}...{}", &sig[..10], &sig[sig.len()-6..]);
