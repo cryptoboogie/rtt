@@ -1,0 +1,602 @@
+<!-- AGENT CONTEXT — READ THIS FIRST -->
+<!-- This file is your primary context artifact. Read it before doing anything. -->
+<!-- Current phase: production-ready pipeline with safety rails; first live trade completed -->
+<!-- Active branch: master -->
+<!-- Do not modify files outside your assigned scope without checking with the user -->
+
+# Architecture: Low-Latency Polymarket Execution Service
+
+## Purpose
+
+This system is a low-latency trading pipeline for Polymarket's CLOB (Central Limit Order Book) on Polygon. It connects to Polymarket's WebSocket feed, maintains a real-time local order book, runs configurable strategies that produce trade signals, and dispatches pre-signed EIP-712 orders over warm HTTP/2 connections. The entire pipeline is instrumented with nanosecond-precision timestamps at 8 checkpoints, enabling precise measurement of what the code controls (trigger-to-wire) vs. what physics controls (network RTT). The binary is `pm-executor`. It reads `config.toml`, connects to live markets, and either logs triggers (dry-run) or sends real orders.
+
+## Architecture Overview
+
+The system is a streaming pipeline with four stages, connected by typed channels:
+
+```
+┌─────────────────┐
+│  Polymarket WS  │  wss://ws-subscriptions-clob.polymarket.com/ws/market
+└────────┬────────┘
+         │ JSON frames (book snapshots, price_change deltas)
+         ▼
+┌─────────────────┐
+│    pm-data       │  WsClient → OrderBookManager → Pipeline
+│   (async tokio)  │  Maintains local order book per asset_id
+└────────┬────────┘
+         │ broadcast<OrderBookSnapshot>
+         ▼
+┌─────────────────┐
+│  bridge (async)  │  broadcast_to_mpsc: forwards snapshots
+└────────┬────────┘
+         │ mpsc<OrderBookSnapshot>
+         ▼
+┌─────────────────┐
+│  pm-strategy     │  StrategyRunner: calls strategy.on_book_update()
+│   (async tokio)  │  Produces TriggerMessage when conditions met
+└────────┬────────┘
+         │ mpsc<TriggerMessage>
+         ▼
+┌─────────────────┐
+│  bridge (async)  │  mpsc_to_crossbeam: stamps timestamp_ns via clock::now_ns()
+└────────┬────────┘
+         │ crossbeam<TriggerMessage>  (sync, bounded)
+         ▼
+┌─────────────────────────────────────────────────────┐
+│  Execution Loop (dedicated OS thread, NOT tokio)     │
+│                                                      │
+│  Safety checks:                                      │
+│    1. CircuitBreaker tripped? → break                │
+│    2. RateLimiter exceeded? → drop trigger            │
+│    3. OrderGuard conflict? → drop trigger             │
+│    4. CircuitBreaker amount check → may trip          │
+│                                                      │
+│  dry_run=true:  log "[DRY RUN] Would fire order"     │
+│  dry_run=false: process_one_clob() →                 │
+│    PreSignedOrderPool.dispatch() → warm H2 → CLOB API│
+└──────────────────────────────────────────────────────┘
+```
+
+## Workspace Crates
+
+```
+rtt/
+├── Cargo.toml              # Workspace root
+├── config.toml             # Runtime configuration
+├── scripts/fire.sh         # One-shot order test via ignored e2e test
+├── crates/
+│   ├── rtt-core/           # Core engine: connections, signing, execution, metrics
+│   ├── rtt-bench/          # CLI benchmark tool
+│   ├── pm-data/            # WebSocket client + order book management
+│   ├── pm-strategy/        # Strategy trait + implementations + backtest
+│   └── pm-executor/        # Main binary: wires everything together
+```
+
+## Components
+
+### rtt-core
+
+The foundational library. Everything latency-sensitive lives here.
+
+#### `clock.rs`
+- `fn now_ns() -> u64` — Monotonic nanoseconds since process start
+- Uses `OnceLock<Instant>` epoch, initialized on first call
+- All timestamps in the system come from this clock
+
+#### `trigger.rs` — Shared types
+```rust
+struct TriggerMessage { trigger_id, token_id, side, price, size, order_type, timestamp_ns }
+struct OrderBookSnapshot { asset_id, best_bid, best_ask, timestamp_ms, hash }
+struct PriceLevel { price: String, size: String }
+struct TradeEvent { asset_id, price, size, side, timestamp_ms }
+enum Side { BUY, SELL }
+enum OrderType { GTC, GTD, FOK, FAK }
+```
+All types derive `Serialize`/`Deserialize`. Prices and sizes are strings (decimal precision preserved).
+
+#### `metrics.rs` — Latency instrumentation
+```rust
+struct TimestampRecord {
+    t_trigger_rx,       // Trigger received from crossbeam queue
+    t_dispatch_q,       // Dequeued for dispatch
+    t_exec_start,       // Execution processing began
+    t_buf_ready,        // Request buffer prepared
+    t_write_begin,      // H2 frame submission started
+    t_write_end,        // H2 frame dispatched to kernel (microseconds)
+    t_first_resp_byte,  // First response byte from server (milliseconds)
+    t_headers_done,     // Response fully collected
+    is_reconnect: bool,
+    cf_ray_pop: String, // Cloudflare POP code (e.g. "EWR", "DUB")
+    connection_index: usize,
+}
+```
+
+Derived metrics (all in nanoseconds):
+- `queue_delay()` = exec_start - trigger_rx
+- `prep_time()` = buf_ready - exec_start
+- `trigger_to_wire()` = write_begin - trigger_rx (what WE control)
+- `write_duration()` = write_end - write_begin (frame submission, NOT RTT)
+- `warm_ttfb()` = first_resp_byte - write_begin (network physics)
+- `trigger_to_first_byte()` = first_resp_byte - trigger_rx (total latency)
+
+`StatsAggregator` computes p50/p95/p99/p99.9/max over warm samples only (reconnects filtered).
+
+#### `connection.rs` — HTTP/2 connection pool
+- `ConnectionPool::new(host, port, pool_size, address_family)`
+- `warmup()` — DNS → TCP (NODELAY) → TLS (rustls, ALPN h2) → H2 SETTINGS
+- `send_start(req) -> SendHandle` — Submit H2 frame (returns in microseconds)
+- `SendHandle::collect() -> Response` — Await server response (milliseconds)
+- Round-robin via `AtomicUsize`, reconnect on failure
+- `extract_pop(cf_ray)` — Parse Cloudflare POP from cf-ray header
+
+#### `request.rs` — Zero-allocation request template
+- Fixed `[u8; 4096]` body with named patch slots
+- `register_patch(offset, length)` / `patch(slot, value)` for in-place mutation
+- `build_request()` → `Request<Bytes>` with headers
+
+#### `clob_order.rs` — Polymarket order types
+- `Order` defined via alloy `sol!` macro (automatic EIP-712 struct hash)
+- Exchange addresses: standard (`0x4bFb...`) and neg-risk (`0xC5d5...`)
+- `compute_amounts(price, size, side)` — USDC (6 decimals) math
+- `generate_salt()` — Random u64 masked to 53 bits (JSON number safety)
+- `SignedOrderPayload` — Order + signature + orderType + owner (API-ready JSON)
+- `SignatureType` — EOA (0), Poly (1), GnosisSafe (2)
+
+#### `clob_signer.rs` — EIP-712 signing
+- `make_domain(is_neg_risk)` — EIP-712 domain for Polygon chain_id=137
+- `sign_order(signer, order, is_neg_risk)` — Produce hex signature
+- `build_order(trigger, maker, signer, fee_rate_bps, sig_type)` — TriggerMessage → Order
+- `presign_batch(signer, trigger, ..., count)` — Sign N orders with unique salts at startup
+
+#### `clob_auth.rs` — L2 API authentication
+- HMAC-SHA256: message = timestamp + method + path + body
+- Secret: base64url-decoded from API credential
+- Headers: POLY_ADDRESS (lowercase), POLY_API_KEY, POLY_PASSPHRASE, POLY_SIGNATURE, POLY_TIMESTAMP
+- `L2Credentials { api_key, secret, passphrase, address }`
+- Address in headers = EOA signer (not proxy wallet)
+
+#### `clob_request.rs` — Request building
+- `build_order_request(payload, creds)` — Full POST /order with fresh HMAC
+- `build_order_template(payload)` — Pre-serialize body, register salt patch slot
+- `build_request_from_template(template, creds)` — Hot-path: recompute HMAC only
+
+#### `clob_executor.rs` — Pre-signed order pool + hot path
+```rust
+struct PreSignedOrderPool {
+    bodies: Vec<Vec<u8>>,  // Pre-serialized JSON payloads
+    cursor: usize,         // Next to consume
+}
+```
+- `dispatch(creds)` — Consume next body, recompute HMAC headers only (body frozen)
+- `process_one_clob(pool, presigned, creds, msg, rt)` — Hot-path function:
+  1. `presigned.dispatch()` → pre-signed order with fresh HMAC
+  2. `pool.send_start()` → submit H2 frame (microseconds)
+  3. `handle.collect()` → await response (milliseconds)
+  4. Returns `(TimestampRecord, Option<Vec<u8>>)` with response body
+
+#### `executor.rs` — Threading primitives
+- `IngressThread` — Stamps `timestamp_ns` on triggers, sends to crossbeam queue
+- `ExecutionThread` — Dedicated OS thread with internal tokio runtime, spin-loops on `try_recv()`
+- `MaintenanceThread` — Periodic health checks via GET /
+- `pin_to_core(core_id)` — CPU affinity via `core_affinity` crate
+
+#### `benchmark.rs` — Latency profiling
+- 3 modes: SingleShot (200ms delay), RandomCadence (50-500ms), BurstRace (N triggers + 500ms)
+- Warms pool, injects synthetic triggers, collects TimestampRecords
+- POP distribution histogram, warm/cold separation
+
+#### `h3_stub.rs` — HTTP/3 placeholder
+- `probe_alt_svc()` confirms Cloudflare advertises h3 (it does)
+- Full QUIC client not implemented
+
+### pm-data
+
+Real-time market data from Polymarket WebSocket.
+
+#### `ws.rs` — WebSocket client
+- Connects to `wss://ws-subscriptions-clob.polymarket.com/ws/market`
+- Subscribes to asset channels with `{"type": "subscribe", "assets_ids": [...]}`
+- 10-second ping interval, auto-reconnect on disconnect (2-second delay)
+- Broadcasts `WsMessage` enum to subscribers
+
+#### `types.rs` — WebSocket message types
+```rust
+enum WsMessage {
+    Book(BookUpdate),           // Full order book snapshot
+    PriceChange(PriceChangeEvent),  // Incremental delta
+    LastTradePrice(...),        // Informational, not used
+    TickSizeChange(...),        // Informational, not used
+    BestBidAsk(...),            // Informational, not used
+}
+```
+Tagged by `event_type` field in JSON.
+
+#### `orderbook.rs` — Local order book state
+- `OrderBookManager` — `Arc<RwLock<HashMap<asset_id, BookState>>>`
+- `BookState` uses `BTreeMap<String, String>` for price ladders (sorted by price string)
+- `apply_book_update()` — Full snapshot replacement
+- `apply_price_change()` — Incremental delta (upsert/remove on "0" size)
+- Best bid = last BTreeMap entry (highest), best ask = first (lowest)
+
+#### `pipeline.rs` — Orchestrator
+- Subscribes to WsClient, processes messages, updates OrderBookManager
+- Broadcasts `OrderBookSnapshot` to downstream subscribers
+- Only `Book` and `PriceChange` messages modify state; others are no-ops
+
+### pm-strategy
+
+Trading strategy framework.
+
+#### `strategy.rs` — Core trait
+```rust
+trait Strategy: Send + Sync {
+    fn on_book_update(&mut self, snapshot: &OrderBookSnapshot) -> Option<TriggerMessage>;
+    fn on_trade(&mut self, trade: &TradeEvent) -> Option<TriggerMessage>;
+    fn name(&self) -> &str;
+}
+```
+
+#### `threshold.rs` — ThresholdStrategy
+- Fires when best_ask <= threshold (buy) or best_bid >= threshold (sell)
+- Auto-incrementing trigger_id, timestamp from `Instant::elapsed()`
+
+#### `spread.rs` — SpreadStrategy
+- Fires when bid-ask spread < max_spread
+- Buy side uses ask price, sell side uses bid price
+
+#### `config.rs` — TOML-driven factory
+```rust
+struct StrategyConfig { strategy, token_id, side, size, order_type, params }
+struct StrategyParams { threshold: Option<f64>, max_spread: Option<f64> }
+```
+- `build_strategy()` — Factory method: "threshold" or "spread" → `Box<dyn Strategy>`
+
+#### `runner.rs` — Async execution loop
+- Receives `OrderBookSnapshot` via mpsc, calls `strategy.on_book_update()`
+- Forwards `TriggerMessage` to mpsc sender
+- Exits when input channel closes
+
+#### `backtest.rs` — Offline replay
+- `BacktestRunner::run(strategy, snapshots)` — Replay historical data through any strategy
+- `load_snapshots(path)` — Load from JSON file
+
+### pm-executor
+
+Main binary. Wires all components together.
+
+#### `main.rs` — Entry point
+1. Loads `config.toml` (or `--config <path>`)
+2. Builds credentials (validates only in live mode)
+3. Constructs strategy from config
+4. Live mode: warms HTTP/2 pool, pre-signs orders
+5. Creates channel pipeline: broadcast → mpsc → mpsc → crossbeam
+6. Spawns execution loop on dedicated OS thread
+7. Starts WebSocket pipeline, bridges, strategy runner, health monitor
+8. Waits for Ctrl+C, graceful shutdown with 5-second timeout
+
+#### `config.rs` — Configuration
+```rust
+struct ExecutorConfig {
+    credentials: CredentialsConfig,
+    connection: ConnectionConfig,   // pool_size=2, address_family="auto"
+    websocket: WebSocketConfig,     // asset_ids, channel capacities
+    strategy: StrategyConfig,       // reuses pm-strategy config
+    execution: ExecutionConfig,     // presign_count=100, dry_run=true
+    safety: SafetyConfig,           // circuit breaker, rate limiter
+    logging: LoggingConfig,         // level="info"
+}
+```
+All credential fields support `POLY_*` env var overrides.
+
+#### `bridge.rs` — Channel adapters
+- `broadcast_to_mpsc()` — Forwards OrderBookSnapshot, handles `Lagged` by logging warning
+- `mpsc_to_crossbeam()` — Forwards TriggerMessage, **stamps `timestamp_ns`** via `clock::now_ns()`
+
+#### `execution.rs` — Execution loop
+- `build_credentials()` — Dry-run allows empty creds; live validates all fields
+- `run_execution_loop()` — Spin loop on `crossbeam::try_recv()` with `yield_now()`
+  - Creates dedicated tokio runtime inside OS thread
+  - 4-layer safety: CircuitBreaker → RateLimiter → OrderGuard → CircuitBreaker amount check
+  - Auto-refills pre-signed pool when <20% remaining (cursor reset)
+
+#### `safety.rs` — Lock-free safety rails
+- **CircuitBreaker**: Atomic counters for orders fired and USD committed (cents). Once tripped, stays tripped (restart required). Limits: `max_orders`, `max_usd_exposure`.
+- **RateLimiter**: 1-second sliding window. Drops excess triggers (not queued). Limit: `max_triggers_per_second`.
+- **OrderGuard**: `AtomicBool` CAS. Ensures single in-flight order at a time (when `require_confirmation=true`).
+
+#### `health.rs` — Periodic health reporting
+- 30-second interval, logs: asset count, orders fired, USD committed, circuit breaker status
+
+#### `logging.rs` — Structured logging
+- `tracing_subscriber` with env-filter
+- Suppresses verbose rtt-core instrumentation modules and upstream library chatter
+- Respects `RUST_LOG` env var
+
+### rtt-bench
+
+CLI benchmark tool. Wraps rtt-core's benchmark module.
+
+```
+rtt-bench --benchmark --samples 100 --connections 2 --mode single-shot --af v6
+rtt-bench --trigger-test  # single trigger
+```
+
+## Data Flow (Detailed)
+
+### Trigger-to-wire path (hot path)
+
+1. **WebSocket frame arrives** → `WsClient` parses JSON → broadcasts `WsMessage`
+2. **Pipeline processes** → `OrderBookManager.apply_book_update()` or `apply_price_change()` → broadcasts `OrderBookSnapshot`
+3. **Bridge** → `broadcast_to_mpsc()` forwards snapshot
+4. **StrategyRunner** → calls `strategy.on_book_update(snapshot)` → if condition met, returns `TriggerMessage { trigger_id, token_id, side, price, size, order_type, timestamp_ns: 0 }`
+5. **Bridge** → `mpsc_to_crossbeam()` **stamps `timestamp_ns = clock::now_ns()`**, sends to crossbeam channel
+6. **Execution loop** (OS thread) → `try_recv()` gets `TriggerMessage`
+7. **Safety checks** → CircuitBreaker → RateLimiter → OrderGuard → CircuitBreaker amount
+8. **`process_one_clob()`**:
+   - `presigned.dispatch(creds)` → consumes next pre-serialized body, computes fresh HMAC headers → `Request<Bytes>`
+   - `pool.send_start(req)` → submits H2 frame to kernel buffer → returns `SendHandle` (microseconds)
+   - `handle.collect()` → awaits server response (milliseconds: network RTT + server processing)
+   - Records all 8 timestamps, extracts cf-ray POP
+9. **Response parsed** → `OrderResponse { success, order_id, status, error_msg, ... }`
+10. **OrderGuard released**, auto-refill if pool <20%
+
+### Pre-signing flow (startup)
+
+1. Strategy threshold determines the order price
+2. `presign_batch()` creates N orders with unique random salts (53-bit masked)
+3. Each order is EIP-712 signed on Polygon (chain_id=137)
+4. Orders are serialized to JSON and stored as `Vec<Vec<u8>>` in `PreSignedOrderPool`
+5. At trigger time, body is used as-is (signature remains valid), only HMAC headers recomputed
+
+## Key Design Decisions
+
+### DECISION: Pre-sign orders at startup with fixed price
+- **ALTERNATIVES CONSIDERED**: Sign orders at trigger time; use a signing sidecar service; template with runtime salt patching
+- **REASON**: EIP-712 signing involves alloy's async signer and is too slow for the hot path. Pre-signing moves all crypto off the critical path. Salt patching was tried and abandoned because it invalidates the EIP-712 signature (salt is part of the signed struct hash — see S4-Bugfix in IMPLEMENTATION_LOG.md).
+- **TRADEOFFS**: Price is fixed at startup (strategy threshold). Cannot adapt to market movements. Re-signing at different prices planned but not implemented. Pool is finite (default 100 orders) — auto-refill resets cursor but reuses same salts (exchange rejects duplicate salts for filled orders).
+
+### DECISION: Dedicated OS thread for execution, not tokio task
+- **ALTERNATIVES CONSIDERED**: tokio::spawn, tokio::spawn_blocking, async execution loop
+- **REASON**: `try_recv()` spin loop with `yield_now()` avoids tokio task scheduling overhead. The execution thread creates its own single-threaded tokio runtime internally for the async H2 operations (`send_start` + `collect`). This keeps the trigger dequeue path synchronous and deterministic.
+- **TRADEOFFS**: Wastes a CPU core spinning. Not suitable for multi-strategy parallelism without multiple threads.
+
+### DECISION: Split `send_start` / `collect` instrumentation
+- **ALTERNATIVES CONSIDERED**: Single `send()` call with before/after timestamps
+- **REASON**: `send_start` submits the H2 frame to the kernel (microseconds). `collect` awaits the server response (milliseconds). Separating them lets us measure what we control (trigger-to-wire, write_duration) independently from what physics controls (warm_ttfb). This was the key insight from Session 9 — before the split, `write_duration` was ~162ms (included RTT), after the split it dropped to <1ms.
+- **TRADEOFFS**: Two `block_on()` calls per request instead of one. Negligible overhead.
+
+### DECISION: Crossbeam channel between async and sync worlds
+- **ALTERNATIVES CONSIDERED**: tokio::sync::mpsc with blocking recv, std::sync::mpsc, flume
+- **REASON**: Crossbeam's bounded channel has excellent performance for SPSC patterns and works natively in sync context. The async-to-sync bridge stamps `timestamp_ns` at the handoff point, giving an accurate trigger receive time.
+- **TRADEOFFS**: crossbeam is MPMC (more sync overhead than pure SPSC). A dedicated SPSC ring buffer (e.g. `rtrb`) would be faster but adds complexity.
+
+### DECISION: Rust over C++
+- **ALTERNATIVES CONSIDERED**: Continue with C++ prototype (completed through milestone 7.3, 92 tests)
+- **REASON**: The C++ version achieved ~8µs trigger-to-wire but required manual memory management, nghttp2 callback ceremony, and platform-specific build hacks (Homebrew libnghttp2 paths). Rust's hyper + rustls stack provides safety guarantees, cross-platform builds, and adequate performance (~80µs debug, estimated ~10-20µs release). The entire C++ prototype was ported and then deleted (commit `6e6016f`).
+- **TRADEOFFS**: Rust's async bridge adds overhead vs. C++'s direct nghttp2 calls. Release build optimizations not yet fully characterized.
+
+### DECISION: rustls over native-tls (OpenSSL)
+- **ALTERNATIVES CONSIDERED**: native-tls (wraps OpenSSL), openssl crate directly
+- **REASON**: ALPN h2 negotiation failed silently on macOS with native-tls. rustls handles ALPN correctly and provides consistent behavior across platforms. Uses webpki-roots for CA certificates (no system cert store dependency).
+- **TRADEOFFS**: rustls is pure Rust without hardware-accelerated AES-NI by default. Enabling `aws-lc-rs` backend would add assembly-optimized crypto but is not yet configured.
+
+### DECISION: BTreeMap for order book price ladders
+- **ALTERNATIVES CONSIDERED**: HashMap + manual sorting, Vec with binary search, custom skip list
+- **REASON**: BTreeMap provides O(log n) insert/remove with automatic sort order. Best bid = last entry, best ask = first entry. Price keys are strings (exact decimal matching, no floating point).
+- **TRADEOFFS**: String comparison for ordering means "0.9" < "0.95" works correctly but "0.10" < "0.9" also sorts correctly by coincidence (Polymarket uses consistent decimal formats). Would break with inconsistent decimal places.
+
+### DECISION: Lock-free atomics for safety rails
+- **ALTERNATIVES CONSIDERED**: Mutex-protected counters, channel-based accounting
+- **REASON**: CircuitBreaker, RateLimiter, and OrderGuard all use `AtomicU64`/`AtomicBool` for zero-contention updates from the hot path. USD tracked in cents (integer) to avoid floating-point atomics.
+- **TRADEOFFS**: Once the circuit breaker trips, it stays tripped (requires process restart). This is intentional — the system fails closed.
+
+### DECISION: Prices as strings, not floats
+- **ALTERNATIVES CONSIDERED**: f64 everywhere, rust_decimal crate
+- **REASON**: Polymarket's API uses string prices ("0.45", "0.95"). EIP-712 signing requires exact USDC amounts computed from these strings. Using f64 for computation and truncating to integer is sufficient for 6-decimal USDC precision without adding a decimal library dependency.
+- **TRADEOFFS**: f64 arithmetic has rounding edge cases at extreme precision. Accepted because USDC has only 6 decimals.
+
+### DECISION: Signature type defaults to GnosisSafe (2)
+- **ALTERNATIVES CONSIDERED**: EOA (0), Poly Proxy (1)
+- **REASON**: Polymarket's Magic Link wallets are Gnosis Safe proxy contracts. The EOA signs, but the proxy wallet is the maker/funder. signatureType=2 tells the exchange to verify the EOA signature against the proxy wallet's authorized signers.
+- **TRADEOFFS**: Requires knowing both the EOA address (for auth) and proxy address (for order maker). These are separate env vars: `POLY_ADDRESS` (EOA, used in HMAC headers) and `POLY_PROXY_ADDRESS` / `POLY_MAKER_ADDRESS` (proxy, used in order struct).
+
+## External Dependencies
+
+| Dependency | Purpose | What breaks if unavailable |
+|---|---|---|
+| Polymarket WS (`wss://ws-subscriptions-clob.polymarket.com/ws/market`) | Real-time order book data | No market data, no triggers, pipeline idle |
+| Polymarket CLOB API (`https://clob.polymarket.com`) | Order submission | Orders fail, but pipeline continues (circuit breaker trips) |
+| Cloudflare CDN | Fronts CLOB API, provides cf-ray POP | TLS handshake fails, connections down |
+| Polygon RPC (via alloy) | Not used at runtime; only in `approve.js` setup script | No runtime impact |
+
+**Rust crate dependencies (key ones):**
+- `hyper` 1.x + `hyper-util` — HTTP/2 client
+- `tokio-rustls` 0.26 + `rustls` 0.23 — TLS
+- `alloy` 1.x — EIP-712 signing, Ethereum types
+- `crossbeam-channel` 0.5 — Sync bounded channels
+- `tokio-tungstenite` 0.26 — WebSocket client
+- `clap` 4.x — CLI parsing (rtt-bench only)
+- `tracing` + `tracing-subscriber` — Structured logging
+
+## Configuration
+
+### `config.toml` (all sections)
+
+```toml
+[credentials]
+api_key = ""          # POLY_API_KEY env override
+api_secret = ""       # POLY_API_SECRET env override
+passphrase = ""       # POLY_PASSPHRASE env override
+private_key = ""      # POLY_PRIVATE_KEY env override
+maker_address = ""    # POLY_MAKER_ADDRESS env override (proxy wallet)
+signer_address = ""   # POLY_SIGNER_ADDRESS env override (EOA)
+
+[connection]
+pool_size = 2         # Number of warm H2 connections
+address_family = "auto"  # "auto", "ipv4", "ipv6"
+
+[websocket]
+asset_ids = ["48825..."]  # Polymarket condition token IDs to monitor
+ws_channel_capacity = 1024
+snapshot_channel_capacity = 256
+
+[strategy]
+strategy = "threshold"    # "threshold" or "spread"
+token_id = "48825..."     # Must match one of websocket.asset_ids
+side = "Buy"
+size = "5"                # USDC amount
+order_type = "FOK"        # FOK, FAK, GTC, GTD
+
+[strategy.params]
+threshold = 0.45          # ThresholdStrategy: fire when ask <= 0.45 (buy)
+# max_spread = 0.02       # SpreadStrategy: fire when spread < 0.02
+
+[execution]
+presign_count = 100       # Orders pre-signed at startup
+is_neg_risk = false       # Use neg-risk exchange contract
+fee_rate_bps = 0          # Taker fee (some markets require >0, e.g. 1000)
+dry_run = true            # SAFETY: false = real orders
+
+[safety]
+max_orders = 10           # Circuit breaker: total orders before halt
+max_usd_exposure = 50.0   # Circuit breaker: max USD committed
+max_triggers_per_second = 2  # Rate limiter
+require_confirmation = true  # Wait for response before next order
+
+[logging]
+level = "info"            # Also controlled by RUST_LOG env var
+```
+
+### Environment variables
+
+| Variable | Purpose | Required when |
+|---|---|---|
+| `POLY_API_KEY` | L2 API key | Live mode |
+| `POLY_API_SECRET` | L2 API secret (base64url-encoded) | Live mode |
+| `POLY_PASSPHRASE` | L2 API passphrase | Live mode |
+| `POLY_PRIVATE_KEY` | EOA private key (hex, with or without 0x) | Live mode |
+| `POLY_MAKER_ADDRESS` | Proxy wallet address (order maker/funder) | Live mode |
+| `POLY_SIGNER_ADDRESS` | EOA address (HMAC auth, lowercased in headers) | Live mode |
+| `RUST_LOG` | Override tracing filter | Optional |
+
+Dry-run mode allows all credentials to be empty.
+
+## Running
+
+```bash
+# All tests (196 pass, 1 ignored)
+cargo test --workspace
+
+# Unit tests only (no network)
+cargo test --workspace --lib
+
+# Single crate
+cargo test -p rtt-core
+cargo test -p pm-data
+cargo test -p pm-strategy
+cargo test -p pm-executor
+
+# Run pipeline in dry-run mode
+cargo run -p pm-executor
+
+# Run pipeline with custom config
+cargo run -p pm-executor -- --config my_config.toml
+
+# Fire a single real order (needs .env with POLY_* vars)
+./scripts/fire.sh <token_id> [price] [fee_rate_bps] [neg_risk]
+
+# Benchmark connection latency
+cargo run -p rtt-bench -- --benchmark --samples 100
+
+# End-to-end test with real credentials (costs money)
+cargo test -p rtt-core -- --ignored test_clob_end_to_end_pipeline
+```
+
+## Current Limitations & Known Issues
+
+1. **Pre-signed orders have fixed price** — Signed at startup using strategy threshold. Strategy must fire at the same price. No runtime price adaptation.
+
+2. **Pre-signed pool uses cursor reset for refill** — When pool drops below 20%, cursor resets to 0 (reuses same bodies). Filled orders will be rejected by exchange on duplicate salt. Circuit breaker catches the failures.
+
+3. **Executor is single-threaded** — Burst triggers processed serially. `queue_delay` grows with burst depth. No parallel order dispatch.
+
+4. **BTreeMap price ordering relies on consistent decimal format** — String comparison works for Polymarket's format but would break with inconsistent decimal places (e.g. "0.1" vs "0.10").
+
+5. **IPv6 intermittently fails on macOS** — Rust's socket layer sometimes can't connect via IPv6 even when system resolver works. `AddressFamily::Auto` is the safe default. IPv6 previously showed better latency (p99 ~178ms v6 vs ~410ms v4 from NYC).
+
+6. **No TLS session resumption** — Each `warmup()` does a full TLS handshake. Session tickets/PSK not implemented.
+
+7. **Release build latency not characterized** — Debug build: ~80µs trigger-to-wire. Expected 5-10x improvement with `--release`. C++ baseline was ~8µs. Not yet measured.
+
+8. **No QUIC/HTTP3** — Cloudflare advertises h3 via alt-svc header. Stub exists but no implementation.
+
+9. **`require_confirmation = true` is serial** — OrderGuard blocks next order until previous response received. Throughput limited to 1/(network RTT) orders/second.
+
+## What's Next
+
+Based on IMPLEMENTATION_LOG.md and known limitations:
+
+- **Dynamic re-signing** — Sign orders at runtime prices, not just startup threshold. Requires moving signing to a background thread or using a pre-computed price ladder.
+- **Release build benchmarking** — Characterize `--release` latency. Target <20µs trigger-to-wire.
+- **Pool auto-replenishment** — Actually re-sign new orders instead of cursor reset. Requires background signing thread.
+- **Multi-strategy support** — Run multiple strategies on different assets simultaneously.
+- **TLS session resumption** — Reduce reconnect latency with session tickets.
+- **HTTP/3 experiment** — Alt-svc probe confirms support. Implement with quinn or h3 crate.
+- **aws-lc-rs crypto backend** — Enable hardware-accelerated AES for rustls.
+
+## Glossary
+
+### Trading & Polymarket
+
+| Term | Meaning |
+|---|---|
+| **CLOB** | Central Limit Order Book — Polymarket's order matching system |
+| **FOK** | Fill or Kill — order must fill completely or be cancelled |
+| **FAK** | Fill and Kill — fill what's available, cancel the rest |
+| **GTC** | Good Till Cancelled |
+| **GTD** | Good Till Date |
+| **neg-risk** | Polymarket market type that uses a different exchange contract address |
+
+### Ethereum & Signing
+
+| Term | Meaning |
+|---|---|
+| **EOA** | Externally Owned Account — the private key that signs transactions and orders |
+| **proxy wallet** | Gnosis Safe contract wallet — the maker/funder address on orders. Controlled by an EOA |
+| **EIP-712** | Ethereum typed structured data signing standard. Used to sign orders off-chain |
+| **salt** | Random nonce baked into each order — prevents replay, must be unique per filled order |
+| **pre-signed pool** | Orders signed at startup with unique salts; at dispatch time only HMAC headers are recomputed |
+
+### API & Auth
+
+| Term | Meaning |
+|---|---|
+| **L2** | Polymarket's API auth layer — HMAC-SHA256 over (timestamp + method + path + body) |
+| **HMAC** | Hash-based Message Authentication Code — proves the request came from the API key holder |
+
+### Networking & Latency
+
+| Term | Meaning |
+|---|---|
+| **H2** | HTTP/2 — the transport protocol used for order submission over warm connections |
+| **ALPN** | Application-Layer Protocol Negotiation — TLS extension that selects H2 during handshake |
+| **cf-ray** | Cloudflare request ID header, includes POP code (e.g. "abc123-EWR") |
+| **POP** | Point of Presence — Cloudflare edge datacenter code (EWR = Newark, DUB = Dublin) |
+| **trigger-to-wire** | Time from trigger dequeue to H2 frame submission — what our code controls |
+| **warm_ttfb** | Time from frame submission to first response byte — network physics + server processing |
+
+### Channels & Concurrency
+
+The pipeline uses three channel types to move data between stages:
+
+| Term | Meaning |
+|---|---|
+| **broadcast** | Tokio channel: one sender, many receivers. Used for WS messages → Pipeline and snapshots → subscribers |
+| **mpsc** | Multi-Producer Single-Consumer — async tokio channel for passing data between async tasks (snapshots → strategy, triggers → bridge) |
+| **crossbeam** | Sync bounded channel from the `crossbeam-channel` crate. Used at the async→OS-thread boundary so the execution loop can spin on `try_recv()` without a tokio runtime |
+
+Data flows: `broadcast` → `mpsc` → `mpsc` → `crossbeam` → execution loop. Each arrow is a bridge that converts between channel types.
+
+## Project History
+
+The project started as a C++ prototype (milestones 1.1–7.3, 92 tests) using CMake, GoogleTest, OpenSSL, and nghttp2. The entire prototype was ported to Rust across Sessions 1–4 (R1.1–S4-7.3), then integrated in Session 5, wired with dry-run in Session 6, safety rails added in Session 7, and first live trade executed in Session 8. The C++ code was deleted after port completion (commit `6e6016f`). See `IMPLEMENTATION_LOG.md` for full session-by-session history.
