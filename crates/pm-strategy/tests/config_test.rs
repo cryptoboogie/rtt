@@ -84,6 +84,28 @@ max_spread = 0.02
 }
 
 #[test]
+fn config_builds_threshold_trigger_strategy() {
+    let toml_str = r#"
+strategy = "threshold"
+token_id = "token_abc"
+side = "Buy"
+size = "50"
+order_type = "FOK"
+
+[params]
+threshold = 0.40
+"#;
+
+    let config: StrategyConfig = toml::from_str(toml_str).unwrap();
+    let strat = config.build_trigger_strategy().unwrap();
+    assert_eq!(strat.name(), "threshold");
+    assert_eq!(
+        strat.requirements().execution_mode,
+        pm_strategy::strategy::ExecutionMode::Trigger
+    );
+}
+
+#[test]
 fn config_unknown_strategy_returns_error() {
     let toml_str = r#"
 strategy = "unknown"
