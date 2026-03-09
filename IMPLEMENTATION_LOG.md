@@ -1107,3 +1107,30 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test --workspace`
 - **Commit**: N/A (working tree only)
 - **Deviation**: The first post-change `cargo test --workspace` run failed in the live `pm-data` keepalive test after a 14s message gap from the upstream feed; the targeted retry passed cleanly and the subsequent full workspace rerun was green, so this was treated as a transient live-network flake rather than a regression from the `rtt-core` changes.
+
+### 11.16 — Benchmark Current Branch for CPU Path and Live Warm-Connection Latency
+- **Spec**: `specs/09-rtt-core-refactor.md`
+- **Files changed**: `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Ran the new Criterion bench to quantify the local CPU path now that the `rtt-core` bench target exists
+  - Ran three live `rtt-bench` single-shot passes with the exact explicit flags `--mode single-shot --samples 100 --connections 2 --af v6` to assess steady-state hot-path latency and tail behavior on the current branch
+  - Captured the practical takeaway: the steady-state CPU path is in low-microsecond territory, but p99+ tails are still dominated by occasional multi-millisecond queue/write stalls
+- **Tests**:
+  - `cargo bench -p rtt-core --bench clob_cpu_paths -- --sample-size 100`
+  - `target/release/rtt-bench --benchmark --mode single-shot --samples 100 --connections 2 --af v6` (3 runs)
+- **Observed results**:
+  - Criterion CPU path:
+    - `clob_amounts/buy`: `14.229 ns`
+    - `clob_amounts/sell`: `14.074 ns`
+    - `clob_request_build_from_cached_body`: `1.954 us`
+    - `presigned_pool_dispatch_with_cached_body`: `125.06 us` per 64 dispatches, or about `1.95 us/dispatch`
+  - Live `rtt-bench` runs (all POP `EWR`, 100 warm / 0 reconnect):
+    - Run 1: `trigger_to_wire p50/p95 = 2.17us / 6.42us`, `write_duration p50/p95 = 2.50us / 7.42us`, `warm_ttfb p50/p95 = 115.57ms / 149.31ms`
+    - Run 2: `trigger_to_wire p50/p95 = 3.12us / 24.54us`, `write_duration p50/p95 = 5.67us / 16.50us`, `warm_ttfb p50/p95 = 110.52ms / 150.21ms`
+    - Run 3: `trigger_to_wire p50/p95 = 2.42us / 9.42us`, `write_duration p50/p95 = 3.38us / 9.29us`, `warm_ttfb p50/p95 = 113.05ms / 159.37ms`
+  - Tail behavior remained noisy:
+    - `trigger_to_wire p99` ranged from `14.05ms` to `80.77ms`
+    - `trigger_to_wire max` ranged from `85.13ms` to `144.38ms`
+    - `write_duration p99` ranged from `29.17us` to `94.51ms`
+- **Commit**: N/A (working tree only)
+- **Deviation**: The Criterion output reported “Performance has regressed” relative to its stored prior baseline, but those comparisons were not treated as sign-off evidence because they depend on whatever local Criterion baseline already existed in `target/criterion`. The raw times above were used instead.
