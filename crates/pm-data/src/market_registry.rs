@@ -66,6 +66,17 @@ impl RetryPolicy {
     }
 }
 
+impl RegistryRefreshPolicy {
+    pub fn is_refresh_due(&self, last_refresh_ms: Option<u64>, now_ms: u64) -> bool {
+        match last_refresh_ms {
+            None => true,
+            Some(last_refresh_ms) => {
+                now_ms.saturating_sub(last_refresh_ms) >= self.refresh_interval.as_millis() as u64
+            }
+        }
+    }
+}
+
 impl<P: RegistryProvider> MarketRegistry<P> {
     pub fn new(
         provider: P,
@@ -299,6 +310,15 @@ mod tests {
                 max_backoff: Duration::from_millis(200),
             },
         }
+    }
+
+    #[test]
+    fn refresh_policy_marks_due_when_interval_elapses() {
+        let policy = refresh_policy();
+
+        assert!(policy.is_refresh_due(None, 1_000));
+        assert!(!policy.is_refresh_due(Some(1_000), 30_999));
+        assert!(policy.is_refresh_due(Some(1_000), 31_000));
     }
 
     #[tokio::test]

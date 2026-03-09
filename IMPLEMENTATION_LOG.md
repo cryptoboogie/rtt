@@ -1398,3 +1398,16 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test -p pm-data --lib`
 - **Commit**: `feat: add 11b paged registry refresh`
 - **Deviation**: The refresh cadence is represented in `RegistryRefreshPolicy` but is not yet wired into a long-running scheduler; that remains off the executor path for this branch.
+
+### 11b.3 — Add offline snapshot replay support and document the registry control plane
+- **Spec**: `specs/11b-market-registry-and-universe-selection.md`
+- **Files changed**: `Cargo.lock`, `crates/pm-data/src/snapshot.rs`, `crates/pm-data/src/market_registry.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added JSON save/load helpers for `RegistrySnapshot` so discovery-backed tests and future backtests can replay deterministic registry state without live HTTP
+  - Added an explicit cadence helper on `RegistryRefreshPolicy` so refresh intervals are testable control-plane behavior rather than a dead field
+  - Updated the architecture document to describe the new registry provider, snapshot, and refresh modules plus the transitional config posture
+- **Tests**:
+  - `cargo test -p pm-data --lib`
+  - `cargo test --workspace`
+- **Commit**: `feat: add 11b registry snapshot replay support`
+- **Deviation**: Executor/runtime wiring still intentionally stops at the config seam on this branch; the registry remains usable for discovery-backed consumers without crossing the integration-owner boundary early.

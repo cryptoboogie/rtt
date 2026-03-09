@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::path::Path;
 
 use rtt_core::{MarketId, MarketMeta};
 use serde::{Deserialize, Serialize};
@@ -17,6 +19,27 @@ pub struct QuarantinedMarketRecord {
     pub record_id: Option<String>,
     pub reason: String,
 }
+
+#[derive(Debug)]
+pub struct SnapshotIoError {
+    message: String,
+}
+
+impl SnapshotIoError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for SnapshotIoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for SnapshotIoError {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct UniverseSelectionPolicy {
@@ -123,8 +146,30 @@ impl SelectedUniverse {
     }
 }
 
+impl RegistrySnapshot {
+    pub fn write_json(&self, path: impl AsRef<Path>) -> Result<(), SnapshotIoError> {
+        let json = serde_json::to_vec_pretty(self)
+            .map_err(|err| SnapshotIoError::new(format!("snapshot serialize failed: {err}")))?;
+        std::fs::write(path, json)
+            .map_err(|err| SnapshotIoError::new(format!("snapshot write failed: {err}")))
+    }
+
+    pub fn read_json(path: impl AsRef<Path>) -> Result<Self, SnapshotIoError> {
+        let bytes = std::fs::read(path)
+            .map_err(|err| SnapshotIoError::new(format!("snapshot read failed: {err}")))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|err| SnapshotIoError::new(format!("snapshot parse failed: {err}")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::{
+        env,
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
     use super::*;
     use rtt_core::{
         AssetId, MarketStatus, MinOrderSize, OutcomeSide, OutcomeToken, RewardFreshness,
@@ -243,5 +288,35 @@ mod tests {
             json["bypass_reason"],
             serde_json::json!("explicit_source_bindings")
         );
+    }
+
+    #[test]
+    fn registry_snapshot_roundtrips_on_disk() {
+        let snapshot = RegistrySnapshot {
+            provider: "fixture".to_string(),
+            sequence: 7,
+            refreshed_at_ms: 1_700_000_123_456,
+            markets: BTreeMap::from([
+                market("market-1", MarketStatus::Active, true),
+                market("market-2", MarketStatus::Closed, false),
+            ]),
+            quarantined: vec![QuarantinedMarketRecord {
+                record_id: Some("bad-market".to_string()),
+                reason: "fixture: missing_yes_no_pair".to_string(),
+            }],
+        };
+        let path = env::temp_dir().join(format!(
+            "registry-snapshot-{}.json",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        snapshot.write_json(&path).unwrap();
+        let loaded = RegistrySnapshot::read_json(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+
+        assert_eq!(loaded, snapshot);
     }
 }

@@ -2535,7 +2535,9 @@ dependencies = [
 name = "pm-data"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "futures-util",
+ "reqwest",
  "rtt-core",
  "serde",
  "serde_json",
