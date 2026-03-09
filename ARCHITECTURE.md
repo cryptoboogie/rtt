@@ -257,6 +257,21 @@ Tagged by `event_type` field in JSON.
 - `polymarket_public_source_id()` identifies the shared public-feed source instance
 - `to_normalized_updates()` converts raw Polymarket wire messages into `rtt_core::NormalizedUpdate` values without changing the legacy order-book path yet
 
+#### `registry_provider.rs` — Discovery provider boundary
+- `RegistryProvider` is the async control-plane trait for paged market discovery
+- `GammaRegistryProvider` crawls Gamma `events` pages, normalizes valid records into shared `MarketMeta`, and quarantines malformed upstream markets instead of poisoning the whole refresh
+- `RegistryPageRequest` / `RegistryPage` make offset-based traversal explicit and keep retry/backoff policy out of the hot path
+
+#### `snapshot.rs` — Registry snapshots and universe selection
+- `RegistrySnapshot` stores provider identity, refresh sequence/timestamp, the full normalized market set, and quarantined record metadata
+- `SelectedUniverse` applies deterministic include/exclude decisions over the snapshot with explicit bypass support for direct source bindings
+- Snapshot JSON import/export exists for deterministic offline registry replay
+
+#### `market_registry.rs` — Refresh orchestration
+- `MarketRegistry` owns paged discovery refreshes, retry/backoff, last-known-good fallback, and selection projection
+- `RegistryRefreshPolicy` keeps page size, cadence, and retry policy explicit without coupling discovery-backed workloads to the live WebSocket path
+- Refresh failure returns the last known good snapshot/universe in degraded mode instead of erasing the control-plane state
+
 #### `orderbook.rs` — Local order book state
 - `OrderBookManager` — `Arc<RwLock<HashMap<asset_id, BookState>>>`
 - `BookState` uses `BTreeMap<String, String>` for price ladders (sorted by price string)
@@ -526,7 +541,8 @@ asset_ids = ["48825..."]  # Legacy explicit Polymarket asset subscriptions; stil
 ws_channel_capacity = 1024
 snapshot_channel_capacity = 256
 
-# Optional additive control-plane shape parsed today; live discovery is deferred.
+# Optional discovery-backed control-plane shape. The registry exists in pm-data,
+# but executor wiring still remains on the legacy explicit-subscription path here.
 # [websocket.market_universe]
 # mode = "discovery"
 # source_id = "gamma-primary"

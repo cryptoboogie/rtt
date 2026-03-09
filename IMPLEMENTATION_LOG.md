@@ -1374,3 +1374,40 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test --workspace`
 - **Commit**: N/A (working tree only)
 - **Deviation**: The test now validates connection liveness and reconnect-free operation rather than per-asset market traffic frequency, which was the real source of the prior flake.
+
+### 11b.1 — Add normalized registry snapshot selection and bypass rules
+- **Spec**: `specs/11b-market-registry-and-universe-selection.md`
+- **Files changed**: `crates/pm-data/src/lib.rs`, `crates/pm-data/src/snapshot.rs`, `crates/pm-data/src/market_registry.rs`, `crates/pm-data/src/registry_provider.rs`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added the initial registry snapshot and universe-selection types in `pm-data`, including deterministic include/exclude decisions over normalized `MarketMeta`
+  - Implemented policy precedence for explicit exclude, explicit include, active-only filtering, and reward-required filtering
+  - Added an explicit registry-bypass result so direct source bindings can skip discovery-backed universe selection entirely
+- **Tests**:
+  - `cargo test -p pm-data snapshot::tests`
+- **Commit**: `feat: add 11b registry selection model`
+- **Deviation**: The provider/refresh loop is still stubbed at this point; this sub-task only establishes the normalized snapshot and policy layer that downstream refresh logic will feed.
+
+### 11b.2 — Add paged registry refresh, retry/backoff, and Gamma normalization
+- **Spec**: `specs/11b-market-registry-and-universe-selection.md`
+- **Files changed**: `crates/pm-data/Cargo.toml`, `crates/pm-data/src/market_registry.rs`, `crates/pm-data/src/registry_provider.rs`, `crates/pm-data/src/snapshot.rs`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added the async registry provider contract, typed page requests/responses, and a Gamma provider that normalizes live event pages into shared `MarketMeta` while quarantining malformed market records
+  - Implemented `MarketRegistry` refresh orchestration with explicit page traversal, retryable transient failures, exponential backoff, and last-known-good fallback on refresh failure
+  - Extended registry snapshots with provider identity, sequence, refresh timestamps, and quarantined-record capture so degraded-mode refreshes can return the prior known-good state intact
+- **Tests**:
+  - `cargo test -p pm-data --lib`
+- **Commit**: `feat: add 11b paged registry refresh`
+- **Deviation**: The refresh cadence is represented in `RegistryRefreshPolicy` but is not yet wired into a long-running scheduler; that remains off the executor path for this branch.
+
+### 11b.3 — Add offline snapshot replay support and document the registry control plane
+- **Spec**: `specs/11b-market-registry-and-universe-selection.md`
+- **Files changed**: `Cargo.lock`, `crates/pm-data/src/snapshot.rs`, `crates/pm-data/src/market_registry.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added JSON save/load helpers for `RegistrySnapshot` so discovery-backed tests and future backtests can replay deterministic registry state without live HTTP
+  - Added an explicit cadence helper on `RegistryRefreshPolicy` so refresh intervals are testable control-plane behavior rather than a dead field
+  - Updated the architecture document to describe the new registry provider, snapshot, and refresh modules plus the transitional config posture
+- **Tests**:
+  - `cargo test -p pm-data --lib`
+  - `cargo test --workspace`
+- **Commit**: `feat: add 11b registry snapshot replay support`
+- **Deviation**: Executor/runtime wiring still intentionally stops at the config seam on this branch; the registry remains usable for discovery-backed consumers without crossing the integration-owner boundary early.

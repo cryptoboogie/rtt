@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 rtt-core = { path = "../rtt-core" }
+async-trait = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "json"] }
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 futures-util = "0.3"
