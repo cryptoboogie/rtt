@@ -122,10 +122,7 @@ async fn keepalive_no_disconnect_over_20_seconds() {
                 }
                 Ok(Err(e)) => {
                     // Lagged is OK, closed is not
-                    if matches!(
-                        e,
-                        tokio::sync::broadcast::error::RecvError::Closed
-                    ) {
+                    if matches!(e, tokio::sync::broadcast::error::RecvError::Closed) {
                         panic!("Channel closed during keepalive test after {msg_count} messages");
                     }
                 }

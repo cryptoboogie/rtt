@@ -1,10 +1,10 @@
-pub mod types;
+pub mod backtest;
+pub mod config;
+pub mod runner;
+pub mod spread;
 pub mod strategy;
 pub mod threshold;
-pub mod spread;
-pub mod runner;
-pub mod config;
-pub mod backtest;
+pub mod types;
 
-pub use types::*;
 pub use strategy::Strategy;
+pub use types::*;

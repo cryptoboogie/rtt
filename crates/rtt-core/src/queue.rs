@@ -1,5 +1,5 @@
-use crossbeam_channel::{bounded, Receiver, Sender, TrySendError, TryRecvError};
 use crate::trigger::TriggerMessage;
+use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError, TrySendError};
 
 pub const QUEUE_CAPACITY: usize = 1024;
 
@@ -42,7 +42,7 @@ impl TriggerQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trigger::{Side, OrderType};
+    use crate::trigger::{OrderType, Side};
 
     fn make_trigger(id: u64) -> TriggerMessage {
         TriggerMessage {

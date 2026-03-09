@@ -17,8 +17,7 @@ impl PriceLadder {
     fn apply_levels(&mut self, levels: &[WsOrderBookLevel]) {
         self.levels.clear();
         for level in levels {
-            self.levels
-                .insert(level.price.clone(), level.size.clone());
+            self.levels.insert(level.price.clone(), level.size.clone());
         }
     }
 
@@ -124,11 +123,7 @@ impl OrderBookManager {
         book.apply_snapshot(update);
     }
 
-    pub fn apply_price_change(
-        &self,
-        entry: &PriceChangeBatchEntry,
-        timestamp_ms: u64,
-    ) {
+    pub fn apply_price_change(&self, entry: &PriceChangeBatchEntry, timestamp_ms: u64) {
         let mut books = self.books.write().unwrap();
         let book = books
             .entry(entry.asset_id.clone())
@@ -185,7 +180,11 @@ mod tests {
     use super::*;
     use crate::types::{BookUpdate, PriceChangeBatchEntry, Side, WsOrderBookLevel};
 
-    fn make_book_update(asset_id: &str, bids: &[(&str, &str)], asks: &[(&str, &str)]) -> BookUpdate {
+    fn make_book_update(
+        asset_id: &str,
+        bids: &[(&str, &str)],
+        asks: &[(&str, &str)],
+    ) -> BookUpdate {
         BookUpdate {
             asset_id: asset_id.to_string(),
             market: "0xmarket".to_string(),

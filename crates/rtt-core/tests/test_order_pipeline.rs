@@ -62,8 +62,8 @@ async fn trade_signal_becomes_signed_order() {
         trigger_id: 1,
         token_id: "1234".to_string(),
         side: Side::Buy,
-        price: "0.50".to_string(), // Buy at 50 cents
-        size: "100".to_string(),   // 100 units
+        price: "0.50".to_string(),  // Buy at 50 cents
+        size: "100".to_string(),    // 100 units
         order_type: OrderType::FOK, // Fill-or-kill
         timestamp_ns: 0,
     };
@@ -74,7 +74,13 @@ async fn trade_signal_becomes_signed_order() {
     // Step 1: Build the Order struct from the trigger.
     // This converts price/size into USDC fixed-point amounts:
     //   BUY 100 @ 0.50 -> makerAmount=50_000_000 (USDC), takerAmount=100_000_000 (tokens)
-    let order = build_order(&trigger, maker, maker, 0, rtt_core::clob_order::SignatureType::Eoa);
+    let order = build_order(
+        &trigger,
+        maker,
+        maker,
+        0,
+        rtt_core::clob_order::SignatureType::Eoa,
+    );
     assert_eq!(order.tokenId, U256::from(1234u64));
     assert_eq!(order.makerAmount, U256::from(50_000_000u64));
     assert_eq!(order.takerAmount, U256::from(100_000_000u64));
@@ -127,11 +133,25 @@ async fn presigned_batch_has_unique_salts_and_valid_signatures() {
     };
 
     // Pre-sign 10 orders — each gets a unique random salt.
-    let batch = presign_batch(&signer, &trigger, maker, maker, 0, false, rtt_core::clob_order::SignatureType::Eoa, "owner-uuid", 10)
-        .await
-        .expect("presign_batch failed");
+    let batch = presign_batch(
+        &signer,
+        &trigger,
+        maker,
+        maker,
+        0,
+        false,
+        rtt_core::clob_order::SignatureType::Eoa,
+        "owner-uuid",
+        10,
+    )
+    .await
+    .expect("presign_batch failed");
 
-    assert_eq!(batch.len(), 10, "should produce exactly 10 pre-signed orders");
+    assert_eq!(
+        batch.len(),
+        10,
+        "should produce exactly 10 pre-signed orders"
+    );
 
     // Verify all salts are unique (different random values).
     let salts: Vec<u64> = batch.iter().map(|p| p.order.salt).collect();
@@ -184,8 +204,8 @@ fn hmac_auth_headers_are_complete_and_correctly_signed() {
     let path = "/order";
     let body = r#"{"order":{"salt":123},"orderType":"FOK"}"#;
 
-    let headers = build_l2_headers(&creds, timestamp, method, path, body)
-        .expect("header computation failed");
+    let headers =
+        build_l2_headers(&creds, timestamp, method, path, body).expect("header computation failed");
 
     // Must have exactly 5 headers.
     assert_eq!(headers.len(), 5, "should produce exactly 5 POLY_* headers");

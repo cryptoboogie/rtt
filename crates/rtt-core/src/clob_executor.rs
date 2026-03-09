@@ -1,14 +1,23 @@
+//! CLOB execution helpers for dispatching signed orders.
+//!
+//! The supported public surfaces are the dispatch primitives themselves.
+//! Historical wrapper config types are intentionally not part of the API.
+//!
+//! ```compile_fail
+//! use rtt_core::clob_executor::ClobExecutionConfig;
+//! ```
+
 use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use bytes::Bytes;
 use http::{Method, Request, Uri};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::clock;
 use crate::clob_auth::{build_l2_headers, L2Credentials};
 use crate::clob_order::{SignatureType, SignedOrderPayload};
 use crate::clob_signer::{build_order, sign_order};
-use crate::connection::{ConnectionPool, extract_pop, get_cf_ray};
+use crate::clock;
+use crate::connection::{extract_pop, get_cf_ray, ConnectionPool};
 use crate::metrics::TimestampRecord;
 use crate::trigger::TriggerMessage;
 
@@ -25,18 +34,13 @@ pub struct PreSignedOrderPool {
 
 impl PreSignedOrderPool {
     /// Create from a vector of signed order payloads.
-    pub fn new(
-        payloads: Vec<SignedOrderPayload>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(payloads: Vec<SignedOrderPayload>) -> Result<Self, Box<dyn std::error::Error>> {
         let mut bodies = Vec::with_capacity(payloads.len());
         for payload in &payloads {
             let body = serde_json::to_vec(payload)?;
             bodies.push(body);
         }
-        Ok(Self {
-            bodies,
-            cursor: 0,
-        })
+        Ok(Self { bodies, cursor: 0 })
     }
 
     /// Number of available pre-signed orders.
@@ -93,18 +97,6 @@ impl PreSignedOrderPool {
     }
 }
 
-/// Configuration for CLOB-aware execution.
-#[derive(Debug, Clone)]
-pub struct ClobExecutionConfig {
-    pub credentials: L2Credentials,
-    pub private_key: String,
-    pub maker_address: String,
-    pub signer_address: String,
-    pub fee_rate_bps: u64,
-    pub is_neg_risk: bool,
-    pub presign_count: usize,
-}
-
 /// Process a single CLOB trigger: dispatch pre-signed order on warm connection.
 /// Returns a TimestampRecord with all checkpoints populated, plus the response body
 /// (if available) for logging/parsing by the caller.
@@ -120,7 +112,7 @@ pub fn process_one_clob(
     rec.t_dispatch_q = clock::now_ns();
     rec.t_exec_start = clock::now_ns();
 
-    // Hot path: dispatch pre-signed order (salt patch + HMAC + build request)
+    // Legacy pre-signed flow: reuse a serialized body and refresh only HMAC auth.
     rec.t_buf_ready = clock::now_ns();
 
     let req = match presigned.dispatch(creds) {
@@ -328,7 +320,7 @@ mod tests {
     use super::*;
     use crate::clob_order::{Order, SignedOrderPayload};
     use crate::trigger::{OrderType, Side};
-    use alloy::primitives::{Address, U256, address};
+    use alloy::primitives::{address, Address, U256};
     use base64::engine::general_purpose::URL_SAFE;
     use base64::Engine;
 
@@ -413,7 +405,7 @@ mod tests {
 
     #[test]
     fn test_hot_path_latency() {
-        // Measure: salt patch + HMAC + build request should be fast
+        // Measure: HMAC + request assembly around an immutable signed body should be fast.
         let payloads = test_payloads(100);
         let mut pool = PreSignedOrderPool::new(payloads).unwrap();
         let creds = test_creds();
@@ -438,24 +430,8 @@ mod tests {
     }
 
     #[test]
-    fn test_clob_config_construction() {
-        let config = ClobExecutionConfig {
-            credentials: test_creds(),
-            private_key: "0xprivkey".to_string(),
-            maker_address: "0xmaker".to_string(),
-            signer_address: "0xsigner".to_string(),
-            fee_rate_bps: 0,
-            is_neg_risk: false,
-            presign_count: 100,
-        };
-        assert_eq!(config.presign_count, 100);
-        assert!(!config.is_neg_risk);
-    }
-
-    #[test]
     fn test_clob_process_one_builds_post_request() {
-        // Verify that process_one_clob dispatches a POST request by checking
-        // that the pre-signed pool is consumed
+        // Verify the pre-signed dispatch path builds a POST request.
         let payloads = test_payloads(5);
         let mut pool = PreSignedOrderPool::new(payloads).unwrap();
         let creds = test_creds();
@@ -499,8 +475,8 @@ mod tests {
     #[tokio::test]
     async fn test_sign_and_dispatch_sign_duration_populated() {
         // Verify that sign_duration timestamps are populated after signing
-        use alloy::signers::local::PrivateKeySigner;
         use crate::clob_signer::sign_order as sign_order_fn;
+        use alloy::signers::local::PrivateKeySigner;
 
         let signer: PrivateKeySigner =
             "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
@@ -518,9 +494,7 @@ mod tests {
             timestamp_ns: 1000,
         };
 
-        let order = crate::clob_signer::build_order(
-            &trigger, maker, maker, 0, SignatureType::Eoa,
-        );
+        let order = crate::clob_signer::build_order(&trigger, maker, maker, 0, SignatureType::Eoa);
 
         let t_start = crate::clock::now_ns();
         let sig = sign_order_fn(&signer, &order, false).await.unwrap();
@@ -543,9 +517,9 @@ mod tests {
     #[ignore] // Needs real credentials and network
     async fn test_clob_end_to_end_pipeline() {
         use crate::clob_auth::load_credentials_from_env;
-        use crate::clob_signer::{build_order, sign_order};
         use crate::clob_order::SignatureType;
         use crate::clob_response::parse_order_response;
+        use crate::clob_signer::{build_order, sign_order};
         use crate::connection::AddressFamily;
         use alloy::signers::local::PrivateKeySigner;
 
@@ -561,11 +535,13 @@ mod tests {
         println!("Auth addr:  {}", creds.address);
         println!("Proxy addr: {}", proxy_address);
         println!("Signer:     {:?}", signer_addr);
-        println!("API Key:    {}...", &creds.api_key[..8.min(creds.api_key.len())]);
+        println!(
+            "API Key:    {}...",
+            &creds.api_key[..8.min(creds.api_key.len())]
+        );
 
         // --- Warm connection pool ---
-        let mut conn_pool =
-            ConnectionPool::new("clob.polymarket.com", 443, 1, AddressFamily::Auto);
+        let mut conn_pool = ConnectionPool::new("clob.polymarket.com", 443, 1, AddressFamily::Auto);
         let warm_count = conn_pool.warmup().await.expect("warmup failed");
         println!("Pool:       {} warm connection(s)", warm_count);
 
@@ -573,8 +549,7 @@ mod tests {
         // TOKEN_ID and PRICE from env; everything else hardcoded for a minimal test trade.
         let token_id = std::env::var("TOKEN_ID")
             .expect("TOKEN_ID env var required — the condition token to buy");
-        let price = std::env::var("PRICE")
-            .unwrap_or_else(|_| "0.95".to_string());
+        let price = std::env::var("PRICE").unwrap_or_else(|_| "0.95".to_string());
 
         let trigger = TriggerMessage {
             trigger_id: 1,
@@ -605,13 +580,22 @@ mod tests {
             _ => SignatureType::Poly,
         };
 
-        println!("            fee_rate_bps={} neg_risk={} sig_type={}", fee_rate_bps, is_neg_risk, sig_type);
+        println!(
+            "            fee_rate_bps={} neg_risk={} sig_type={}",
+            fee_rate_bps, is_neg_risk, sig_type
+        );
 
         // maker = proxy wallet (POLY_PROXY_ADDRESS), signer = EOA (from POLY_PRIVATE_KEY)
         let maker_addr: Address = proxy_address.parse().expect("invalid POLY_PROXY_ADDRESS");
-        let order = build_order(&trigger, maker_addr, signer_addr, fee_rate_bps, signature_type);
+        let order = build_order(
+            &trigger,
+            maker_addr,
+            signer_addr,
+            fee_rate_bps,
+            signature_type,
+        );
         let sig = sign_order(&signer, &order, is_neg_risk).await.unwrap();
-        println!("Signature:  {}...{}", &sig[..10], &sig[sig.len()-6..]);
+        println!("Signature:  {}...{}", &sig[..10], &sig[sig.len() - 6..]);
 
         let payload = SignedOrderPayload::new(&order, &sig, trigger.order_type, &creds.api_key);
         let body_json = serde_json::to_string_pretty(&payload).unwrap();
@@ -644,9 +628,9 @@ mod tests {
             let req = presigned.dispatch(&creds_clone).unwrap().unwrap();
             rec.t_write_begin = clock::now_ns();
 
-            let handle = rt.block_on(async {
-                conn_pool_clone.send_start(req).await
-            }).unwrap();
+            let handle = rt
+                .block_on(async { conn_pool_clone.send_start(req).await })
+                .unwrap();
             rec.t_write_end = clock::now_ns();
             rec.connection_index = handle.connection_index;
 
@@ -666,11 +650,16 @@ mod tests {
         let (status, body_bytes) = resp_body;
         println!("\n--- Response ---");
         println!("HTTP Status: {}", status);
-        println!("Body:        {}", std::str::from_utf8(&body_bytes).unwrap_or("<binary>"));
+        println!(
+            "Body:        {}",
+            std::str::from_utf8(&body_bytes).unwrap_or("<binary>")
+        );
 
         if let Ok(order_resp) = parse_order_response(&body_bytes) {
-            println!("Parsed:      success={}, order_id={}, status={}, error={:?}",
-                order_resp.success, order_resp.order_id, order_resp.status, order_resp.error_msg);
+            println!(
+                "Parsed:      success={}, order_id={}, status={}, error={:?}",
+                order_resp.success, order_resp.order_id, order_resp.status, order_resp.error_msg
+            );
         }
 
         println!("\n--- Timestamps (ns) ---");
@@ -685,13 +674,41 @@ mod tests {
         println!("connection_idx:  {}", rec.connection_index);
 
         println!("\n--- Derived Metrics ---");
-        println!("queue_delay:       {:>8} ns ({:.1} us)", rec.queue_delay(), rec.queue_delay() as f64 / 1000.0);
-        println!("prep_time:         {:>8} ns ({:.1} us)", rec.prep_time(), rec.prep_time() as f64 / 1000.0);
-        println!("trigger_to_wire:   {:>8} ns ({:.1} us)", rec.trigger_to_wire(), rec.trigger_to_wire() as f64 / 1000.0);
-        println!("write_duration:    {:>8} ns ({:.1} us)", rec.write_duration(), rec.write_duration() as f64 / 1000.0);
-        println!("write_to_1st_byte: {:>8} ns ({:.1} ms)", rec.write_to_first_byte(), rec.write_to_first_byte() as f64 / 1_000_000.0);
-        println!("warm_ttfb:         {:>8} ns ({:.1} ms)", rec.warm_ttfb(), rec.warm_ttfb() as f64 / 1_000_000.0);
-        println!("trigger_to_1st_b:  {:>8} ns ({:.1} ms)", rec.trigger_to_first_byte(), rec.trigger_to_first_byte() as f64 / 1_000_000.0);
+        println!(
+            "queue_delay:       {:>8} ns ({:.1} us)",
+            rec.queue_delay(),
+            rec.queue_delay() as f64 / 1000.0
+        );
+        println!(
+            "prep_time:         {:>8} ns ({:.1} us)",
+            rec.prep_time(),
+            rec.prep_time() as f64 / 1000.0
+        );
+        println!(
+            "trigger_to_wire:   {:>8} ns ({:.1} us)",
+            rec.trigger_to_wire(),
+            rec.trigger_to_wire() as f64 / 1000.0
+        );
+        println!(
+            "write_duration:    {:>8} ns ({:.1} us)",
+            rec.write_duration(),
+            rec.write_duration() as f64 / 1000.0
+        );
+        println!(
+            "write_to_1st_byte: {:>8} ns ({:.1} ms)",
+            rec.write_to_first_byte(),
+            rec.write_to_first_byte() as f64 / 1_000_000.0
+        );
+        println!(
+            "warm_ttfb:         {:>8} ns ({:.1} ms)",
+            rec.warm_ttfb(),
+            rec.warm_ttfb() as f64 / 1_000_000.0
+        );
+        println!(
+            "trigger_to_1st_b:  {:>8} ns ({:.1} ms)",
+            rec.trigger_to_first_byte(),
+            rec.trigger_to_first_byte() as f64 / 1_000_000.0
+        );
 
         // Assertions
         assert!(rec.t_trigger_rx > 0);

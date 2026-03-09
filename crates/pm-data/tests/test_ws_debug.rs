@@ -43,7 +43,10 @@ async fn raw_ws_connect_and_subscribe() {
                     // Parse as array
                     let arr: Vec<serde_json::Value> = serde_json::from_str(trimmed).unwrap();
                     for (j, item) in arr.iter().enumerate() {
-                        let keys: Vec<&String> = item.as_object().map(|o| o.keys().collect()).unwrap_or_default();
+                        let keys: Vec<&String> = item
+                            .as_object()
+                            .map(|o| o.keys().collect())
+                            .unwrap_or_default();
                         eprintln!("  [{j}] keys: {:?}", keys);
                         if let Some(et) = item.get("event_type") {
                             eprintln!("  [{j}] event_type: {et}");
@@ -51,7 +54,10 @@ async fn raw_ws_connect_and_subscribe() {
                     }
                 } else if trimmed.starts_with('{') {
                     let obj: serde_json::Value = serde_json::from_str(trimmed).unwrap();
-                    let keys: Vec<&String> = obj.as_object().map(|o| o.keys().collect()).unwrap_or_default();
+                    let keys: Vec<&String> = obj
+                        .as_object()
+                        .map(|o| o.keys().collect())
+                        .unwrap_or_default();
                     eprintln!("Message {i}: OBJECT keys: {:?}", keys);
                     if let Some(et) = obj.get("event_type") {
                         eprintln!("  event_type: {et}");

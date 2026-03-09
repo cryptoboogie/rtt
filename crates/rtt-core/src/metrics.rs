@@ -90,7 +90,9 @@ pub struct StatsAggregator {
 
 impl StatsAggregator {
     pub fn new() -> Self {
-        Self { records: Vec::new() }
+        Self {
+            records: Vec::new(),
+        }
     }
 
     pub fn add(&mut self, record: TimestampRecord) {
@@ -114,9 +116,8 @@ impl StatsAggregator {
             };
         }
 
-        let extract = |f: fn(&TimestampRecord) -> u64| -> Vec<u64> {
-            warm.iter().map(|r| f(r)).collect()
-        };
+        let extract =
+            |f: fn(&TimestampRecord) -> u64| -> Vec<u64> { warm.iter().map(|r| f(r)).collect() };
 
         StatsReport {
             sample_count,
@@ -127,7 +128,9 @@ impl StatsAggregator {
             write_duration: percentiles(&mut extract(TimestampRecord::write_duration)),
             write_to_first_byte: percentiles(&mut extract(TimestampRecord::write_to_first_byte)),
             warm_ttfb: percentiles(&mut extract(TimestampRecord::warm_ttfb)),
-            trigger_to_first_byte: percentiles(&mut extract(TimestampRecord::trigger_to_first_byte)),
+            trigger_to_first_byte: percentiles(&mut extract(
+                TimestampRecord::trigger_to_first_byte,
+            )),
         }
     }
 }
@@ -256,7 +259,11 @@ mod tests {
         // trigger_to_first_byte = queue_delay + prep_time + (write_begin - buf_ready) + write_duration + write_to_first_byte
         assert_eq!(
             r.trigger_to_first_byte(),
-            r.queue_delay() + r.prep_time() + (r.t_write_begin - r.t_buf_ready) + r.write_duration() + r.write_to_first_byte()
+            r.queue_delay()
+                + r.prep_time()
+                + (r.t_write_begin - r.t_buf_ready)
+                + r.write_duration()
+                + r.write_to_first_byte()
         );
     }
 

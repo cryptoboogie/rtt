@@ -900,3 +900,125 @@ Implemented all 8 engineering specs from `specs/` in a single session.
 ---
 
 **Session 10 Totals: 184 lib tests pass (24 pm-data + 105 rtt-core + 46 pm-executor + 9 pm-strategy), 55 pm-executor total (46 unit + 5 full pipeline + 4 integration), 2 ignored. All 8 specs implemented.**
+
+---
+
+# Session 11
+
+### 11.1 — rtt-core Refactor Assessment Spec
+- **Spec**: `specs/09-rtt-core-refactor.md`
+- **Files changed**: `specs/09-rtt-core-refactor.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Reviewed every file under `crates/rtt-core/`, including crate docs and integration tests
+  - Authored a refactor spec covering four major workstreams:
+    - exact order-path validation and removal of unsafe coercions
+    - shared request encoding and hot-path allocation cleanup
+    - typed dispatch/connection failures with stronger reconnect behavior
+    - separation of offline unit tests from live-network integration coverage
+  - Captured specific problem areas: `f64` amount math, invalid `token_id -> 0` fallback, dead salt-patching API, duplicated request assembly, connection-pool recovery gaps, and live tests embedded in `src/*`
+- **Tests**:
+  - `cargo test --workspace` — failed in existing `pm-data` live integration tests:
+    - `connect_subscribe_receive_book_snapshot`
+    - `pipeline_updates_orderbook_from_ws`
+  - `cargo test -p pm-data --test test_integration` — failed again with the same two WebSocket snapshot timeouts
+- **Commit**: N/A (working tree only)
+- **Deviation**: No code refactor was implemented in this session; the requested deliverable was the refactor spec itself. Full-workspace verification could not be recorded as green because the current `pm-data` live integration tests timed out twice waiting for book snapshots.
+
+### 11.2 — Refine Spec 09 for Polymarket Wire Contract and Latency-Only Scope
+- **Spec**: `specs/09-rtt-core-refactor.md`
+- **Files changed**: `specs/09-rtt-core-refactor.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Narrowed the spec to a latency-first scope rather than general safety/readability cleanup
+  - Clarified that Polymarket’s string-heavy order schema stays unchanged on the wire
+  - Reframed the decimal-math item as an internal base-unit conversion optimization only if benchmark-neutral or faster
+  - Added an explicit requirement to preserve a live integration-test lane alongside offline unit tests
+- **Tests**: None run (spec-only refinement)
+- **Commit**: N/A (working tree only)
+- **Deviation**: Used the Polymarket docs as the source of truth for order-field encoding and kept integration-test preservation explicit in the spec.
+
+### 11.3 — Add Explicit Win Condition and Verification Commands to Spec 09
+- **Spec**: `specs/09-rtt-core-refactor.md`
+- **Files changed**: `specs/09-rtt-core-refactor.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added a concrete `Win Condition` section with explicit offline, live-no-order, benchmark, reject-path, and acceptance-path verification lanes
+  - Wrote the exact commands to run for each lane, including `rtt-bench`, `--validate-creds`, and `./scripts/fire.sh`
+  - Required a final `Verification Commands` section in the implementation handoff so test movement does not hide how to prove no regressions
+  - Made acceptance-path live submit a gated manual sign-off step for any changes touching order encoding/signing/auth/dispatch
+- **Tests**: None run (spec-only refinement)
+- **Commit**: N/A (working tree only)
+- **Deviation**: The win condition intentionally includes a manual real-order acceptance check, because the reject-path `fire.sh` run proves transport/auth/signing but cannot by itself prove a valid order would be accepted.
+
+### 11.4 — Remove `axum` Recommendation from Health Endpoint Spec
+- **Spec**: `specs/08-health-endpoint.md`
+- **Files changed**: `specs/08-health-endpoint.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Removed the optional `axum` suggestion from the health-endpoint spec
+  - Kept the recommendation explicit: use raw `hyper` only
+  - Aligned the docs with the current project goal of avoiding non-essential framework layers that do not improve the trading path
+- **Tests**: None run (doc-only change)
+- **Commit**: N/A (working tree only)
+- **Deviation**: None
+
+### 11.5 — Split rtt-core Work Into Separate Latency and Cleanup Specs
+- **Spec**: `specs/09-rtt-core-refactor.md`, `specs/10-rtt-core-cleanup.md`
+- **Files changed**: `specs/09-rtt-core-refactor.md`, `specs/10-rtt-core-cleanup.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Narrowed Spec 09 to measurable latency work only: hot-path allocations, order-path conversion, request assembly, connection recovery behavior, and live regression proof
+  - Removed broad cleanup/test-organization items from Spec 09 so an implementation thread can stay focused on speed
+  - Added new Spec 10 for cleanup and test organization: dead API removal, offline vs live test separation, README cleanup, and stale compatibility surface removal
+  - Preserved the explicit verification commands and live order-path sign-off in the latency spec
+- **Tests**: None run (spec split only)
+- **Commit**: N/A (working tree only)
+- **Deviation**: None
+
+### 11.6 — Set Recommended Execution Order: Cleanup Before Latency
+- **Spec**: `specs/09-rtt-core-refactor.md`, `specs/10-rtt-core-cleanup.md`
+- **Files changed**: `specs/09-rtt-core-refactor.md`, `specs/10-rtt-core-cleanup.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added explicit `Recommended Order` sections to both specs
+  - Set the intended sequence to:
+    - Spec 10 first (`rtt-core` cleanup and test organization)
+    - Spec 09 second (`rtt-core` latency optimization)
+  - Added the constraint that any cleanup change which materially affects the hot path must still use Spec 09’s verification commands and baseline discipline
+- **Tests**: None run (spec-only refinement)
+- **Commit**: N/A (working tree only)
+- **Deviation**: None
+
+### 11.7 — Remove Misleading `rtt-core` Cleanup Surfaces
+- **Spec**: `specs/10-rtt-core-cleanup.md`
+- **Files changed**: `crates/rtt-core/src/clob_request.rs`, `crates/rtt-core/src/clob_executor.rs`, `crates/rtt-core/src/request.rs`
+- **Changes**:
+  - Kept the signed-order request path explicit in `clob_request.rs` and guarded the removed salt-mutation API surface with compile-fail doctest coverage
+  - Removed the dead `ClobExecutionConfig` wrapper from `clob_executor.rs`
+  - Narrowed `request.rs` comments so the fixed-capacity template is described as benchmark/executor scaffolding rather than a production signed-payload mutation path
+  - Updated stale pre-signed dispatch comments to match the actual “reuse body + refresh HMAC” behavior
+- **Tests**:
+  - `cargo test -p rtt-core --lib`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Left hot-path behavior unchanged; clone-removal and broader request-path refactors remain under Spec 09 because they are latency-sensitive.
+
+### 11.8 — Move Live `rtt-core` Source Tests Into Integration Lane
+- **Spec**: `specs/10-rtt-core-cleanup.md`
+- **Files changed**: `crates/rtt-core/src/connection.rs`, `crates/rtt-core/src/executor.rs`, `crates/rtt-core/src/benchmark.rs`, `crates/rtt-core/src/h3_stub.rs`, `crates/rtt-core/tests/test_connection_pipeline.rs`, `crates/rtt-core/tests/test_execution_pipeline.rs`, `crates/rtt-core/tests/test_benchmark_pipeline.rs`, `crates/rtt-core/tests/test_h3_stub.rs`
+- **Changes**:
+  - Removed DNS/TLS/H2/benchmark/HTTP3 live tests from `src/*` so `cargo test -p rtt-core --lib` is fully offline
+  - Preserved the live coverage in `crates/rtt-core/tests/`, including DNS-family checks, warmed-session reuse, benchmark modes, connection-index assertions, threaded execution-path checks, and the HTTP/3 alt-svc probe
+  - Kept only offline unit tests inside the source modules
+- **Tests**:
+  - `cargo test -p rtt-core --lib`
+  - `cargo test -p rtt-core --test '*'`
+- **Commit**: N/A (working tree only)
+- **Deviation**: The ignored real-order test stayed where it is because it remains opt-in, does not affect the offline `--lib` lane, and still underpins `scripts/fire.sh`.
+
+### 11.9 — Refresh `rtt-core` Verification Docs and Re-Verify Workspace
+- **Spec**: `specs/10-rtt-core-cleanup.md`
+- **Files changed**: `crates/rtt-core/README.md`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Rewrote `crates/rtt-core/README.md` around explicit verification lanes: offline unit tests, live integration tests, credential validation, benchmark smoke test, benchmark comparison command, reject-path live submit, acceptance-path live submit, and ignored real-order test
+  - Updated `ARCHITECTURE.md` to reflect the fixed-capacity request template wording, the non-public signed-payload mutation stance, and the fact that live `rtt-core` integration coverage now lives under `crates/rtt-core/tests/`
+  - Added Spec 09 cross-references in the docs so speed-sensitive changes keep using the latency baseline/verification workflow
+- **Tests**:
+  - `cargo test --workspace --lib`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: `cargo test --workspace` timed out in `pm-data` under the default sandboxed network lane, then passed cleanly when rerun with unrestricted network access. No code changes were needed for that follow-up verification.

@@ -1,8 +1,8 @@
-use alloy::sol;
 use alloy::primitives::{Address, U256};
+use alloy::sol;
 use serde::Serialize;
 
-use crate::trigger::{Side, OrderType};
+use crate::trigger::{OrderType, Side};
 
 sol! {
     #[derive(Debug, PartialEq, Eq)]

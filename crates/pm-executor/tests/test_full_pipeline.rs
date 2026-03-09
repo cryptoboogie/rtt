@@ -129,10 +129,14 @@ async fn snapshot_flows_through_entire_channel_pipeline_to_trigger() {
 
     // --- Inject test snapshots ---
     // Snapshot 1: ask=0.50, above threshold 0.45 -> no trigger.
-    broadcast_tx.send(make_snapshot("asset1", "0.44", "0.50")).unwrap();
+    broadcast_tx
+        .send(make_snapshot("asset1", "0.44", "0.50"))
+        .unwrap();
 
     // Snapshot 2: ask=0.45, at threshold -> should trigger!
-    broadcast_tx.send(make_snapshot("asset1", "0.44", "0.45")).unwrap();
+    broadcast_tx
+        .send(make_snapshot("asset1", "0.44", "0.45"))
+        .unwrap();
 
     // --- Receive the trigger from the crossbeam end ---
     let trigger = tokio::task::spawn_blocking(move || {
@@ -191,10 +195,8 @@ fn config_loads_and_all_components_construct() {
 
     // Verify channel types are compatible by constructing them.
     // This is a compile-time check that the generic parameters match.
-    let (_broadcast_tx, _broadcast_rx) =
-        tokio::sync::broadcast::channel::<OrderBookSnapshot>(16);
-    let (_mpsc_snap_tx, _mpsc_snap_rx) =
-        tokio::sync::mpsc::channel::<OrderBookSnapshot>(16);
+    let (_broadcast_tx, _broadcast_rx) = tokio::sync::broadcast::channel::<OrderBookSnapshot>(16);
+    let (_mpsc_snap_tx, _mpsc_snap_rx) = tokio::sync::mpsc::channel::<OrderBookSnapshot>(16);
     let (_mpsc_trig_tx, _mpsc_trig_rx) =
         tokio::sync::mpsc::channel::<rtt_core::trigger::TriggerMessage>(16);
     let (_crossbeam_tx, _crossbeam_rx) =
@@ -243,7 +245,11 @@ async fn graceful_shutdown_completes_within_timeout() {
     // Start strategy runner.
     let strategy: Box<dyn pm_strategy::strategy::Strategy> =
         Box::new(pm_strategy::threshold::ThresholdStrategy::new(
-            "asset1".to_string(), Side::Buy, 0.45, "10".to_string(), OrderType::FOK,
+            "asset1".to_string(),
+            Side::Buy,
+            0.45,
+            "10".to_string(),
+            OrderType::FOK,
         ));
     let mut runner = pm_strategy::runner::StrategyRunner::new(strategy, snapshot_rx, trigger_tx);
     let runner_task = tokio::spawn(async move { runner.run().await });
@@ -432,16 +438,11 @@ async fn full_pipeline_live_dry_run() {
 
     // Use a known active market.
     let asset_id =
-        "48825140812430902098404528620382945035793471220915259967486864813738884055220"
-            .to_string();
+        "48825140812430902098404528620382945035793471220915259967486864813738884055220".to_string();
     println!("Asset: {}...", &asset_id[..20]);
 
     // Create the data pipeline.
-    let mut pipeline = pm_data::Pipeline::new(
-        vec![asset_id.clone()],
-        1024,
-        256,
-    );
+    let mut pipeline = pm_data::Pipeline::new(vec![asset_id.clone()], 1024, 256);
     let snapshot_rx = pipeline.subscribe_snapshots();
 
     // Start WebSocket pipeline in background.
@@ -483,11 +484,8 @@ async fn full_pipeline_live_dry_run() {
             OrderType::FOK,
         ));
     let (trigger_tx, mut trigger_rx) = mpsc::channel(256);
-    let mut runner = pm_strategy::runner::StrategyRunner::new(
-        strategy,
-        snapshot_mpsc_rx,
-        trigger_tx,
-    );
+    let mut runner =
+        pm_strategy::runner::StrategyRunner::new(strategy, snapshot_mpsc_rx, trigger_tx);
     let runner_handle = tokio::spawn(async move { runner.run().await });
 
     // Wait for a trigger from real market data (timeout 30s).
@@ -498,7 +496,10 @@ async fn full_pipeline_live_dry_run() {
         Ok(Some(trigger)) => {
             println!("Trigger received! [DRY RUN — no order sent]");
             println!("  trigger_id: {}", trigger.trigger_id);
-            println!("  token_id:   {}...", &trigger.token_id[..20.min(trigger.token_id.len())]);
+            println!(
+                "  token_id:   {}...",
+                &trigger.token_id[..20.min(trigger.token_id.len())]
+            );
             println!("  side:       {:?}", trigger.side);
             println!("  price:      {}", trigger.price);
             println!("  size:       {}", trigger.size);

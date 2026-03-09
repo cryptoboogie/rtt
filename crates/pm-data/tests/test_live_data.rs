@@ -14,8 +14,8 @@
 //! The WebSocket URL: wss://ws-subscriptions-clob.polymarket.com/ws/market
 //! Protocol: JSON messages with types "book", "price_change", etc.
 
-use pm_data::OrderBookManager;
 use pm_data::types::{BookUpdate, PriceChangeBatchEntry, Side, WsOrderBookLevel};
+use pm_data::OrderBookManager;
 
 /// TEST: We can connect to the real WebSocket and receive a book snapshot.
 ///
@@ -37,8 +37,7 @@ async fn connects_to_polymarket_and_receives_book_snapshot() {
 
     // Use a known active market token ID — must match one with live order book data.
     let asset_id =
-        "48825140812430902098404528620382945035793471220915259967486864813738884055220"
-            .to_string();
+        "48825140812430902098404528620382945035793471220915259967486864813738884055220".to_string();
 
     println!("Asset:     {}...", &asset_id[..20]);
 
@@ -58,7 +57,10 @@ async fn connects_to_polymarket_and_receives_book_snapshot() {
     match result {
         Ok(Ok(snapshot)) => {
             println!("Received book snapshot:");
-            println!("  asset_id:  {}...", &snapshot.asset_id[..20.min(snapshot.asset_id.len())]);
+            println!(
+                "  asset_id:  {}...",
+                &snapshot.asset_id[..20.min(snapshot.asset_id.len())]
+            );
             println!(
                 "  best_bid:  {}",
                 snapshot
@@ -113,12 +115,24 @@ fn price_change_updates_local_orderbook() {
         market: "0xmarket".to_string(),
         timestamp: "1700000000000".to_string(),
         bids: vec![
-            WsOrderBookLevel { price: "0.55".to_string(), size: "100".to_string() },
-            WsOrderBookLevel { price: "0.54".to_string(), size: "200".to_string() },
+            WsOrderBookLevel {
+                price: "0.55".to_string(),
+                size: "100".to_string(),
+            },
+            WsOrderBookLevel {
+                price: "0.54".to_string(),
+                size: "200".to_string(),
+            },
         ],
         asks: vec![
-            WsOrderBookLevel { price: "0.56".to_string(), size: "150".to_string() },
-            WsOrderBookLevel { price: "0.57".to_string(), size: "250".to_string() },
+            WsOrderBookLevel {
+                price: "0.56".to_string(),
+                size: "150".to_string(),
+            },
+            WsOrderBookLevel {
+                price: "0.57".to_string(),
+                size: "250".to_string(),
+            },
         ],
         hash: Some("hash1".to_string()),
     };
@@ -143,7 +157,8 @@ fn price_change_updates_local_orderbook() {
     // Now best_ask should be 0.54 (lower than previous 0.56).
     let snap = mgr.get_snapshot("asset1").unwrap();
     assert_eq!(
-        snap.best_ask.as_ref().unwrap().price, "0.54",
+        snap.best_ask.as_ref().unwrap().price,
+        "0.54",
         "best_ask should update to the new lower ask"
     );
     assert_eq!(snap.hash, "hash2", "hash should update with delta");
@@ -165,7 +180,8 @@ fn price_change_updates_local_orderbook() {
     // best_bid should now be 0.54 (the 0.55 level was removed).
     let snap = mgr.get_snapshot("asset1").unwrap();
     assert_eq!(
-        snap.best_bid.as_ref().unwrap().price, "0.54",
+        snap.best_bid.as_ref().unwrap().price,
+        "0.54",
         "best_bid should fall back to 0.54 after 0.55 removed"
     );
 }

@@ -5,8 +5,8 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use tokio::sync::broadcast;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
 
 use crate::types::WsMessage;
@@ -170,7 +170,11 @@ impl WsClient {
                 // Signal reconnect to pipeline so it clears stale state
                 let _ = self.tx.send(WsMessage::Reconnected);
                 let delay = backoff.next_delay();
-                warn!(reconnect_count = count, delay_ms = delay.as_millis() as u64, "Reconnecting...");
+                warn!(
+                    reconnect_count = count,
+                    delay_ms = delay.as_millis() as u64,
+                    "Reconnecting..."
+                );
                 tokio::time::sleep(delay).await;
             } else {
                 first_connect = false;
@@ -425,7 +429,9 @@ mod tests {
     fn test_last_message_at_updates() {
         let client = WsClient::new(vec!["test".to_string()], 100);
         assert_eq!(client.last_message_at(), 0);
-        client.last_message_at.store(1700000000000, Ordering::Relaxed);
+        client
+            .last_message_at
+            .store(1700000000000, Ordering::Relaxed);
         assert_eq!(client.last_message_at(), 1700000000000);
     }
 }

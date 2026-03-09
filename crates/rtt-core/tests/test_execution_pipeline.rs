@@ -27,11 +27,16 @@
 use rtt_core::clob_auth::L2Credentials;
 use rtt_core::clob_executor::PreSignedOrderPool;
 use rtt_core::clob_order::{Order, SignedOrderPayload};
+use rtt_core::connection::{AddressFamily, ConnectionPool};
+use rtt_core::executor::{ExecutionThread, IngressThread};
+use rtt_core::queue::TriggerQueue;
 use rtt_core::trigger::OrderType;
 
 use alloy::primitives::{address, Address, U256};
 use base64::engine::general_purpose::URL_SAFE;
 use base64::Engine;
+use std::sync::Arc;
+use std::time::Duration;
 
 fn test_creds() -> L2Credentials {
     L2Credentials {
@@ -127,14 +132,12 @@ fn hot_path_dispatch_is_fast() {
 #[tokio::test]
 async fn full_execution_records_all_timestamps_in_order() {
     use rtt_core::clob_executor::process_one_clob;
-    use rtt_core::connection::{AddressFamily, ConnectionPool};
     use rtt_core::trigger::{Side, TriggerMessage};
 
     println!("\n=== Execution Pipeline: Full Timestamp Chain ===");
 
     // Warm a connection pool.
-    let mut conn_pool =
-        ConnectionPool::new("clob.polymarket.com", 443, 1, AddressFamily::Auto);
+    let mut conn_pool = ConnectionPool::new("clob.polymarket.com", 443, 1, AddressFamily::Auto);
     conn_pool.warmup().await.expect("warmup failed");
 
     // Build a pre-signed order pool.
@@ -187,23 +190,165 @@ async fn full_execution_records_all_timestamps_in_order() {
     assert!(rec.t_headers_done > 0, "t_headers_done should be set");
 
     // Timestamps should be monotonically increasing.
-    assert!(rec.t_dispatch_q >= rec.t_trigger_rx, "dispatch_q >= trigger_rx");
-    assert!(rec.t_exec_start >= rec.t_dispatch_q, "exec_start >= dispatch_q");
-    assert!(rec.t_buf_ready >= rec.t_exec_start, "buf_ready >= exec_start");
-    assert!(rec.t_write_begin >= rec.t_buf_ready, "write_begin >= buf_ready");
-    assert!(rec.t_write_end >= rec.t_write_begin, "write_end >= write_begin");
-    assert!(rec.t_first_resp_byte >= rec.t_write_end, "first_resp_byte >= write_end");
-    assert!(rec.t_headers_done >= rec.t_first_resp_byte, "headers_done >= first_resp_byte");
+    assert!(
+        rec.t_dispatch_q >= rec.t_trigger_rx,
+        "dispatch_q >= trigger_rx"
+    );
+    assert!(
+        rec.t_exec_start >= rec.t_dispatch_q,
+        "exec_start >= dispatch_q"
+    );
+    assert!(
+        rec.t_buf_ready >= rec.t_exec_start,
+        "buf_ready >= exec_start"
+    );
+    assert!(
+        rec.t_write_begin >= rec.t_buf_ready,
+        "write_begin >= buf_ready"
+    );
+    assert!(
+        rec.t_write_end >= rec.t_write_begin,
+        "write_end >= write_begin"
+    );
+    assert!(
+        rec.t_first_resp_byte >= rec.t_write_end,
+        "first_resp_byte >= write_end"
+    );
+    assert!(
+        rec.t_headers_done >= rec.t_first_resp_byte,
+        "headers_done >= first_resp_byte"
+    );
 
     // Derived metrics should be consistent.
     println!("\n--- Derived Metrics ---");
-    println!("queue_delay:       {:>8} ns ({:.1} us)", rec.queue_delay(), rec.queue_delay() as f64 / 1000.0);
-    println!("prep_time:         {:>8} ns ({:.1} us)", rec.prep_time(), rec.prep_time() as f64 / 1000.0);
-    println!("trigger_to_wire:   {:>8} ns ({:.1} us)", rec.trigger_to_wire(), rec.trigger_to_wire() as f64 / 1000.0);
-    println!("write_duration:    {:>8} ns ({:.1} us)", rec.write_duration(), rec.write_duration() as f64 / 1000.0);
-    println!("warm_ttfb:         {:>8} ns ({:.1} ms)", rec.warm_ttfb(), rec.warm_ttfb() as f64 / 1_000_000.0);
+    println!(
+        "queue_delay:       {:>8} ns ({:.1} us)",
+        rec.queue_delay(),
+        rec.queue_delay() as f64 / 1000.0
+    );
+    println!(
+        "prep_time:         {:>8} ns ({:.1} us)",
+        rec.prep_time(),
+        rec.prep_time() as f64 / 1000.0
+    );
+    println!(
+        "trigger_to_wire:   {:>8} ns ({:.1} us)",
+        rec.trigger_to_wire(),
+        rec.trigger_to_wire() as f64 / 1000.0
+    );
+    println!(
+        "write_duration:    {:>8} ns ({:.1} us)",
+        rec.write_duration(),
+        rec.write_duration() as f64 / 1000.0
+    );
+    println!(
+        "warm_ttfb:         {:>8} ns ({:.1} ms)",
+        rec.warm_ttfb(),
+        rec.warm_ttfb() as f64 / 1_000_000.0
+    );
 
     println!("=== PASS ===\n");
+}
+
+/// TEST: `ExecutionThread::process_one()` records the round-robin connection index.
+#[tokio::test]
+async fn process_one_records_connection_index_after_round_robin_advance() {
+    let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 2, AddressFamily::Auto);
+    pool.warmup().await.expect("warmup failed");
+
+    let dummy_req = http::Request::builder()
+        .method("GET")
+        .uri("/")
+        .header("host", "clob.polymarket.com")
+        .body(bytes::Bytes::new())
+        .unwrap();
+    let _ = pool.send(dummy_req).await;
+
+    let pool = Arc::new(pool);
+    let mut template =
+        rtt_core::request::RequestTemplate::new(http::Method::GET, "/".parse().unwrap());
+    template.add_header("host", "clob.polymarket.com");
+
+    let mut msg = rtt_core::trigger::TriggerMessage {
+        trigger_id: 1,
+        token_id: "tok".to_string(),
+        side: rtt_core::trigger::Side::Buy,
+        price: "0.50".to_string(),
+        size: "10".to_string(),
+        order_type: OrderType::FOK,
+        timestamp_ns: 0,
+    };
+    msg.timestamp_ns = rtt_core::clock::now_ns();
+
+    let pool_clone = pool.clone();
+    let rec = tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        ExecutionThread::process_one(&pool_clone, &mut template, &msg, &rt)
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        rec.connection_index, 1,
+        "round-robin should advance to connection 1"
+    );
+}
+
+/// TEST: Frame submission time stays distinct from network RTT in the execution lane.
+#[tokio::test]
+async fn write_duration_stays_well_below_network_ttfb() {
+    let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 1, AddressFamily::Auto);
+    pool.warmup().await.expect("warmup failed");
+    let pool = Arc::new(pool);
+
+    let mut template =
+        rtt_core::request::RequestTemplate::new(http::Method::GET, "/".parse().unwrap());
+    template.add_header("host", "clob.polymarket.com");
+
+    let mut msg = rtt_core::trigger::TriggerMessage {
+        trigger_id: 1,
+        token_id: "tok".to_string(),
+        side: rtt_core::trigger::Side::Buy,
+        price: "0.50".to_string(),
+        size: "10".to_string(),
+        order_type: OrderType::FOK,
+        timestamp_ns: 0,
+    };
+    msg.timestamp_ns = rtt_core::clock::now_ns();
+
+    let pool_clone = pool.clone();
+    let rec = tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        ExecutionThread::process_one(&pool_clone, &mut template, &msg, &rt)
+    })
+    .await
+    .unwrap();
+
+    let write_duration = rec.write_duration();
+    let warm_ttfb = rec.warm_ttfb();
+
+    assert!(
+        write_duration < 1_000_000,
+        "write_duration {}ns should stay below 1ms",
+        write_duration
+    );
+    assert!(
+        warm_ttfb > 1_000_000,
+        "warm_ttfb {}ns should reflect real network latency",
+        warm_ttfb
+    );
+    assert!(
+        write_duration < warm_ttfb / 10,
+        "write_duration ({}) should stay far below warm_ttfb ({})",
+        write_duration,
+        warm_ttfb
+    );
 }
 
 /// TEST: Pre-signed pool exhaustion is handled, not a crash.
@@ -222,9 +367,7 @@ fn pool_exhaustion_returns_none_not_panic() {
 
     // Consume all 3 orders.
     for i in 0..3 {
-        let req = pool
-            .dispatch(&creds)
-            .expect("dispatch should not error");
+        let req = pool.dispatch(&creds).expect("dispatch should not error");
         assert!(
             req.is_some(),
             "order {} should be available (pool has 3)",
@@ -248,5 +391,55 @@ fn pool_exhaustion_returns_none_not_panic() {
     pool.reset_cursor();
     assert_eq!(pool.consumed(), 0, "reset should clear consumed count");
     let req = pool.dispatch(&creds).unwrap();
-    assert!(req.is_some(), "after reset, orders should be available again");
+    assert!(
+        req.is_some(),
+        "after reset, orders should be available again"
+    );
+}
+
+/// TEST: The threaded ingress/queue/execution pipeline still produces one warm record.
+#[tokio::test]
+async fn threaded_end_to_end_pipeline_produces_single_record() {
+    let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 2, AddressFamily::Auto);
+    pool.warmup().await.expect("warmup failed");
+    let pool = Arc::new(pool);
+
+    let q = TriggerQueue::new();
+    let ingress = IngressThread::new(q.sender());
+
+    let mut template =
+        rtt_core::request::RequestTemplate::new(http::Method::GET, "/".parse().unwrap());
+    template.add_header("host", "clob.polymarket.com");
+
+    let mut exec = ExecutionThread::new(q.receiver());
+    exec.start(pool.clone(), template);
+
+    let msg = rtt_core::trigger::TriggerMessage {
+        trigger_id: 1,
+        token_id: "tok".to_string(),
+        side: rtt_core::trigger::Side::Buy,
+        price: "0.50".to_string(),
+        size: "10".to_string(),
+        order_type: OrderType::FOK,
+        timestamp_ns: 0,
+    };
+    ingress.inject(msg).unwrap();
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    exec.stop();
+    let records = exec.get_records();
+    assert_eq!(records.len(), 1, "should have exactly one execution record");
+
+    let rec = &records[0];
+    assert!(rec.t_trigger_rx > 0);
+    assert!(rec.t_exec_start >= rec.t_trigger_rx);
+    assert!(rec.t_write_begin >= rec.t_exec_start);
+    assert!(rec.t_first_resp_byte >= rec.t_write_begin);
+    assert!(!rec.cf_ray_pop.is_empty(), "POP should be extracted");
+    assert!(
+        rec.trigger_to_wire() < 10_000_000,
+        "trigger_to_wire {}ns is unexpectedly high",
+        rec.trigger_to_wire()
+    );
 }

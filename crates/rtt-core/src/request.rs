@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use http::{Method, Uri, Request};
+use http::{Method, Request, Uri};
 
 const MAX_PATCH_SLOTS: usize = 8;
 const MAX_BODY_SIZE: usize = 4096;
@@ -10,10 +10,11 @@ struct PatchSlot {
     length: usize,
 }
 
-/// Pre-built HTTP request template with zero-allocation body patching.
+/// Fixed-capacity HTTP request template used by benchmark and executor scaffolding.
 ///
-/// The body is stored as a fixed-size byte array. Patch slots mark regions
-/// that can be overwritten at trigger time without allocation.
+/// The body buffer is stored inline and copied into `Bytes` when a request is
+/// built. Production CLOB order dispatch does not mutate signed payloads with
+/// this type.
 #[derive(Debug, Clone)]
 pub struct RequestTemplate {
     method: Method,
@@ -62,7 +63,7 @@ impl RequestTemplate {
         self.body[p.offset..p.offset + p.length].copy_from_slice(value);
     }
 
-    /// Build the final HTTP request (consumes no heap beyond hyper's internal needs).
+    /// Build an HTTP request from the current template contents.
     pub fn build_request(&self) -> Request<Bytes> {
         let body = Bytes::copy_from_slice(&self.body[..self.body_len]);
         let mut builder = Request::builder()
@@ -85,10 +86,8 @@ mod tests {
 
     #[test]
     fn create_template() {
-        let tmpl = RequestTemplate::new(
-            Method::GET,
-            "https://clob.polymarket.com/".parse().unwrap(),
-        );
+        let tmpl =
+            RequestTemplate::new(Method::GET, "https://clob.polymarket.com/".parse().unwrap());
         assert_eq!(tmpl.body_len, 0);
     }
 
@@ -130,7 +129,10 @@ mod tests {
         tmpl.add_header("content-type", "application/json");
         let req = tmpl.build_request();
         assert_eq!(req.headers().get("host").unwrap(), "clob.polymarket.com");
-        assert_eq!(req.headers().get("content-type").unwrap(), "application/json");
+        assert_eq!(
+            req.headers().get("content-type").unwrap(),
+            "application/json"
+        );
     }
 
     #[test]

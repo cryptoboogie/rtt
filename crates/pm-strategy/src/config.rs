@@ -1,5 +1,5 @@
-use crate::strategy::Strategy;
 use crate::spread::SpreadStrategy;
+use crate::strategy::Strategy;
 use crate::threshold::ThresholdStrategy;
 use crate::types::*;
 use serde::{Deserialize, Serialize};

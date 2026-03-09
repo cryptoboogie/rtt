@@ -13,7 +13,11 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    pub fn new(asset_ids: Vec<String>, ws_channel_capacity: usize, snapshot_channel_capacity: usize) -> Self {
+    pub fn new(
+        asset_ids: Vec<String>,
+        ws_channel_capacity: usize,
+        snapshot_channel_capacity: usize,
+    ) -> Self {
         let ws_client = WsClient::new(asset_ids, ws_channel_capacity);
         let order_books = OrderBookManager::new();
         let (snapshot_tx, _) = broadcast::channel(snapshot_channel_capacity);
@@ -248,11 +252,7 @@ mod tests {
 
     #[test]
     fn pipeline_construction() {
-        let pipeline = Pipeline::new(
-            vec!["asset1".to_string(), "asset2".to_string()],
-            100,
-            50,
-        );
+        let pipeline = Pipeline::new(vec!["asset1".to_string(), "asset2".to_string()], 100, 50);
         let _rx = pipeline.subscribe_snapshots();
         let books = pipeline.order_books();
         assert!(books.get_snapshot("asset1").is_none());

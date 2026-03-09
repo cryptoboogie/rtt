@@ -5,7 +5,7 @@ use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use crossbeam_channel::Receiver;
 use rtt_core::clob_auth::L2Credentials;
-use rtt_core::clob_executor::{PreSignedOrderPool, process_one_clob, sign_and_dispatch};
+use rtt_core::clob_executor::{process_one_clob, sign_and_dispatch, PreSignedOrderPool};
 use rtt_core::clob_order::SignatureType;
 use rtt_core::clob_response::parse_order_response;
 use rtt_core::connection::ConnectionPool;
@@ -108,7 +108,10 @@ pub fn run_execution_loop(
                     tracing::error!("Circuit breaker tripped! Stopping execution loop.");
                     if let Some(ref url) = alert_webhook_url {
                         let (orders, usd) = circuit_breaker.stats();
-                        let msg = format!("Circuit breaker tripped: {} orders, ${:.2} committed", orders, usd);
+                        let msg = format!(
+                            "Circuit breaker tripped: {} orders, ${:.2} committed",
+                            orders, usd
+                        );
                         rt.block_on(crate::alert::send_alert(url, &msg));
                     }
                     break;
@@ -150,7 +153,10 @@ pub fn run_execution_loop(
                     tracing::error!("Circuit breaker tripped: {}", e);
                     if let Some(ref url) = alert_webhook_url {
                         let (orders, usd) = circuit_breaker.stats();
-                        let msg = format!("Circuit breaker tripped: {} orders, ${:.2} committed — {}", orders, usd, e);
+                        let msg = format!(
+                            "Circuit breaker tripped: {} orders, ${:.2} committed — {}",
+                            orders, usd, e
+                        );
                         rt.block_on(crate::alert::send_alert(url, &msg));
                     }
                     order_guard.release();
@@ -219,7 +225,9 @@ pub fn run_execution_loop(
 
                 // Trip circuit breaker on pool exhaustion (server error equivalent)
                 if rec.is_reconnect {
-                    tracing::warn!("Order dispatch failed (is_reconnect=true), tripping circuit breaker");
+                    tracing::warn!(
+                        "Order dispatch failed (is_reconnect=true), tripping circuit breaker"
+                    );
                     circuit_breaker.trip();
                     break;
                 }
@@ -347,10 +355,7 @@ mod tests {
         assert!(signer.is_some());
         assert_eq!(l2.api_key, "test-key");
         assert_eq!(l2.secret, "dGVzdC1zZWNyZXQ=");
-        assert_eq!(
-            l2.address,
-            "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-        );
+        assert_eq!(l2.address, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
     }
 
     #[test]
@@ -366,7 +371,9 @@ mod tests {
 
         let (pool, presigned, creds) = dummy_pool_and_creds();
 
-        run_execution_loop(rx, pool, presigned, creds, true, None, cb, &rl, og, shutdown, None);
+        run_execution_loop(
+            rx, pool, presigned, creds, true, None, cb, &rl, og, shutdown, None,
+        );
     }
 
     #[test]
@@ -386,7 +393,19 @@ mod tests {
         drop(tx);
 
         let (pool, presigned, creds) = dummy_pool_and_creds();
-        run_execution_loop(rx, pool, presigned, creds, false, None, cb.clone(), &rl, og, shutdown, None);
+        run_execution_loop(
+            rx,
+            pool,
+            presigned,
+            creds,
+            false,
+            None,
+            cb.clone(),
+            &rl,
+            og,
+            shutdown,
+            None,
+        );
 
         // Only 2 orders should have been recorded before tripping
         let (orders, _) = cb.stats();
@@ -410,11 +429,27 @@ mod tests {
         drop(tx);
 
         let (pool, presigned, creds) = dummy_pool_and_creds();
-        run_execution_loop(rx, pool, presigned, creds, false, None, cb.clone(), &rl, og, shutdown, None);
+        run_execution_loop(
+            rx,
+            pool,
+            presigned,
+            creds,
+            false,
+            None,
+            cb.clone(),
+            &rl,
+            og,
+            shutdown,
+            None,
+        );
 
         // Only 1 should have passed the rate limiter
         let (orders, _) = cb.stats();
-        assert_eq!(orders, 1, "expected 1 order past rate limiter, got {}", orders);
+        assert_eq!(
+            orders, 1,
+            "expected 1 order past rate limiter, got {}",
+            orders
+        );
     }
 
     #[test]
@@ -435,7 +470,19 @@ mod tests {
         drop(tx);
 
         let (pool, presigned, creds) = dummy_pool_and_creds();
-        run_execution_loop(rx, pool, presigned, creds, true, None, cb.clone(), &rl, og, shutdown, None);
+        run_execution_loop(
+            rx,
+            pool,
+            presigned,
+            creds,
+            true,
+            None,
+            cb.clone(),
+            &rl,
+            og,
+            shutdown,
+            None,
+        );
 
         // No orders should have been processed (guard was held)
         let (orders, _) = cb.stats();

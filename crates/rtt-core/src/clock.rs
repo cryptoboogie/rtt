@@ -1,5 +1,5 @@
-use std::time::Instant;
 use std::sync::OnceLock;
+use std::time::Instant;
 
 static EPOCH: OnceLock<Instant> = OnceLock::new();
 

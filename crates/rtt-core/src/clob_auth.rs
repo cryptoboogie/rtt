@@ -50,7 +50,8 @@ pub fn build_l2_headers(
 /// - POLY_ADDRESS = EOA signer address (used in auth headers)
 /// - POLY_PROXY_ADDRESS = proxy/funder address (used as maker in orders)
 /// - POLY_PRIVATE_KEY = EOA private key
-pub fn load_credentials_from_env() -> Result<(L2Credentials, String, String), Box<dyn std::error::Error>> {
+pub fn load_credentials_from_env(
+) -> Result<(L2Credentials, String, String), Box<dyn std::error::Error>> {
     let api_key = std::env::var("POLY_API_KEY")?;
     let secret = std::env::var("POLY_SECRET")?;
     let passphrase = std::env::var("POLY_PASSPHRASE")?;
@@ -108,13 +109,19 @@ pub async fn validate_credentials(creds: &L2Credentials) -> Result<(), String> {
         req = req.header(name, value);
     }
 
-    let resp = req.send().await.map_err(|e| format!("Request failed: {}", e))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {}", e))?;
     let status = resp.status();
     if status.is_success() {
         Ok(())
     } else {
         let body = resp.text().await.unwrap_or_default();
-        Err(format!("Credential validation failed: HTTP {} — {}", status, body))
+        Err(format!(
+            "Credential validation failed: HTTP {} — {}",
+            status, body
+        ))
     }
 }
 
@@ -147,8 +154,7 @@ mod tests {
             address: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".to_string(),
         };
 
-        let headers = build_l2_headers(&creds, "1234567890", "POST", "/order", "{}")
-            .unwrap();
+        let headers = build_l2_headers(&creds, "1234567890", "POST", "/order", "{}").unwrap();
 
         let names: Vec<&str> = headers.iter().map(|(n, _)| n.as_str()).collect();
         assert!(names.contains(&"POLY_ADDRESS"));
