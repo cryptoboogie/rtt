@@ -1,12 +1,12 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use tokio::sync::mpsc;
 
 use crate::quote::DesiredQuotes;
 use crate::strategy::{
-    ExecutionMode, IsolationPolicy, QuoteStrategy, RequirementSelector, Strategy,
-    StrategyDataRequirement, StrategyDataRequirementKind, StrategyRequirements,
-    StrategyRuntimeView, TriggerStrategy,
+    ExecutionMode, InventoryDelta, InventoryPosition, IsolationPolicy, QuoteStrategy,
+    RequirementSelector, Strategy, StrategyDataRequirement, StrategyDataRequirementKind,
+    StrategyRequirements, StrategyRuntimeView, TriggerStrategy,
 };
 use crate::types::{OrderBookSnapshot, TriggerMessage};
 use rtt_core::{
@@ -41,6 +41,7 @@ pub struct SharedRuntimeScaffold {
     store: HotStateStore,
     topology: RuntimeTopologyPlan,
     seen_subjects: HashSet<String>,
+    inventory: InventoryStore,
 }
 
 /// Consumes small notices and resolves the current runtime view from `HotStateStore`.
@@ -72,6 +73,7 @@ impl SharedRuntimeScaffold {
             store,
             topology: RuntimeTopologyPlan::from_requirements(&requirements),
             seen_subjects: HashSet::new(),
+            inventory: InventoryStore::default(),
         }
     }
 
@@ -87,6 +89,7 @@ impl SharedRuntimeScaffold {
         let resolved_notice = self.store.resolve_notice(notice);
         let mut books = Vec::new();
         let mut references = Vec::new();
+        let mut inventory = Vec::new();
 
         for input in &self.topology.inputs {
             match input.requirement.kind {
@@ -98,13 +101,17 @@ impl SharedRuntimeScaffold {
                     }
                 }
                 StrategyDataRequirementKind::ExternalReferencePrice
-                | StrategyDataRequirementKind::RecentTrades
-                | StrategyDataRequirementKind::Inventory
-                | StrategyDataRequirementKind::LiveOrderState => {
+                | StrategyDataRequirementKind::RecentTrades => {
                     if let Some(reference) =
                         self.resolve_reference(input, notice, resolved_notice.as_ref())
                     {
                         push_unique_reference(&mut references, reference);
+                    }
+                }
+                StrategyDataRequirementKind::Inventory
+                | StrategyDataRequirementKind::LiveOrderState => {
+                    for position in self.resolve_inventory(input) {
+                        push_unique_inventory(&mut inventory, position);
                     }
                 }
             }
@@ -112,7 +119,12 @@ impl SharedRuntimeScaffold {
 
         self.seen_subjects.insert(subject_key(&notice.subject));
 
-        Some(StrategyRuntimeView::new(notice.clone(), books, references))
+        Some(StrategyRuntimeView::new(
+            notice.clone(),
+            books,
+            references,
+            inventory,
+        ))
     }
 
     fn is_relevant_notice(&self, notice: &UpdateNotice) -> bool {
@@ -161,6 +173,14 @@ impl SharedRuntimeScaffold {
         }
 
         self.store.reference_state(&input.subject)
+    }
+
+    fn resolve_inventory(&self, input: &ProvisionedInput) -> Vec<InventoryPosition> {
+        self.inventory.positions_for(input)
+    }
+
+    pub fn apply_inventory_delta(&mut self, delta: InventoryDelta) {
+        self.inventory.apply_delta(delta);
     }
 }
 
@@ -303,6 +323,10 @@ impl QuoteRuntime {
         self.scaffold.topology()
     }
 
+    pub fn apply_inventory_delta(&mut self, delta: InventoryDelta) {
+        self.scaffold.apply_inventory_delta(delta);
+    }
+
     pub fn handle_notice(&mut self, notice: &UpdateNotice) -> Option<DesiredQuotes> {
         let view = self.scaffold.resolve_view(notice)?;
         self.strategy.on_update(&view)
@@ -390,9 +414,101 @@ fn push_unique_reference(references: &mut Vec<HotReferenceState>, reference: Hot
     references.push(reference);
 }
 
+fn push_unique_inventory(inventory: &mut Vec<InventoryPosition>, position: InventoryPosition) {
+    if inventory
+        .iter()
+        .any(|existing| existing.asset_id == position.asset_id && existing.side == position.side)
+    {
+        return;
+    }
+
+    inventory.push(position);
+}
+
 fn subject_key(subject: &InstrumentRef) -> String {
     format!(
         "{}:{:?}:{}",
         subject.source_id, subject.kind, subject.instrument_id
     )
+}
+
+#[derive(Default)]
+struct InventoryStore {
+    positions: BTreeMap<String, InventoryPosition>,
+}
+
+impl InventoryStore {
+    fn apply_delta(&mut self, delta: InventoryDelta) {
+        let key = inventory_key(&delta.asset_id, delta.side);
+        let entry = self
+            .positions
+            .entry(key)
+            .or_insert_with(|| InventoryPosition {
+                asset_id: delta.asset_id.clone(),
+                side: delta.side,
+                filled_size: "0".to_string(),
+                net_notional: "0".to_string(),
+                updated_at_ms: delta.observed_at_ms,
+            });
+
+        entry.filled_size = format_units_trimmed(
+            parse_units(&entry.filled_size).saturating_add(parse_units(&delta.filled_size_delta)),
+        );
+        entry.net_notional = format_units_trimmed(
+            parse_units(&entry.net_notional).saturating_add(parse_units(&delta.notional_delta)),
+        );
+        entry.updated_at_ms = delta.observed_at_ms;
+    }
+
+    fn positions_for(&self, input: &ProvisionedInput) -> Vec<InventoryPosition> {
+        self.positions
+            .values()
+            .filter(|position| match &input.requirement.selector {
+                RequirementSelector::Asset(asset_id) => position.asset_id == *asset_id,
+                RequirementSelector::Source(_) => true,
+                RequirementSelector::Market(_) | RequirementSelector::Symbol(_) => false,
+            })
+            .cloned()
+            .collect()
+    }
+}
+
+fn inventory_key(asset_id: &str, side: crate::types::Side) -> String {
+    format!("{asset_id}:{side:?}")
+}
+
+fn parse_units(value: &str) -> u64 {
+    const SCALE: u64 = 1_000_000;
+
+    let mut parts = value.split('.');
+    let whole = parts.next().unwrap_or("0").parse::<u64>().unwrap_or(0);
+    let frac = parts.next().unwrap_or("");
+    let mut frac_buf = frac.as_bytes().to_vec();
+    frac_buf.truncate(6);
+    while frac_buf.len() < 6 {
+        frac_buf.push(b'0');
+    }
+
+    let frac_units = std::str::from_utf8(&frac_buf)
+        .ok()
+        .and_then(|digits| digits.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    whole.saturating_mul(SCALE).saturating_add(frac_units)
+}
+
+fn format_units(units: u64) -> String {
+    let whole = units / 1_000_000;
+    let frac = units % 1_000_000;
+    format!("{whole}.{frac:06}")
+}
+
+fn format_units_trimmed(units: u64) -> String {
+    let formatted = format_units(units);
+    let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.is_empty() {
+        "0".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }

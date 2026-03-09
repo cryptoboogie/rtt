@@ -354,6 +354,7 @@ struct StrategyParams { threshold: Option<f64>, max_spread: Option<f64> }
 - `RuntimeTopologyPlan` and `ProvisionedInput` translate strategy requirements into shared vs dedicated source-instance ownership without exposing transport details to the strategy
 - `SharedRuntimeScaffold` resolves the current notice version exactly and only exposes companion source state after that source's notice stream has also been observed, preventing cross-feed strategies from seeing future state out of order
 - `TriggerRuntime` and `QuoteRuntime` both evaluate a uniform `StrategyRuntimeView`, so single-feed and cross-feed strategies share the same filtering, topology, and hot-state plumbing
+- `QuoteRuntime` now also carries a small in-process inventory store fed by executor exposure deltas, so quote strategies can consume `Inventory` / `LiveOrderState` requirements without depending on a hedge or P&L subsystem
 
 #### `backtest.rs` — Offline replay
 - `BacktestRunner::run(strategy, snapshots)` — Replay historical data through any strategy
@@ -397,12 +398,15 @@ All credential fields support `POLY_*` env var overrides. `alert_webhook_url` su
 - `WorkingQuoteState` is explicit: `PendingSubmit`, `Working`, `PendingCancel`, `Canceled`, `Rejected`, `UnknownOrStale`
 - `WorkingQuote` is the local trusted-state record keyed by `QuoteId`, carrying the last desired order parameters plus local timestamps and optional `client_order_id`
 - `UnknownOrStale` is first-class from v1, so the local planner can halt instead of guessing when trust is lost
+- `ExchangeObservedQuote` and `ExchangeObservedQuoteState` are the exchange-facing overlay that merges authoritative working/canceled/rejected observations onto local quote state
+- Timeouts, authoritative absences, and reconnect-resync gaps now transition active quotes into `UnknownOrStale` through explicit helpers instead of ad hoc executor guesses
 
-#### `order_manager.rs` — Deterministic local reconciliation
+#### `order_manager.rs` — Deterministic local and exchange-aware reconciliation
 - `ExecutionCommand::{Place, Cancel, CancelAll}` is the local command plan emitted by the order manager
-- `LocalOrderManager` compares `DesiredQuotes` with local `WorkingQuote` state and emits a deterministic minimal command set when the local state is trustworthy
-- The first `12c` planner is intentionally local-only: it does not talk to the exchange, reconcile fills, or resync private state
-- Anti-thrash policy is per strategy-instance via `ReconciliationPolicy { min_price_change_units, min_size_change_units, replace_cooldown_ms }`
+- `LocalOrderManager` still computes a deterministic minimal command set, but `12d` extends it to reconcile across desired state, local working state, and an `ExchangeSyncSnapshot`
+- `ExchangeSyncSnapshot` is the exchange-observed seam for authoritative order presence, reconnect-resync gaps, and fill snapshots, whether that data comes from polling, a documented resync endpoint, or a later private feed adapter
+- `ReconciliationPolicy` now also defines submit/cancel confirmation timeouts so stale pending orders transition into explicit uncertainty instead of lingering forever
+- `ReconciliationOutcome` returns synchronized working state, `resync_required`, and minimal `ExposureDelta` values alongside the command plan so later runtime layers can consume recovery and inventory signals directly
 - If any local quote is `UnknownOrStale`, reconciliation returns a blocked outcome with no speculative commands
 
 #### `bridge.rs` — Channel adapters
@@ -419,6 +423,7 @@ All credential fields support `POLY_*` env var overrides. `alert_webhook_url` su
   - Without `signer_params`: falls back to `process_one_clob()` (pre-signed orders)
   - Handles `DispatchOutcome` explicitly so build/request/pool failures do not masquerade as reconnect samples
   - Sends webhook alert on circuit breaker trip
+- `QuoteCommandPolicy`, `QuoteCommandThrottle`, and `retry_decision()` define the bounded retry/backoff/throttling seam for quote-maintenance commands without redesigning the current trigger hot path
 
 #### `safety.rs` — Lock-free safety rails
 - **CircuitBreaker**: Atomic counters for orders fired and USD committed (cents). Once tripped, stays tripped (restart required). Limits: `max_orders=5`, `max_usd_exposure=10.0` (conservative defaults).

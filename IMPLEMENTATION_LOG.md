@@ -1552,3 +1552,30 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test -p pm-data --lib`
 - **Commit**: N/A (working tree only)
 - **Deviation**: Left the executor config seam untouched for this branch; feed scaling is exposed at the `pm-data` API boundary first so the integration owner can wire configuration later without widening this task into runtime/executor work.
+
+### 12d.1 — Add exchange-observed reconciliation and explicit resync recovery
+- **Spec**: `specs/12d-exchange-sync-and-fill-exposure-seam.md`
+- **Files changed**: `crates/pm-executor/src/order_state.rs`, `crates/pm-executor/src/order_manager.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added `ExchangeObservedQuote` / `ExchangeObservedQuoteState` plus merge helpers on `WorkingQuote` for authoritative working, canceled, rejected, timeout, and reconnect-resync transitions
+  - Extended `LocalOrderManager` from local-only planning into three-way reconciliation over desired state, local working state, and an `ExchangeSyncSnapshot`
+  - Added explicit `resync_pending` handling so reconnect gaps force active local quotes into `UnknownOrStale` and block convergence until an authoritative snapshot is observed
+- **Tests**:
+  - `cargo test -p pm-executor reconnect_resync_pending_blocks_until_authoritative_snapshot_arrives -- --nocapture`
+  - `cargo test -p pm-executor order_ -- --nocapture`
+- **Commit**: `feat: add 12d exchange sync and exposure seam`
+- **Deviation**: Kept the exchange-observed input as a provider/snapshot seam rather than wiring a private Polymarket user feed here; that keeps `12d` aligned with the spec boundary and leaves the concrete authenticated adapter replaceable.
+
+### 12d.2 — Add quote-maintenance retry controls and the minimal inventory seam
+- **Spec**: `specs/12d-exchange-sync-and-fill-exposure-seam.md`
+- **Files changed**: `crates/pm-executor/src/execution.rs`, `crates/pm-strategy/src/strategy.rs`, `crates/pm-strategy/src/runtime.rs`, `crates/pm-strategy/tests/runtime_contract_test.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added pure `QuoteCommandPolicy`, retry/backoff, and throttling helpers so quote-maintenance command execution has a bounded policy surface before live wiring
+  - Added `ExposureDelta`, `InventoryDelta`, and an in-process runtime inventory store so fill observations can be surfaced back to quote strategies without building full hedge or P&L accounting
+  - Added quote-runtime coverage showing that inventory deltas flow into a strategy requirement and change desired quote output deterministically
+- **Tests**:
+  - `cargo test -p pm-executor`
+  - `cargo test -p pm-strategy`
+  - `cargo test --workspace`
+- **Commit**: `feat: add 12d exchange sync and exposure seam`
+- **Deviation**: Left the legacy trigger execution loop as the runtime default; the new retry/throttle helpers and inventory seam are additive surfaces for later integration rather than a hot-path redesign in this spec.
