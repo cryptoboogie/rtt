@@ -45,6 +45,49 @@ compute_notional() {
     '
 }
 
+find_stale_input() {
+    local binary="$1"
+    local path
+
+    for path in Cargo.toml Cargo.lock crates/rtt-core/Cargo.toml scripts/fire.sh; do
+        if [ -e "$path" ] && [ "$path" -nt "$binary" ]; then
+            printf '%s\n' "$path"
+            return 0
+        fi
+    done
+
+    local newer_file
+    newer_file="$(find crates/rtt-core/src crates/rtt-core/tests -type f -newer "$binary" -print -quit 2>/dev/null || true)"
+    if [ -n "$newer_file" ]; then
+        printf '%s\n' "$newer_file"
+        return 0
+    fi
+
+    return 1
+}
+
+warn_if_stale_binary() {
+    local binary="$1"
+    local stale_input
+
+    stale_input="$(find_stale_input "$binary" || true)"
+    if [ -z "$stale_input" ]; then
+        return 0
+    fi
+
+    cat >&2 <<EOF
+WARNING: cached rtt-core test binary appears stale.
+Newest detected input: $stale_input
+
+Refresh commands:
+  rm -f .test_binary_path
+  cargo test --release -p rtt-core --no-run
+
+Then rerun:
+  ./scripts/fire.sh <token_id> [price] [fee_rate_bps] [neg_risk]
+EOF
+}
+
 main() {
     if [ $# -lt 1 ]; then
         echo "Usage: ./scripts/fire.sh <token_id> [price] [fee_rate_bps] [neg_risk]"
@@ -102,6 +145,7 @@ main() {
     fi
 
     BINARY=$(cat "$CACHE_FILE")
+    warn_if_stale_binary "$BINARY"
 
     echo "=== fire.sh ==="
     echo "token_id:      ${TOKEN_ID:0:12}...${TOKEN_ID: -6}"

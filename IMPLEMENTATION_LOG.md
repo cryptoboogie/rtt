@@ -1134,3 +1134,20 @@ Implemented all 8 engineering specs from `specs/` in a single session.
     - `write_duration p99` ranged from `29.17us` to `94.51ms`
 - **Commit**: N/A (working tree only)
 - **Deviation**: The Criterion output reported “Performance has regressed” relative to its stored prior baseline, but those comparisons were not treated as sign-off evidence because they depend on whatever local Criterion baseline already existed in `target/criterion`. The raw times above were used instead.
+
+### 11.17 — Warn When `fire.sh` Cached Test Binary Is Stale
+- **Spec**: N/A (operational safety/usability fix)
+- **Files changed**: `scripts/fire.sh`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added `find_stale_input()` so `fire.sh` checks whether the cached `rtt-core` release test binary is older than the workspace/root manifests, `crates/rtt-core` manifest, the script itself, or any `crates/rtt-core/src` / `crates/rtt-core/tests` file
+  - Added `warn_if_stale_binary()` so live order runs emit a clear warning when the cached binary looks stale and print the exact refresh commands:
+    - `rm -f .test_binary_path`
+    - `cargo test --release -p rtt-core --no-run`
+  - Kept the script non-blocking: it still runs the cached binary after warning so the operator decides whether to refresh immediately
+- **Tests**:
+  - `bash -n scripts/fire.sh`
+  - `bash -lc 'source scripts/fire.sh; tmp=$(mktemp -d); trap "rm -rf \"$tmp\"" EXIT; cd "$tmp"; mkdir -p crates/rtt-core/src crates/rtt-core/tests scripts; touch binary; touch -t 202603090101 Cargo.toml Cargo.lock crates/rtt-core/Cargo.toml scripts/fire.sh crates/rtt-core/src/lib.rs; touch -t 202603090102 binary; warn_if_stale_binary binary'`
+  - `bash -lc 'source scripts/fire.sh; tmp=$(mktemp -d); trap "rm -rf \"$tmp\"" EXIT; cd "$tmp"; mkdir -p crates/rtt-core/src crates/rtt-core/tests scripts; touch -t 202603090101 binary; touch -t 202603090102 crates/rtt-core/src/lib.rs; warn_if_stale_binary binary 2>&1'`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: The script warns but does not automatically rebuild or delete the cache because the request was to surface stale-build risk without changing the live order workflow into an implicit rebuild step.
