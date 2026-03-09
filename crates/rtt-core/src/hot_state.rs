@@ -217,7 +217,7 @@ impl HotStateStore {
             | UpdateKind::Reconnect
             | UpdateKind::SourceStatus
             | UpdateKind::Custom => self
-                .reference_state(&notice.subject)
+                .resolve_reference_notice(notice)
                 .map(HotStateView::Reference),
         }
     }
@@ -244,6 +244,16 @@ impl HotStateStore {
                 &notice.source_id,
                 &notice.subject.instrument_id,
             ))
+            .filter(|state| state.version == notice.version)
+            .cloned()
+    }
+
+    fn resolve_reference_notice(&self, notice: &UpdateNotice) -> Option<HotReferenceState> {
+        let inner = self.inner.read().unwrap();
+        inner
+            .references
+            .get(&HotStateKey::from_subject(&notice.subject))
+            .filter(|state| state.version == notice.version)
             .cloned()
     }
 }
