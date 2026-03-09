@@ -236,11 +236,17 @@ Real-time market data from Polymarket WebSocket.
 
 #### `ws.rs` — WebSocket client
 - Connects to `wss://ws-subscriptions-clob.polymarket.com/ws/market`
-- Subscribes to asset channels with `{"type": "subscribe", "assets_ids": [...]}`
+- Sends market subscription commands with `{"type": "market", "operation": "subscribe" | "unsubscribe", "assets_ids": [...]}`
 - 10-second ping interval, auto-reconnect with exponential backoff (1s base, 2x factor, 60s cap, 500ms jitter)
+- Replays the full desired subscription set after reconnect and can accept live diff commands from the feed manager without rebuilding the socket client
 - Broadcasts `WsMessage` enum to subscribers (including `WsMessage::Reconnected(ReconnectEvent { sequence, timestamp_ms })` on reconnect)
 - `reconnect_count: Arc<AtomicU64>` — incremented on each reconnect
 - `last_message_at: Arc<AtomicU64>` — epoch millis of last received message
+
+#### `subscription_plan.rs` — Diff planner and shard assignment
+- Encodes the verified market-channel semantics (`subscribe`, `unsubscribe`, no ack expected, reconnect must replay desired subscriptions) behind a small stable adapter
+- Computes deterministic adds/removes/unchanged sets from current vs desired subscriptions
+- Plans bounded subscription commands with per-command pacing and explicit shard ownership so one feed instance can stay single-connection by default or own a stable shard when scaling is enabled
 
 #### `types.rs` — WebSocket message types and normalization
 ```rust
@@ -287,8 +293,9 @@ Tagged by `event_type` field in JSON.
 
 #### `feed.rs` — Feed-manager and source-adapter boundary
 - `ScopedPolymarketAdapter` rewrites normalized updates onto the owning `SourceId`, so shared and dedicated source instances can reuse the frozen `11a` event model without mutating it
-- `PolymarketFeedManager` is the explicit owner for one live Polymarket source instance: it owns the `WsClient`, authoritative stores, notice/update fan-out, reconnect/reset behavior, and conservative asset-set reconfiguration
+- `PolymarketFeedManager` is the explicit owner for one live Polymarket source instance: it owns the `WsClient`, authoritative stores, notice/update fan-out, reconnect/reset behavior, and diff-driven asset-set reconfiguration
 - `FeedStores` keeps full state in-process while `FeedOutputs` broadcasts small `UpdateNotice`s plus richer `NormalizedUpdate`s for consumers that need them
+- Reconfiguration now clears only removed asset state, stages unsubscribe/subscribe batches through the `WsClient`, and can be constructed with explicit shard ownership while keeping the default single-connection path intact
 - The manager preserves the legacy `OrderBookSnapshot` broadcast only for `BookSnapshot` / `BookDelta` payloads so the old runtime path continues to work during the `11c` → `12a` transition
 
 #### `pipeline.rs` — Compatibility wrapper

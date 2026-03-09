@@ -1501,3 +1501,28 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test -p pm-strategy`
 - **Commit**: N/A (working tree only)
 - **Deviation**: Left `NoticeDrivenRuntime`, `StrategyRunner`, and the executor wiring intact as the legacy/default path; `12b` adds the new shared runtime surface without redesigning the current hot order-dispatch loop.
+
+### 11d.1 — Encode verified subscription semantics and deterministic diff planning
+- **Spec**: `specs/11d-dynamic-subscription-diffs-and-feed-scaling.md`
+- **Files changed**: `crates/pm-data/src/subscription_plan.rs`, `crates/pm-data/src/ws.rs`, `crates/pm-data/src/lib.rs`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Verified the current Polymarket market-channel contract and encoded it as stable semantics: `subscribe` / `unsubscribe` operations are supported, no server ack is assumed, and reconnect logic must replay the desired subscription set
+  - Added a pure `subscription_plan` module that computes deterministic adds/removes/unchanged sets, stable shard assignment, and bounded/paced subscription command batches
+  - Extended the WebSocket message builder so both subscribe and unsubscribe commands serialize against the documented market-channel shape instead of assuming only one startup subscribe frame exists
+- **Tests**:
+  - `cargo test -p pm-data --lib`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Kept the semantics adapter conservative and fire-and-forget because the official docs do not document subscription acknowledgements or shard-worthy hard limits.
+
+### 11d.2 — Apply live subscription diffs without clearing unaffected feed state
+- **Spec**: `specs/11d-dynamic-subscription-diffs-and-feed-scaling.md`
+- **Files changed**: `crates/pm-data/src/feed.rs`, `crates/pm-data/src/ws.rs`, `crates/pm-data/src/orderbook.rs`, `crates/pm-data/src/reference_store.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Replaced the old full-reset `reconfigure_assets()` behavior with set-based diffing so removed assets are evicted from the authoritative stores while unchanged assets keep their live book/reference state
+  - Added live subscription command staging to `WsClient`, including reconnect replay of the full desired set and optional explicit shard ownership through `SubscriptionPlannerConfig`
+  - Added public feed-manager constructors for explicit shard/planner configuration while preserving the default single-connection path
+- **Tests**:
+  - `cargo test -p pm-data --lib feed::tests::shared_with_subscription_planner_limits_manager_to_its_owned_shard`
+  - `cargo test -p pm-data --lib`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Left the executor config seam untouched for this branch; feed scaling is exposed at the `pm-data` API boundary first so the integration owner can wire configuration later without widening this task into runtime/executor work.

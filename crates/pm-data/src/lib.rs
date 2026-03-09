@@ -5,6 +5,7 @@ pub mod pipeline;
 pub mod reference_store;
 pub mod registry_provider;
 pub mod snapshot;
+pub mod subscription_plan;
 pub mod types;
 pub mod ws;
 

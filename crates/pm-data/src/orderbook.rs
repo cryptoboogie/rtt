@@ -162,6 +162,11 @@ impl OrderBookManager {
         books.clear();
     }
 
+    pub fn clear_asset(&self, asset_id: &str) {
+        let mut books = self.books.write().unwrap();
+        books.remove(asset_id);
+    }
+
     /// Returns the number of tracked assets.
     pub fn asset_count(&self) -> usize {
         let books = self.books.read().unwrap();
@@ -374,6 +379,21 @@ mod tests {
         assert_eq!(mgr.asset_count(), 0);
         assert!(mgr.get_snapshot("asset1").is_none());
         assert!(mgr.get_snapshot("asset2").is_none());
+    }
+
+    #[test]
+    fn clear_asset_removes_only_requested_book() {
+        let mgr = OrderBookManager::new();
+        let update1 = make_book_update("asset1", &[("0.55", "100")], &[("0.56", "150")]);
+        let update2 = make_book_update("asset2", &[("0.30", "500")], &[("0.35", "600")]);
+        mgr.apply_book_update(&update1);
+        mgr.apply_book_update(&update2);
+
+        mgr.clear_asset("asset1");
+
+        assert!(mgr.get_snapshot("asset1").is_none());
+        assert!(mgr.get_snapshot("asset2").is_some());
+        assert_eq!(mgr.asset_count(), 1);
     }
 
     #[test]

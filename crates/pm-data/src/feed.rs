@@ -1,16 +1,20 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use tokio::sync::broadcast;
 
 use crate::orderbook::OrderBookManager;
 use crate::reference_store::{ReferenceState, ReferenceStore};
+use crate::subscription_plan::{
+    assigned_asset_ids_for_config, plan_subscription_diff, SubscriptionPlannerConfig,
+};
 use crate::types::{
     BookUpdate, OrderBookSnapshot, PriceChangeBatchEntry, WsMessage, WsOrderBookLevel,
 };
 use crate::ws::WsClient;
 use rtt_core::{
-    polymarket::public_source_id, BookLevel, NormalizedUpdate, NormalizedUpdatePayload, SourceId,
-    SourceKind, UpdateKind, UpdateNotice,
+    feed_source::InstrumentKind, polymarket::public_source_id, BookLevel, NormalizedUpdate,
+    NormalizedUpdatePayload, SourceId, SourceKind, UpdateKind, UpdateNotice,
 };
 
 pub const DEFAULT_UPDATE_CHANNEL_CAPACITY: usize = 1024;
@@ -48,7 +52,7 @@ pub struct ScopedPolymarketAdapter {
 pub struct PolymarketFeedManager {
     source_id: SourceId,
     asset_ids: Vec<String>,
-    ws_channel_capacity: usize,
+    subscription_planner: SubscriptionPlannerConfig,
     ws_client: WsClient,
     stores: FeedStores,
     outputs: FeedOutputs,
@@ -83,6 +87,12 @@ impl FeedStores {
     pub fn clear_source(&self, source_id: &SourceId) {
         self.order_books.clear_all();
         self.reference_store.clear_source(source_id);
+    }
+
+    pub fn clear_asset(&self, source_id: &SourceId, asset_id: &str) {
+        self.order_books.clear_asset(asset_id);
+        self.reference_store
+            .clear_instrument(source_id, InstrumentKind::Asset, asset_id);
     }
 }
 
@@ -148,11 +158,37 @@ impl PolymarketFeedManager {
         notice_channel_capacity: usize,
         snapshot_channel_capacity: usize,
     ) -> Self {
+        Self::with_subscription_planner(
+            source_id,
+            asset_ids,
+            ws_channel_capacity,
+            update_channel_capacity,
+            notice_channel_capacity,
+            snapshot_channel_capacity,
+            SubscriptionPlannerConfig::default(),
+        )
+    }
+
+    pub fn with_subscription_planner(
+        source_id: SourceId,
+        asset_ids: Vec<String>,
+        ws_channel_capacity: usize,
+        update_channel_capacity: usize,
+        notice_channel_capacity: usize,
+        snapshot_channel_capacity: usize,
+        subscription_planner: SubscriptionPlannerConfig,
+    ) -> Self {
+        let desired_asset_ids = asset_ids.into_iter().collect::<BTreeSet<_>>();
+        let asset_ids = assigned_asset_ids_for_config(&desired_asset_ids, &subscription_planner);
         Self {
             source_id,
-            asset_ids: asset_ids.clone(),
-            ws_channel_capacity,
-            ws_client: WsClient::new(asset_ids, ws_channel_capacity),
+            asset_ids,
+            subscription_planner: subscription_planner.clone(),
+            ws_client: WsClient::with_subscription_planner(
+                desired_asset_ids.into_iter().collect(),
+                ws_channel_capacity,
+                subscription_planner,
+            ),
             stores: FeedStores::new(),
             outputs: FeedOutputs::new(
                 update_channel_capacity,
@@ -167,13 +203,28 @@ impl PolymarketFeedManager {
         ws_channel_capacity: usize,
         snapshot_channel_capacity: usize,
     ) -> Self {
-        Self::new(
+        Self::shared_with_subscription_planner(
+            asset_ids,
+            ws_channel_capacity,
+            snapshot_channel_capacity,
+            SubscriptionPlannerConfig::default(),
+        )
+    }
+
+    pub fn shared_with_subscription_planner(
+        asset_ids: Vec<String>,
+        ws_channel_capacity: usize,
+        snapshot_channel_capacity: usize,
+        subscription_planner: SubscriptionPlannerConfig,
+    ) -> Self {
+        Self::with_subscription_planner(
             public_source_id(),
             asset_ids,
             ws_channel_capacity,
             DEFAULT_UPDATE_CHANNEL_CAPACITY,
             DEFAULT_NOTICE_CHANNEL_CAPACITY,
             snapshot_channel_capacity,
+            subscription_planner,
         )
     }
 
@@ -223,13 +274,23 @@ impl PolymarketFeedManager {
     }
 
     pub fn reconfigure_assets(&mut self, asset_ids: Vec<String>) -> bool {
-        if self.asset_ids == asset_ids {
+        let desired_asset_ids = asset_ids.into_iter().collect::<BTreeSet<_>>();
+        let current_asset_ids = self.asset_ids.iter().cloned().collect::<BTreeSet<_>>();
+        let next_asset_ids = assigned_asset_ids_for_config(&desired_asset_ids, &self.subscription_planner);
+        let next_asset_set = next_asset_ids.iter().cloned().collect::<BTreeSet<_>>();
+
+        if current_asset_ids == next_asset_set {
             return false;
         }
 
-        self.stores.clear_source(&self.source_id);
-        self.asset_ids = asset_ids.clone();
-        self.ws_client = WsClient::new(asset_ids, self.ws_channel_capacity);
+        let diff = plan_subscription_diff(&current_asset_ids, &next_asset_set);
+        for asset_id in &diff.removes {
+            self.stores.clear_asset(&self.source_id, asset_id);
+        }
+
+        self.asset_ids = next_asset_ids;
+        self.ws_client
+            .reconfigure_assets(desired_asset_ids.into_iter().collect());
         true
     }
 
@@ -258,6 +319,13 @@ impl PolymarketFeedManager {
 
     pub fn shutdown(&self) {
         self.ws_client.shutdown();
+    }
+
+    #[cfg(test)]
+    fn ws_client_pending_commands_for_test(
+        &self,
+    ) -> Vec<crate::subscription_plan::SubscriptionCommand> {
+        self.ws_client.issued_commands_for_test()
     }
 }
 
@@ -372,6 +440,7 @@ mod tests {
         BestBidAskEvent, BookUpdate, LastTradePriceEvent, PriceChangeBatchEntry, PriceChangeEvent,
         ReconnectEvent, Side, WsOrderBookLevel,
     };
+    use crate::subscription_plan::{SubscriptionCommand, SubscriptionOperation};
     use rtt_core::{
         feed_source::{InstrumentKind, InstrumentRef},
         market::Price,
@@ -566,6 +635,171 @@ mod tests {
         assert!(manager.reconfigure_assets(vec!["asset-2".to_string()]));
         assert_eq!(manager.asset_ids(), &["asset-2".to_string()]);
         assert!(manager.order_books().get_snapshot("asset-1").is_none());
+    }
+
+    #[test]
+    fn reconfigure_assets_only_clears_removed_assets_and_stages_subscription_diff() {
+        let mut manager = PolymarketFeedManager::shared(
+            vec!["asset-1".to_string(), "asset-2".to_string()],
+            16,
+            16,
+        );
+
+        manager.process_message(&WsMessage::Book(BookUpdate {
+            asset_id: "asset-1".to_string(),
+            market: "market-1".to_string(),
+            timestamp: "1700000000000".to_string(),
+            bids: vec![WsOrderBookLevel {
+                price: "0.44".to_string(),
+                size: "100".to_string(),
+            }],
+            asks: vec![WsOrderBookLevel {
+                price: "0.45".to_string(),
+                size: "150".to_string(),
+            }],
+            hash: Some("hash-1".to_string()),
+        }));
+        manager.process_message(&WsMessage::Book(BookUpdate {
+            asset_id: "asset-2".to_string(),
+            market: "market-1".to_string(),
+            timestamp: "1700000000000".to_string(),
+            bids: vec![WsOrderBookLevel {
+                price: "0.54".to_string(),
+                size: "120".to_string(),
+            }],
+            asks: vec![WsOrderBookLevel {
+                price: "0.55".to_string(),
+                size: "180".to_string(),
+            }],
+            hash: Some("hash-2".to_string()),
+        }));
+        manager.process_message(&WsMessage::LastTradePrice(LastTradePriceEvent {
+            asset_id: "asset-2".to_string(),
+            market: "market-1".to_string(),
+            price: "0.54".to_string(),
+            side: Some(Side::Buy),
+            size: Some("12".to_string()),
+            fee_rate_bps: None,
+            timestamp: "1700000000001".to_string(),
+        }));
+
+        assert!(manager.reconfigure_assets(vec![
+            "asset-2".to_string(),
+            "asset-3".to_string(),
+        ]));
+
+        assert_eq!(
+            manager.asset_ids(),
+            &["asset-2".to_string(), "asset-3".to_string()]
+        );
+        assert!(manager.order_books().get_snapshot("asset-1").is_none());
+        assert!(manager.order_books().get_snapshot("asset-2").is_some());
+        let subject = InstrumentRef {
+            source_id: manager.source_id().clone(),
+            kind: InstrumentKind::Asset,
+            instrument_id: "asset-2".to_string(),
+        };
+        assert!(manager.reference_store().resolve_subject(&subject).is_some());
+        assert_eq!(
+            manager.ws_client_pending_commands_for_test(),
+            vec![
+                SubscriptionCommand {
+                    operation: SubscriptionOperation::Unsubscribe,
+                    asset_ids: vec!["asset-1".to_string()],
+                    shard_index: 0,
+                    pacing_ms: 0,
+                },
+                SubscriptionCommand {
+                    operation: SubscriptionOperation::Subscribe,
+                    asset_ids: vec!["asset-3".to_string()],
+                    shard_index: 0,
+                    pacing_ms: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn reconfigure_assets_treats_reordered_equivalent_sets_as_noop() {
+        let mut manager = PolymarketFeedManager::shared(
+            vec!["asset-1".to_string(), "asset-2".to_string()],
+            16,
+            16,
+        );
+        manager.process_message(&WsMessage::Book(BookUpdate {
+            asset_id: "asset-1".to_string(),
+            market: "market-1".to_string(),
+            timestamp: "1700000000000".to_string(),
+            bids: vec![WsOrderBookLevel {
+                price: "0.44".to_string(),
+                size: "100".to_string(),
+            }],
+            asks: vec![WsOrderBookLevel {
+                price: "0.45".to_string(),
+                size: "150".to_string(),
+            }],
+            hash: Some("hash-1".to_string()),
+        }));
+
+        assert!(!manager.reconfigure_assets(vec![
+            "asset-2".to_string(),
+            "asset-1".to_string(),
+        ]));
+        assert!(manager.order_books().get_snapshot("asset-1").is_some());
+        assert!(manager.ws_client_pending_commands_for_test().is_empty());
+    }
+
+    #[test]
+    fn shared_with_subscription_planner_limits_manager_to_its_owned_shard() {
+        let mut manager = PolymarketFeedManager::shared_with_subscription_planner(
+            vec![
+                "asset-1".to_string(),
+                "asset-2".to_string(),
+                "asset-3".to_string(),
+                "asset-4".to_string(),
+            ],
+            16,
+            16,
+            SubscriptionPlannerConfig {
+                max_batch_size: 64,
+                pacing_ms: 0,
+                shard_count: 2,
+                shard_index: 1,
+            },
+        );
+
+        assert_eq!(
+            manager.asset_ids(),
+            &["asset-2".to_string(), "asset-4".to_string()]
+        );
+
+        assert!(manager.reconfigure_assets(vec![
+            "asset-1".to_string(),
+            "asset-3".to_string(),
+            "asset-5".to_string(),
+            "asset-6".to_string(),
+        ]));
+        assert_eq!(
+            manager.asset_ids(),
+            &["asset-3".to_string(), "asset-6".to_string()]
+        );
+        assert_eq!(
+            manager.ws_client_pending_commands_for_test(),
+            vec![
+                SubscriptionCommand {
+                    operation: SubscriptionOperation::Unsubscribe,
+                    asset_ids: vec!["asset-2".to_string(), "asset-4".to_string()],
+                    shard_index: 1,
+                    pacing_ms: 0,
+                },
+                SubscriptionCommand {
+                    operation: SubscriptionOperation::Subscribe,
+                    asset_ids: vec!["asset-3".to_string(), "asset-6".to_string()],
+                    shard_index: 1,
+                    pacing_ms: 0,
+                },
+            ]
+        );
     }
 
     #[test]
