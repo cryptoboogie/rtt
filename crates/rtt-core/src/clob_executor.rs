@@ -317,6 +317,7 @@ fn live_test_size_from_env(size: Option<String>) -> String {
 mod tests {
     use super::*;
     use crate::clob_order::{Order, SignedOrderPayload};
+    use crate::polymarket::{CLOB_HOST, CLOB_PORT};
     use crate::trigger::{OrderType, Side};
     use alloy::primitives::{address, Address, U256};
     use base64::engine::general_purpose::URL_SAFE;
@@ -568,7 +569,7 @@ mod tests {
         );
 
         // --- Warm connection pool ---
-        let mut conn_pool = ConnectionPool::new("clob.polymarket.com", 443, 1, AddressFamily::Auto);
+        let mut conn_pool = ConnectionPool::new(CLOB_HOST, CLOB_PORT, 1, AddressFamily::Auto);
         let warm_count = conn_pool.warmup().await.expect("warmup failed");
         println!("Pool:       {} warm connection(s)", warm_count);
 

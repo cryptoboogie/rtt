@@ -1151,3 +1151,226 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test --workspace`
 - **Commit**: N/A (working tree only)
 - **Deviation**: The script warns but does not automatically rebuild or delete the cache because the request was to surface stale-build risk without changing the live order workflow into an implicit rebuild step.
+
+---
+
+# Session 12
+
+### 12.1 — Author Spec 11: Market Universe and Feed Plane
+- **Spec**: `specs/11-market-universe-and-feed-plane.md`
+- **Files changed**: `specs/11-market-universe-and-feed-plane.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Wrote a new architecture spec for separating the market-universe control plane from the public market-data feed plane
+  - Defined first-class market identifiers and metadata requirements, including `market_id`, YES/NO token pairing, reward metadata, and market scanning responsibilities
+  - Scoped the feed-manager work around dynamic subscription diffs, richer public event preservation, and keeping control-plane work off the trigger hot path
+- **Tests**: None run during spec authoring
+- **Commit**: N/A (working tree only)
+- **Deviation**: The spec intentionally stops short of private/user WebSocket handling so the first foundation pass stays focused on public market-universe and feed composition.
+
+### 12.2 — Author Spec 12: Hot State and Quote Lifecycle
+- **Spec**: `specs/12-hot-state-and-quote-lifecycle.md`
+- **Files changed**: `specs/12-hot-state-and-quote-lifecycle.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Wrote a follow-on architecture spec for normalized hot state, multiple strategy output contracts, and explicit quote lifecycle ownership
+  - Preserved the current trigger path as an additive interface while introducing the concepts of quote strategies, desired quotes, execution commands, and deterministic quote reconciliation
+  - Kept fill/inventory and reward-model logic out of scope so the spec remains narrowly focused on the runtime and order-manager seam
+- **Tests**: None run during spec authoring
+- **Commit**: N/A (working tree only)
+- **Deviation**: The spec defines the quote-lifecycle seam but leaves full fill/inventory/user-state integration for a later strategy or risk-management spec.
+
+### 12.3 — Clarify AGENTS/CLAUDE Instructions for Spec-Only and Doc-Only Work
+- **Spec**: N/A (repo instruction clarification)
+- **Files changed**: `CLAUDE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Clarified the “run and verify all project test suites” instruction so it applies to implementation work rather than every task indiscriminately
+  - Added an explicit exception for spec-only and other non-code documentation edits: default to scope/consistency verification instead of running the full project test suite unless the user asks for tests or the docs accompany code changes
+- **Tests**: None run; instruction-only documentation change
+- **Commit**: N/A (working tree only)
+- **Deviation**: This clarification was added in response to an observed workflow mistake during spec authoring, not as part of a code or strategy implementation spec.
+
+### 12.4 — Refine Spec 11 With Explicit MarketMeta, RewardParams, and Discovery Source Guidance
+- **Spec**: `specs/11-market-universe-and-feed-plane.md`
+- **Files changed**: `specs/11-market-universe-and-feed-plane.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added an explicit normalized `MarketMeta` example with `yes_asset`, `no_asset`, and optional `RewardParams` so YES/NO pairing and reward enrichment are concrete in the spec rather than implied
+  - Added a discovery-source subsection so the registry contract is source-configurable and does not bake one upstream endpoint or raw field naming scheme into the architecture
+  - Added an implementation caution that the feed manager should target documented subscribe/unsubscribe capabilities rather than assume SDK-specific convenience helpers
+- **Tests**: None run; spec-only refinement
+- **Commit**: N/A (working tree only)
+- **Deviation**: This was an additive refinement pass on the spec, not a scope expansion into private WS, quote lifecycle, or strategy logic.
+
+### 12.5 — Add Source-of-Truth and Library Guidance to Specs 11 and 12
+- **Spec**: `specs/11-market-universe-and-feed-plane.md`, `specs/12-hot-state-and-quote-lifecycle.md`
+- **Files changed**: `specs/11-market-universe-and-feed-plane.md`, `specs/12-hot-state-and-quote-lifecycle.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added an explicit note to both specs requiring a thorough review of the official up-to-date Polymarket documentation before implementation, so live API values and event semantics are taken from primary sources rather than stale assumptions
+  - Added guidance to use or explicitly evaluate `floor-licker/polyfill-rs` where hot-path JSON parsing is performance-sensitive, instead of defaulting to bespoke parser work
+- **Tests**: None run; spec-only refinement
+- **Commit**: N/A (working tree only)
+- **Deviation**: This clarification adds implementation guidance only; it does not change the scope or acceptance criteria of either spec.
+
+### 12.6 — Add Hot-Path Primitive Reminders to Spec 12
+- **Spec**: `specs/12-hot-state-and-quote-lifecycle.md`
+- **Files changed**: `specs/12-hot-state-and-quote-lifecycle.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added an implementation note to keep `tokio::sync::watch` and `smallvec` visible as hot-path primitives to evaluate later if state fan-out or small collection allocation shows up in profiling
+  - Kept the note explicitly non-binding so the first implementation is not forced into those choices before measurement
+- **Tests**: None run; spec-only refinement
+- **Commit**: N/A (working tree only)
+- **Deviation**: This note is a memory aid for future optimization work, not a commitment to specific implementation choices in the first pass.
+
+### 12.7 — Tighten Spec 12 Around Reconciliation Risk, Failure Modes, and Benchmark Gates
+- **Spec**: `specs/12-hot-state-and-quote-lifecycle.md`
+- **Files changed**: `specs/12-hot-state-and-quote-lifecycle.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Expanded the quote-lifecycle section so reconciliation is explicitly modeled as desired state vs local working state vs exchange-observed state, with room for stale/uncertain order state
+  - Added explicit failure-mode requirements for reconnects, out-of-order acknowledgements, cancel failures, rate-limit-aware backoff, and resync behavior
+  - Added a minimal fill/exposure seam so later hedging and inventory work can extend the runtime without redesigning the quote-lifecycle types
+  - Added benchmark and replay-gate requirements so the new runtime path must prove its cost against the current trigger path before acceptance
+  - Added a shared-runtime-scaffolding requirement to reduce long-term drift between the backward-compatible trigger path and the new quote path
+- **Tests**: None run; spec-only refinement
+- **Commit**: N/A (working tree only)
+- **Deviation**: The refinement intentionally did not collapse trigger and quote strategies into one forced trait or expand the spec into full hedging/P&L logic.
+
+### 12.8 — Tighten Spec 11 Around Discovery Policy, Reward Freshness, and Degraded Operation
+- **Spec**: `specs/11-market-universe-and-feed-plane.md`
+- **Files changed**: `specs/11-market-universe-and-feed-plane.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Made the registry/discovery policy more concrete by requiring explicit pagination, cadence, backoff, and last-known-good behavior rather than a vague “fetch from HTTP/API sources” loop
+  - Added reward-metadata freshness semantics so reward-aware strategies can distinguish fresh, stale, and unusable metadata
+  - Added batched subscription-diff and optional sharding requirements for large universes without hard-coding undocumented per-connection WS limits
+  - Added a historical metadata snapshot seam for deterministic backtests and offline replay
+  - Added degraded-mode requirements so malformed upstream records are quarantined instead of poisoning the active universe
+- **Tests**: None run; spec-only refinement
+- **Commit**: N/A (working tree only)
+- **Deviation**: The refinement intentionally did not make reward metadata mandatory for all markets or hard-code an undocumented WebSocket asset limit into the spec.
+
+### 12.9 — Add Explicit Spec 11 → Spec 12 Handoff Boundary
+- **Spec**: `specs/12-hot-state-and-quote-lifecycle.md`
+- **Files changed**: `specs/12-hot-state-and-quote-lifecycle.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added a short handoff subsection clarifying that Spec 11 owns wire-to-normalized-public-event and market metadata, while Spec 12 owns normalized-public-event-plus-metadata to hot-state and strategy/runtime projection
+  - Made the offline/backtest seam explicit by requiring Spec 12 replay work to consume the historical metadata capability introduced by Spec 11 rather than inventing a second snapshot format
+  - Clarified that exchange-observed order state should come from authenticated polling/resync until a later private/user-feed spec exists
+- **Tests**: None run; spec-only refinement
+- **Commit**: N/A (working tree only)
+- **Deviation**: This refinement clarifies the boundary between existing specs only; it does not expand either spec’s scope.
+
+### 11a.1 — Add shared market, source, and normalized public-event foundation types
+- **Spec**: `specs/11a-market-foundation-and-normalized-events.md`
+- **Files changed**: `crates/rtt-core/src/market.rs`, `crates/rtt-core/src/feed_source.rs`, `crates/rtt-core/src/public_event.rs`, `crates/rtt-core/src/lib.rs`
+- **Changes**:
+  - Added shared market identity types (`MarketId`, `AssetId`, `OutcomeSide`, `OutcomeToken`, `MarketStatus`) plus exact-value wrappers (`Price`, `Size`, `Notional`, `TickSize`, `MinOrderSize`)
+  - Added stable metadata shapes with `MarketMeta`, `RewardParams`, and explicit `RewardFreshness`
+  - Added shared source identity types (`SourceId`, `SourceKind`, `InstrumentRef`) and a concrete normalized public-event model with `UpdateNotice` and `NormalizedUpdate`
+  - Re-exported the new shared types from `rtt-core` so downstream crates can depend on one central foundation
+- **Tests**:
+  - `cargo test -p rtt-core --lib`
+- **Commit**: `feat: add market and normalized event foundation types`
+- **Deviation**: Kept `trigger.rs` as the legacy executor DTO seam for now so the existing strategy and order-dispatch path would remain intact during the foundation rollout.
+
+### 11a.2 — Normalize Polymarket wire events into shared source updates
+- **Spec**: `specs/11a-market-foundation-and-normalized-events.md`
+- **Files changed**: `crates/pm-data/src/types.rs`, `crates/pm-data/src/ws.rs`, `crates/pm-data/src/pipeline.rs`, `crates/pm-data/tests/test_types.rs`
+- **Changes**:
+  - Added `polymarket_public_source_id()`, reconnect metadata, and `WsMessage::to_normalized_updates()` so raw Polymarket events can map into the shared `NormalizedUpdate` model
+  - Preserved book snapshots, price deltas, BBO, last-trade, tick-size, and reconnect events in normalized form instead of leaving downstream code with only raw wire structs
+  - Kept the current order-book pipeline behavior unchanged while teaching reconnect events to carry explicit sequence and timestamp metadata
+- **Tests**:
+  - `cargo test -p pm-data --test test_types`
+  - `cargo test -p pm-data`
+- **Commit**: `feat: normalize polymarket wire events into shared updates`
+- **Deviation**: The pipeline still broadcasts legacy `OrderBookSnapshot` values for compatibility; the notice-driven handoff remains deferred to the later feed-manager and hot-state specs.
+
+### 11a.3 — Add backward-compatible market-universe and source-binding config seam
+- **Spec**: `specs/11a-market-foundation-and-normalized-events.md`
+- **Files changed**: `crates/pm-executor/src/config.rs`, `crates/pm-executor/src/main.rs`, `config.toml`
+- **Changes**:
+  - Added typed `market_universe` and `source_bindings` config shapes alongside the legacy `[websocket].asset_ids` list
+  - Added resolver logic so `pm-executor` can merge legacy asset IDs, explicit Polymarket source bindings, and `[strategy].token_id` into the raw subscription list the current runtime still expects
+  - Updated the example config with commented discovery-backed and explicit-source examples while keeping the old static shape valid
+- **Tests**:
+  - `cargo test -p pm-executor config::tests`
+- **Commit**: `feat: add config migration seam for market universes and source bindings`
+- **Deviation**: Strategy configuration still exposes `token_id` directly; this spec only adds the migration seam and subscription resolution layer, not the later runtime/strategy refactor.
+
+### 11a.4 — Stabilize live pm-data integration fixtures against market churn
+- **Spec**: `specs/11a-market-foundation-and-normalized-events.md`
+- **Files changed**: `crates/pm-data/tests/test_integration.rs`, `crates/pm-data/tests/test_live_data.rs`
+- **Changes**:
+  - Replaced one stale hard-coded live asset with a small March 9, 2026 verified active-asset set plus an environment-variable override for future updates
+  - Relaxed two live-feed assertions so they treat quiet/no-depth windows as inconclusive instead of hard failures while still verifying real updates when the provider emits them
+- **Tests**:
+  - `cargo test -p pm-data`
+- **Commit**: `test: harden live pm-data integration fixtures`
+- **Deviation**: The live-feed tests are now best-effort for provider quiet periods; deterministic order-book update coverage remains in unit tests.
+
+### 12.10 — Sweep Spec 11/12 References for Official Docs, SDKs, and Performance Implementations
+- **Spec**: `specs/11-market-universe-and-feed-plane.md`, `specs/12-hot-state-and-quote-lifecycle.md`
+- **Files changed**: `specs/11-market-universe-and-feed-plane.md`, `specs/11a-market-foundation-and-normalized-events.md`, `specs/11b-market-registry-and-universe-selection.md`, `specs/11c-feed-manager-and-normalized-public-updates.md`, `specs/11d-dynamic-subscription-diffs-and-feed-scaling.md`, `specs/12-hot-state-and-quote-lifecycle.md`, `specs/12a-hot-state-and-update-notices.md`, `specs/12b-strategy-contracts-and-runtime-scaffolding.md`, `specs/12c-order-manager-local-reconciliation.md`, `specs/12d-exchange-sync-and-fill-exposure-seam.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added explicit reference-sweep sections to the Spec 11 and Spec 12 umbrella docs mapping official Polymarket docs, `rs-clob-client`, `floor-licker/polyfill-rs`, Gamma, PMXT, and supporting open-source repos to the child specs that should use them
+  - Added child-spec implementation-reference notes so registry work points to Gamma/PMXT, feed work points to official WS docs plus `polyfill-rs`, and quote-lifecycle work points to official order/auth docs plus SDK/order-builder references
+  - Kept illustrative open-source bots clearly labeled as non-authoritative supporting references
+- **Tests**: None run; spec/documentation-only sweep
+- **Commit**: N/A (working tree only)
+- **Deviation**: This sweep tightens implementation guidance only; it does not expand the acceptance criteria or change the execution order of Specs 11 or 12.
+
+### 12.11 — Promote Concrete `polyfill-rs` Optimization Themes in Specs 11 and 12
+- **Spec**: `specs/11-market-universe-and-feed-plane.md`, `specs/12-hot-state-and-quote-lifecycle.md`
+- **Files changed**: `specs/11-market-universe-and-feed-plane.md`, `specs/11b-market-registry-and-universe-selection.md`, `specs/11c-feed-manager-and-normalized-public-updates.md`, `specs/11d-dynamic-subscription-diffs-and-feed-scaling.md`, `specs/12-hot-state-and-quote-lifecycle.md`, `specs/12a-hot-state-and-update-notices.md`, `specs/12c-order-manager-local-reconciliation.md`, `specs/12d-exchange-sync-and-fill-exposure-seam.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Tightened the spec guidance from “consider `polyfill-rs`” to a concrete checklist of transferable optimization ideas: zero-allocation post-warmup loops, SIMD parsing, fixed-point ingress conversion, bounded hot data structures, buffer pooling, and connection reuse/prewarming where applicable
+  - Mapped those themes to the specific child specs where they are most relevant instead of implying they apply uniformly everywhere
+- **Tests**: None run; spec/documentation-only sweep
+- **Commit**: N/A (working tree only)
+- **Deviation**: This change strengthens performance guidance only; it does not require adopting `polyfill-rs` wholesale or making unmeasured optimizations mandatory in the first implementation.
+
+### 11a.5 — Add explicit source-family discrimination to `UpdateNotice`
+- **Spec**: `specs/11a-market-foundation-and-normalized-events.md`
+- **Files changed**: `crates/rtt-core/src/public_event.rs`, `crates/pm-data/src/types.rs`, `crates/pm-data/tests/test_types.rs`, `ARCHITECTURE.md`, `specs/11a-market-foundation-and-normalized-events.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Extended `UpdateNotice` with `source_kind` so downstream notice consumers can distinguish Polymarket, reference, and other source families without an extra resolver lookup
+  - Added an explicit `UpdateKind::Custom` escape hatch so the notice contract does not assume today’s Polymarket public event families are the final closed set
+  - Updated Polymarket normalized-update mapping to populate `source_kind = SourceKind::PolymarketWs`
+- **Tests**:
+  - `cargo test -p rtt-core --lib public_event`
+- **Commit**: `feat: add source-kind discriminator to update notices`
+- **Deviation**: Kept the custom-kind escape hatch minimal for now; richer provider-specific extension payloads remain deferred until a later source actually needs them.
+
+### 12.12 — Clarify Trigger-Only Path and Per-Instance Anti-Thrash Controls
+- **Spec**: `specs/12-hot-state-and-quote-lifecycle.md`, `specs/12c-order-manager-local-reconciliation.md`
+- **Files changed**: `specs/12-hot-state-and-quote-lifecycle.md`, `specs/12c-order-manager-local-reconciliation.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Made it explicit that trigger-only/taker strategies can ship with `12a + 12b` and do not need `12c/12d` unless they maintain resting quote state
+  - Tightened `12c` so anti-thrash parameters are explicitly per quote-strategy instance rather than one implicit global policy
+- **Tests**: None run; spec/documentation clarification accompanying `11a` code changes
+- **Commit**: N/A (working tree only)
+- **Deviation**: This clarifies the shipping path and configuration scope only; it does not change the overall decomposition or ordering of the quote-strategy workstream.
+
+### 11a.6 — Centralize shared Polymarket endpoints and source identity
+- **Spec**: `specs/11a-market-foundation-and-normalized-events.md`
+- **Files changed**: `crates/rtt-core/src/polymarket.rs`, `crates/rtt-core/src/lib.rs`, `crates/rtt-core/src/clob_auth.rs`, `crates/rtt-core/src/clob_request.rs`, `crates/rtt-core/src/benchmark.rs`, `crates/rtt-core/src/request.rs`, `crates/rtt-core/src/clob_executor.rs`, `crates/rtt-core/tests/test_polymarket_endpoints.rs`, `crates/rtt-core/tests/test_connection_pipeline.rs`, `crates/rtt-core/tests/test_execution_pipeline.rs`, `crates/rtt-core/tests/test_h3_stub.rs`, `crates/pm-data/src/ws.rs`, `crates/pm-data/src/types.rs`, `crates/pm-data/tests/test_ws_debug.rs`, `crates/pm-executor/src/main.rs`, `crates/rtt-bench/src/main.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added `rtt_core::polymarket` to hold the shared CLOB host/port, REST paths and URLs, market WebSocket URL, and the canonical Polymarket public-feed source identity
+  - Rewired the live CLOB auth/request path, WS client, executor warmup path, benchmark defaults, and the live integration tests to use those shared constants instead of repeating endpoint literals
+  - Added a small endpoint-contract test so the order/auth URLs stay mechanically tied to one base URL
+- **Tests**:
+  - `cargo test -p rtt-core --test test_polymarket_endpoints`
+  - `cargo test --workspace`
+- **Commit**: `refactor: centralize polymarket endpoint constants`
+- **Deviation**: Left some explicit URLs in prose comments and docs where they improve readability; the code paths now resolve through the shared constants module.
+
+### 11a.7 — Fix keepalive integration test to assert liveness instead of market-message cadence
+- **Spec**: `specs/11a-market-foundation-and-normalized-events.md`
+- **Files changed**: `crates/pm-data/tests/test_integration.rs`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Rewrote `keepalive_no_disconnect_over_20_seconds` to stop treating forwarded market updates as proof of keepalive health
+  - Switched the test to observe `last_message_at` over two keepalive windows while asserting the WS task stays alive and `reconnect_count` remains zero
+  - Kept the test live/integration-scoped, but made its assertion match the actual `WsClient` contract
+- **Tests**:
+  - `cargo test -p pm-data keepalive_no_disconnect_over_20_seconds -- --nocapture`
+  - `cargo test -p pm-data --test test_integration -- --nocapture`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: The test now validates connection liveness and reconnect-free operation rather than per-asset market traffic frequency, which was the real source of the prior flake.

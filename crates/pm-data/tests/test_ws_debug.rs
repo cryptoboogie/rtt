@@ -1,16 +1,18 @@
 use futures_util::{SinkExt, StreamExt};
+use rtt_core::polymarket::MARKET_WS_URL;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
-const WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const TEST_ASSET_ID: &str =
     "48825140812430902098404528620382945035793471220915259967486864813738884055220";
 
 #[tokio::test]
 #[ignore] // Requires network; may timeout on quiet markets
 async fn raw_ws_connect_and_subscribe() {
-    eprintln!("Connecting to {WS_URL}...");
-    let (ws_stream, response) = connect_async(WS_URL).await.expect("Failed to connect");
+    eprintln!("Connecting to {MARKET_WS_URL}...");
+    let (ws_stream, response) = connect_async(MARKET_WS_URL)
+        .await
+        .expect("Failed to connect");
     eprintln!("Connected! Status: {}", response.status());
 
     let (mut write, mut read) = ws_stream.split();

@@ -4,6 +4,7 @@ use std::time::Duration;
 use crate::connection::{extract_pop, get_cf_ray, AddressFamily, ConnectionPool};
 use crate::executor::{ExecutionThread, IngressThread, MaintenanceThread};
 use crate::metrics::{StatsAggregator, StatsReport, TimestampRecord};
+use crate::polymarket::{CLOB_HOST, CLOB_PORT};
 use crate::queue::TriggerQueue;
 use crate::request::RequestTemplate;
 use crate::trigger::{OrderType, Side, TriggerMessage};
@@ -37,8 +38,8 @@ pub struct BenchmarkConfig {
 impl Default for BenchmarkConfig {
     fn default() -> Self {
         Self {
-            host: "clob.polymarket.com".to_string(),
-            port: 443,
+            host: CLOB_HOST.to_string(),
+            port: CLOB_PORT,
             mode: BenchmarkMode::SingleShot,
             sample_count: 100,
             pool_size: 2,

@@ -67,8 +67,10 @@ fn main() {
 }
 
 async fn run(config: ExecutorConfig) {
+    let monitored_assets = config.resolved_subscription_asset_ids();
+
     tracing::info!(
-        markets = ?config.websocket.asset_ids,
+        markets = ?monitored_assets,
         strategy = %config.strategy.strategy,
         pool_size = config.connection.pool_size,
         dry_run = config.execution.dry_run,
@@ -111,8 +113,8 @@ async fn run(config: ExecutorConfig) {
 
     // Warm connection pool (only in live mode)
     let mut conn_pool = rtt_core::connection::ConnectionPool::new(
-        "clob.polymarket.com",
-        443,
+        rtt_core::polymarket::CLOB_HOST,
+        rtt_core::polymarket::CLOB_PORT,
         config.connection.pool_size,
         af,
     );
@@ -222,7 +224,7 @@ async fn run(config: ExecutorConfig) {
 
     // Start WebSocket pipeline
     let mut pipeline = pm_data::Pipeline::new(
-        config.websocket.asset_ids.clone(),
+        monitored_assets.clone(),
         config.websocket.ws_channel_capacity,
         config.websocket.snapshot_channel_capacity,
     );
@@ -263,7 +265,7 @@ async fn run(config: ExecutorConfig) {
     let health_cb = circuit_breaker.clone();
     let health_state_path = config.execution.state_file.clone();
     let health_handle = tokio::spawn(health::run_health_monitor(
-        config.websocket.asset_ids.clone(),
+        monitored_assets.clone(),
         Some(health_cb),
         shutdown_rx_health,
         Some(health_state_path),

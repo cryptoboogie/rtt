@@ -18,10 +18,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::clob_auth::{build_l2_headers, L2Credentials};
 use crate::clob_order::SignedOrderPayload;
+use crate::polymarket::{CLOB_ORDER_PATH, CLOB_ORDER_URL};
 
 const ORDER_METHOD: &str = "POST";
-const ORDER_PATH: &str = "/order";
-const ORDER_URI: &str = "https://clob.polymarket.com/order";
 
 #[derive(Debug)]
 pub enum RequestBuildError {
@@ -74,12 +73,12 @@ pub fn build_order_request_from_bytes_with_timestamp(
     timestamp: &str,
 ) -> Result<Request<Bytes>, RequestBuildError> {
     let body_str = std::str::from_utf8(body.as_ref()).map_err(RequestBuildError::Utf8)?;
-    let headers = build_l2_headers(creds, timestamp, ORDER_METHOD, ORDER_PATH, body_str)
+    let headers = build_l2_headers(creds, timestamp, ORDER_METHOD, CLOB_ORDER_PATH, body_str)
         .map_err(|err| RequestBuildError::Auth(err.to_string()))?;
 
     let mut builder = Request::builder()
         .method(Method::POST)
-        .uri(Uri::from_static(ORDER_URI))
+        .uri(Uri::from_static(CLOB_ORDER_URL))
         .header("content-type", "application/json");
 
     for (name, value) in &headers {

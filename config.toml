@@ -16,12 +16,39 @@ pool_size = 2
 address_family = "auto"  # "auto", "ipv4", or "ipv6"
 
 [websocket]
-# Active Polymarket token IDs to monitor
+# Legacy explicit Polymarket asset subscriptions. Still supported.
 asset_ids = [
     "48825140812430902098404528620382945035793471220915259967486864813738884055220"
 ]
 ws_channel_capacity = 1024
 snapshot_channel_capacity = 256
+
+# Future market-universe control plane shape. Parsing is supported now;
+# live HTTP discovery arrives in a later spec.
+# [websocket.market_universe]
+# mode = "discovery"
+# source_id = "gamma-primary"
+# market_ids = [
+#   "0xmarket-id-1",
+#   "0xmarket-id-2",
+# ]
+
+# Explicit per-source bindings for strategies that do not use discovery.
+# `pm-executor` currently resolves Polymarket WS asset IDs from these bindings
+# plus the legacy `asset_ids` list and `[strategy].token_id`.
+# [[websocket.source_bindings]]
+# source_id = "polymarket-public"
+# source_kind = "polymarket_ws"
+# asset_ids = [
+#   "48825140812430902098404528620382945035793471220915259967486864813738884055220",
+#   "1234567890123456789012345678901234567890"
+# ]
+# market_ids = ["0xmarket-id-1"]
+
+# [[websocket.source_bindings]]
+# source_id = "reference-mid"
+# source_kind = "external_reference"
+# instrument_ids = ["BTC-USD"]
 
 [strategy]
 strategy = "threshold"

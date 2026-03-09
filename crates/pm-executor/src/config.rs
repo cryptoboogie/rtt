@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use pm_strategy::config::StrategyConfig;
+use rtt_core::{AssetId, MarketId, SourceId, SourceKind};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,11 +68,46 @@ pub struct ConnectionConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebSocketConfig {
-    pub asset_ids: Vec<String>,
+    #[serde(default)]
+    pub asset_ids: Vec<AssetId>,
+    #[serde(default)]
+    pub market_universe: Option<MarketUniverseConfig>,
+    #[serde(default)]
+    pub source_bindings: Vec<SourceBindingConfig>,
     #[serde(default = "default_ws_channel_capacity")]
     pub ws_channel_capacity: usize,
     #[serde(default = "default_snapshot_channel_capacity")]
     pub snapshot_channel_capacity: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketUniverseConfig {
+    #[serde(default)]
+    pub mode: MarketUniverseMode,
+    #[serde(default)]
+    pub source_id: Option<SourceId>,
+    #[serde(default)]
+    pub market_ids: Vec<MarketId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MarketUniverseMode {
+    #[default]
+    Static,
+    Discovery,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceBindingConfig {
+    pub source_id: SourceId,
+    pub source_kind: SourceKind,
+    #[serde(default)]
+    pub asset_ids: Vec<AssetId>,
+    #[serde(default)]
+    pub market_ids: Vec<MarketId>,
+    #[serde(default)]
+    pub instrument_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -189,6 +225,33 @@ impl ExecutorConfig {
             self.safety.alert_webhook_url = Some(v);
         }
     }
+
+    pub fn resolved_subscription_asset_ids(&self) -> Vec<String> {
+        let mut asset_ids = self.websocket.asset_ids.clone();
+
+        for binding in &self.websocket.source_bindings {
+            if binding.source_kind == SourceKind::PolymarketWs {
+                for asset_id in &binding.asset_ids {
+                    push_unique_asset_id(&mut asset_ids, asset_id.clone());
+                }
+            }
+        }
+
+        if !self.strategy.token_id.is_empty() {
+            push_unique_asset_id(&mut asset_ids, AssetId::new(self.strategy.token_id.clone()));
+        }
+
+        asset_ids
+            .into_iter()
+            .map(|asset_id| asset_id.to_string())
+            .collect()
+    }
+}
+
+fn push_unique_asset_id(asset_ids: &mut Vec<AssetId>, candidate: AssetId) {
+    if !asset_ids.iter().any(|existing| existing == &candidate) {
+        asset_ids.push(candidate);
+    }
 }
 
 #[cfg(test)]
@@ -239,6 +302,7 @@ level = "debug"
         assert_eq!(config.credentials.api_key, "test_key");
         assert_eq!(config.connection.pool_size, 4);
         assert_eq!(config.websocket.asset_ids.len(), 2);
+        assert_eq!(config.websocket.asset_ids[0].as_str(), "asset1");
         assert_eq!(config.strategy.strategy, "threshold");
         assert_eq!(config.execution.presign_count, 50);
         assert!(config.execution.dry_run);
@@ -410,5 +474,111 @@ require_confirmation = false
         assert!((config.safety.max_usd_exposure - 100.0).abs() < 0.01);
         assert_eq!(config.safety.max_triggers_per_second, 5);
         assert!(!config.safety.require_confirmation);
+    }
+
+    #[test]
+    fn market_universe_and_source_bindings_parse_with_legacy_shape_intact() {
+        let config_toml = r#"
+[credentials]
+[connection]
+[websocket]
+asset_ids = ["legacy-asset"]
+ws_channel_capacity = 512
+snapshot_channel_capacity = 128
+
+[websocket.market_universe]
+mode = "discovery"
+source_id = "gamma-primary"
+market_ids = ["market-1", "market-2"]
+
+[[websocket.source_bindings]]
+source_id = "polymarket-public"
+source_kind = "polymarket_ws"
+asset_ids = ["bound-yes", "bound-no"]
+market_ids = ["market-1"]
+
+[[websocket.source_bindings]]
+source_id = "reference-mid"
+source_kind = "external_reference"
+instrument_ids = ["BTC-USD"]
+
+[strategy]
+strategy = "threshold"
+token_id = "strategy-asset"
+side = "Buy"
+size = "10"
+order_type = "FOK"
+
+[strategy.params]
+threshold = 0.45
+
+[execution]
+[logging]
+"#;
+
+        let config: ExecutorConfig = toml::from_str(config_toml).unwrap();
+
+        assert_eq!(config.websocket.asset_ids[0].as_str(), "legacy-asset");
+        let market_universe = config.websocket.market_universe.as_ref().unwrap();
+        assert_eq!(market_universe.mode, MarketUniverseMode::Discovery);
+        assert_eq!(
+            market_universe.source_id.as_ref().unwrap().to_string(),
+            "gamma-primary"
+        );
+        assert_eq!(market_universe.market_ids[1].as_str(), "market-2");
+        assert_eq!(config.websocket.source_bindings.len(), 2);
+        assert_eq!(
+            config.websocket.source_bindings[0].source_kind,
+            SourceKind::PolymarketWs
+        );
+        assert_eq!(
+            config.websocket.source_bindings[1].instrument_ids,
+            vec!["BTC-USD".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolved_subscription_assets_merge_legacy_bindings_and_strategy_target() {
+        let config_toml = r#"
+[credentials]
+[connection]
+[websocket]
+asset_ids = ["legacy-asset", "bound-yes"]
+
+[[websocket.source_bindings]]
+source_id = "polymarket-public"
+source_kind = "polymarket_ws"
+asset_ids = ["bound-yes", "bound-no"]
+
+[[websocket.source_bindings]]
+source_id = "reference-mid"
+source_kind = "external_reference"
+instrument_ids = ["BTC-USD"]
+
+[strategy]
+strategy = "threshold"
+token_id = "strategy-asset"
+side = "Buy"
+size = "10"
+order_type = "FOK"
+
+[strategy.params]
+threshold = 0.45
+
+[execution]
+[logging]
+"#;
+
+        let config: ExecutorConfig = toml::from_str(config_toml).unwrap();
+
+        assert_eq!(
+            config.resolved_subscription_asset_ids(),
+            vec![
+                "legacy-asset".to_string(),
+                "bound-yes".to_string(),
+                "bound-no".to_string(),
+                "strategy-asset".to_string()
+            ]
+        );
     }
 }

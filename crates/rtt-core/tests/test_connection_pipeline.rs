@@ -18,6 +18,7 @@ use http::Request;
 use rtt_core::connection::{
     connect_h2, extract_pop, get_cf_ray, resolve, send_request, AddressFamily, ConnectionPool,
 };
+use rtt_core::polymarket::{CLOB_HOST, CLOB_PORT};
 
 /// TEST: We can connect to Polymarket's CLOB server over HTTP/2.
 ///
@@ -35,11 +36,11 @@ use rtt_core::connection::{
 #[tokio::test]
 async fn warm_connection_reaches_polymarket_and_identifies_datacenter() {
     println!("\n=== Connection Pipeline: Single Warm Connection ===");
-    println!("Target: clob.polymarket.com:443");
+    println!("Target: {CLOB_HOST}:{CLOB_PORT}");
 
     // Create a pool with 1 connection and warm it up.
     // "Warming" means: DNS resolve → TCP connect → TLS handshake → H2 SETTINGS exchange.
-    let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 1, AddressFamily::Auto);
+    let mut pool = ConnectionPool::new(CLOB_HOST, CLOB_PORT, 1, AddressFamily::Auto);
     let warm_count = pool
         .warmup()
         .await
@@ -51,7 +52,7 @@ async fn warm_connection_reaches_polymarket_and_identifies_datacenter() {
     let req = Request::builder()
         .method("GET")
         .uri("/")
-        .header("host", "clob.polymarket.com")
+        .header("host", CLOB_HOST)
         .body(Bytes::new())
         .unwrap();
 
@@ -90,14 +91,13 @@ async fn warm_connection_reaches_polymarket_and_identifies_datacenter() {
 #[test]
 fn live_dns_resolution_supports_auto_and_ipv4() {
     let auto_addrs =
-        resolve("clob.polymarket.com", 443, AddressFamily::Auto).expect("auto resolve failed");
+        resolve(CLOB_HOST, CLOB_PORT, AddressFamily::Auto).expect("auto resolve failed");
     assert!(
         !auto_addrs.is_empty(),
         "auto resolve should return at least one address"
     );
 
-    let v4_addrs =
-        resolve("clob.polymarket.com", 443, AddressFamily::V4).expect("v4 resolve failed");
+    let v4_addrs = resolve(CLOB_HOST, CLOB_PORT, AddressFamily::V4).expect("v4 resolve failed");
     assert!(
         v4_addrs.iter().all(|addr| addr.is_ipv4()),
         "forced IPv4 resolution should only return IPv4 addresses",
@@ -107,13 +107,13 @@ fn live_dns_resolution_supports_auto_and_ipv4() {
 /// TEST: IPv6 resolution is environment-dependent but should remain callable.
 #[test]
 fn live_dns_resolution_allows_ipv6_probe() {
-    let _ = resolve("clob.polymarket.com", 443, AddressFamily::V6);
+    let _ = resolve(CLOB_HOST, CLOB_PORT, AddressFamily::V6);
 }
 
 /// TEST: A single warmed H2 session can serve multiple requests.
 #[tokio::test]
 async fn single_h2_session_reuses_tls_and_h2_state() {
-    let mut sender = connect_h2("clob.polymarket.com", 443, AddressFamily::Auto)
+    let mut sender = connect_h2(CLOB_HOST, CLOB_PORT, AddressFamily::Auto)
         .await
         .expect("failed to connect");
 
@@ -121,7 +121,7 @@ async fn single_h2_session_reuses_tls_and_h2_state() {
         let req = Request::builder()
             .method("GET")
             .uri("/")
-            .header("host", "clob.polymarket.com")
+            .header("host", CLOB_HOST)
             .body(Bytes::new())
             .unwrap();
         let resp = send_request(&mut sender, req)
@@ -150,7 +150,7 @@ async fn single_h2_session_reuses_tls_and_h2_state() {
 async fn connection_pool_distributes_requests_across_connections() {
     println!("\n=== Connection Pipeline: Pool Round-Robin ===");
 
-    let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 2, AddressFamily::Auto);
+    let mut pool = ConnectionPool::new(CLOB_HOST, CLOB_PORT, 2, AddressFamily::Auto);
     let warm_count = pool.warmup().await.expect("warmup failed");
     println!("Pool:    {} warm connections", warm_count);
     assert_eq!(warm_count, 2);
@@ -161,7 +161,7 @@ async fn connection_pool_distributes_requests_across_connections() {
         let req = Request::builder()
             .method("GET")
             .uri("/")
-            .header("host", "clob.polymarket.com")
+            .header("host", CLOB_HOST)
             .body(Bytes::new())
             .unwrap();
 
@@ -203,13 +203,13 @@ async fn connection_pool_distributes_requests_across_connections() {
 async fn frame_submission_is_microseconds_network_roundtrip_is_milliseconds() {
     println!("\n=== Connection Pipeline: Split Instrumentation ===");
 
-    let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 1, AddressFamily::Auto);
+    let mut pool = ConnectionPool::new(CLOB_HOST, CLOB_PORT, 1, AddressFamily::Auto);
     pool.warmup().await.expect("warmup failed");
 
     let req = Request::builder()
         .method("GET")
         .uri("/")
-        .header("host", "clob.polymarket.com")
+        .header("host", CLOB_HOST)
         .body(Bytes::new())
         .unwrap();
 
@@ -259,7 +259,7 @@ async fn frame_submission_is_microseconds_network_roundtrip_is_milliseconds() {
 /// TEST: Pool health checks verify each warmed connection.
 #[tokio::test]
 async fn connection_pool_health_check_confirms_warm_connections() {
-    let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 2, AddressFamily::Auto);
+    let mut pool = ConnectionPool::new(CLOB_HOST, CLOB_PORT, 2, AddressFamily::Auto);
     pool.warmup().await.expect("warmup failed");
 
     let healthy = pool.health_check().await;
@@ -272,7 +272,7 @@ async fn connection_pool_health_check_confirms_warm_connections() {
 /// TEST: Detailed health checks report one status per warmed connection.
 #[tokio::test]
 async fn connection_pool_health_check_reports_each_connection() {
-    let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 2, AddressFamily::Auto);
+    let mut pool = ConnectionPool::new(CLOB_HOST, CLOB_PORT, 2, AddressFamily::Auto);
     pool.warmup().await.expect("warmup failed");
 
     let statuses = pool.health_check_detailed().await;

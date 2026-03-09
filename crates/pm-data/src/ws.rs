@@ -3,15 +3,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use rtt_core::polymarket::MARKET_WS_URL;
 use serde::Serialize;
 use tokio::sync::broadcast;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
 
-use crate::types::WsMessage;
+use crate::types::{ReconnectEvent, WsMessage};
 
-const WS_MARKET_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const PING_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Serialize)]
@@ -167,8 +167,15 @@ impl WsClient {
             // Track reconnection
             if !first_connect {
                 let count = self.reconnect_count.fetch_add(1, Ordering::Relaxed) + 1;
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
                 // Signal reconnect to pipeline so it clears stale state
-                let _ = self.tx.send(WsMessage::Reconnected);
+                let _ = self.tx.send(WsMessage::Reconnected(ReconnectEvent {
+                    sequence: count,
+                    timestamp_ms: now_ms,
+                }));
                 let delay = backoff.next_delay();
                 warn!(
                     reconnect_count = count,
@@ -195,8 +202,8 @@ async fn connect_and_run(
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     last_message_at: Arc<AtomicU64>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let (ws_stream, _) = connect_async(WS_MARKET_URL).await?;
-    info!("Connected to {WS_MARKET_URL}");
+    let (ws_stream, _) = connect_async(MARKET_WS_URL).await?;
+    info!("Connected to {MARKET_WS_URL}");
 
     let (mut write, mut read) = ws_stream.split();
 

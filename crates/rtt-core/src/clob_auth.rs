@@ -3,6 +3,8 @@ use base64::Engine;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
+use crate::polymarket::{CLOB_AUTH_API_KEYS_PATH, CLOB_AUTH_API_KEYS_URL};
+
 type HmacSha256 = Hmac<Sha256>;
 
 /// Compute HMAC-SHA256: base64url-decode secret, HMAC message, base64url-encode result.
@@ -82,7 +84,7 @@ pub fn build_validation_request(
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs()
     );
-    build_l2_headers(creds, &timestamp, "GET", "/auth/api-keys", "")
+    build_l2_headers(creds, &timestamp, "GET", CLOB_AUTH_API_KEYS_PATH, "")
 }
 
 /// Validate L2 credentials by hitting GET /auth/api-keys.
@@ -96,7 +98,7 @@ pub async fn validate_credentials(creds: &L2Credentials) -> Result<(), String> {
             .map_err(|e| e.to_string())?
             .as_secs()
     );
-    let headers = build_l2_headers(creds, &timestamp, "GET", "/auth/api-keys", "")
+    let headers = build_l2_headers(creds, &timestamp, "GET", CLOB_AUTH_API_KEYS_PATH, "")
         .map_err(|e| format!("Failed to build auth headers: {}", e))?;
 
     let client = reqwest::Client::builder()
@@ -104,7 +106,7 @@ pub async fn validate_credentials(creds: &L2Credentials) -> Result<(), String> {
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
 
-    let mut req = client.get("https://clob.polymarket.com/auth/api-keys");
+    let mut req = client.get(CLOB_AUTH_API_KEYS_URL);
     for (name, value) in &headers {
         req = req.header(name, value);
     }

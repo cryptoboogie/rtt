@@ -93,6 +93,30 @@ enum Side { BUY, SELL }
 enum OrderType { GTC, GTD, FOK, FAK }
 ```
 All types derive `Serialize`/`Deserialize`. Prices and sizes are strings (decimal precision preserved).
+This module remains the legacy executor/runtime DTO seam during the `11a`–`12a` migration.
+
+#### `market.rs` — Shared market identity, metadata, and exact values
+- `MarketId`, `AssetId`, `OutcomeSide`, `OutcomeToken`, `MarketStatus`
+- Exact-value wrappers: `Price`, `Size`, `Notional`, `TickSize`, `MinOrderSize`
+- `MarketMeta { market_id, yes_asset, no_asset, condition_id, tick_size, min_order_size, status, reward }`
+- `RewardParams` plus explicit `RewardFreshness::{Fresh, StaleButUsable, Unknown}`
+- Helper methods keep YES/NO pairing, market-to-asset lookup, and tradability checks explicit
+
+#### `feed_source.rs` — Shared source identity
+- `SourceId` — stable source-instance identity
+- `SourceKind` — `polymarket_ws`, `polymarket_rest`, `external_reference`, `external_trade`, `synthetic`
+- `InstrumentRef` — source-scoped subject identifier with `Source`, `Market`, `Asset`, and `Symbol` kinds
+
+#### `polymarket.rs` — Shared Polymarket endpoints and identities
+- `CLOB_HOST` / `CLOB_PORT` plus `CLOB_BASE_URL`, `CLOB_ORDER_*`, and `CLOB_AUTH_API_KEYS_*` centralize the live CLOB endpoint literals
+- `MARKET_WS_URL` centralizes the public market-feed WebSocket URL
+- `public_source_id()` centralizes the shared Polymarket public-feed source identity used by normalized public updates
+
+#### `public_event.rs` — Normalized source updates and notices
+- `UpdateNotice { source_id, source_kind, subject, kind, version, source_hash }` — small source-agnostic handoff object with explicit source-family discrimination
+- `NormalizedUpdate { notice, payload }` — shared public-event envelope
+- Payload variants: book snapshot, book delta, best bid/ask, trade tick, reference price, tick-size change, reconnect, source status, with room for future source-specific/custom update kinds
+- Normalized payloads use the exact-value wrappers from `market.rs`; they are the shared pre-hot-state representation for later specs
 
 **Note:** Polymarket’s order/CLOB path is colocated in **eu-west-1** (Dublin). AWS eu-west-1 is Ireland/Dublin; eu-west-2 is London — so eu-west-1 is the Dublin region.
 
@@ -214,22 +238,24 @@ Real-time market data from Polymarket WebSocket.
 - Connects to `wss://ws-subscriptions-clob.polymarket.com/ws/market`
 - Subscribes to asset channels with `{"type": "subscribe", "assets_ids": [...]}`
 - 10-second ping interval, auto-reconnect with exponential backoff (1s base, 2x factor, 60s cap, 500ms jitter)
-- Broadcasts `WsMessage` enum to subscribers (including `WsMessage::Reconnected` on reconnect)
+- Broadcasts `WsMessage` enum to subscribers (including `WsMessage::Reconnected(ReconnectEvent { sequence, timestamp_ms })` on reconnect)
 - `reconnect_count: Arc<AtomicU64>` — incremented on each reconnect
 - `last_message_at: Arc<AtomicU64>` — epoch millis of last received message
 
-#### `types.rs` — WebSocket message types
+#### `types.rs` — WebSocket message types and normalization
 ```rust
 enum WsMessage {
     Book(BookUpdate),           // Full order book snapshot
     PriceChange(PriceChangeEvent),  // Incremental delta
-    LastTradePrice(...),        // Informational, not used
-    TickSizeChange(...),        // Informational, not used
-    BestBidAsk(...),            // Informational, not used
-    Reconnected,                // Emitted after WS reconnect (clears order book)
+    LastTradePrice(...),        // Trade/tick update
+    TickSizeChange(...),        // Tick-size metadata update
+    BestBidAsk(...),            // Best bid/ask update
+    Reconnected(...),           // Emitted after WS reconnect
 }
 ```
 Tagged by `event_type` field in JSON.
+- `polymarket_public_source_id()` identifies the shared public-feed source instance
+- `to_normalized_updates()` converts raw Polymarket wire messages into `rtt_core::NormalizedUpdate` values without changing the legacy order-book path yet
 
 #### `orderbook.rs` — Local order book state
 - `OrderBookManager` — `Arc<RwLock<HashMap<asset_id, BookState>>>`
@@ -242,7 +268,7 @@ Tagged by `event_type` field in JSON.
 #### `pipeline.rs` — Orchestrator
 - Subscribes to WsClient, processes messages, updates OrderBookManager
 - Broadcasts `OrderBookSnapshot` to downstream subscribers
-- Only `Book` and `PriceChange` messages modify state; others are no-ops
+- Only `Book` and `PriceChange` messages modify state; reconnect clears the store and the richer normalized update mapping lives alongside this legacy snapshot path until later feed-manager work
 
 ### pm-strategy
 
@@ -496,13 +522,30 @@ pool_size = 2         # Number of warm H2 connections
 address_family = "auto"  # "auto", "ipv4", "ipv6"
 
 [websocket]
-asset_ids = ["48825..."]  # Polymarket condition token IDs to monitor
+asset_ids = ["48825..."]  # Legacy explicit Polymarket asset subscriptions; still supported
 ws_channel_capacity = 1024
 snapshot_channel_capacity = 256
 
+# Optional additive control-plane shape parsed today; live discovery is deferred.
+# [websocket.market_universe]
+# mode = "discovery"
+# source_id = "gamma-primary"
+# market_ids = ["0xmarket-1", "0xmarket-2"]
+
+# Optional explicit per-source binding shape.
+# [[websocket.source_bindings]]
+# source_id = "polymarket-public"
+# source_kind = "polymarket_ws"
+# asset_ids = ["48825...", "12345..."]
+#
+# [[websocket.source_bindings]]
+# source_id = "reference-mid"
+# source_kind = "external_reference"
+# instrument_ids = ["BTC-USD"]
+
 [strategy]
 strategy = "threshold"    # "threshold" or "spread"
-token_id = "48825..."     # Must match one of websocket.asset_ids
+token_id = "48825..."     # Execution asset; executor also merges explicit source bindings when resolving subscriptions
 side = "Buy"
 size = "5"                # USDC amount
 order_type = "FOK"        # FOK, FAK, GTC, GTD

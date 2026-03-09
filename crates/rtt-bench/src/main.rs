@@ -1,6 +1,7 @@
 use clap::Parser;
 use rtt_core::benchmark::{self, BenchmarkConfig, BenchmarkMode};
 use rtt_core::connection::AddressFamily;
+use rtt_core::polymarket::{CLOB_HOST, CLOB_PORT};
 
 #[derive(Parser, Debug)]
 #[command(name = "rtt-bench", about = "RTT benchmark harness")]
@@ -14,11 +15,11 @@ struct Cli {
     benchmark: bool,
 
     /// Target host
-    #[arg(long, default_value = "clob.polymarket.com")]
+    #[arg(long, default_value_t = CLOB_HOST.to_string())]
     host: String,
 
     /// Target port
-    #[arg(long, default_value = "443")]
+    #[arg(long, default_value_t = CLOB_PORT)]
     port: u16,
 
     /// Benchmark mode: single-shot, random-cadence, burst-race

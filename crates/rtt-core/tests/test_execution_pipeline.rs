@@ -28,6 +28,7 @@ use rtt_core::clob_auth::L2Credentials;
 use rtt_core::clob_order::{Order, SignedOrderPayload};
 use rtt_core::connection::{AddressFamily, ConnectionPool};
 use rtt_core::executor::{ExecutionThread, IngressThread};
+use rtt_core::polymarket::{CLOB_HOST, CLOB_PORT};
 use rtt_core::queue::TriggerQueue;
 use rtt_core::trigger::{OrderType, Side, TriggerMessage};
 use rtt_core::{
@@ -143,7 +144,7 @@ async fn full_execution_records_all_timestamps_in_order() {
     println!("\n=== Execution Pipeline: Full Timestamp Chain ===");
 
     // Warm a connection pool.
-    let mut conn_pool = ConnectionPool::new("clob.polymarket.com", 443, 1, AddressFamily::Auto);
+    let mut conn_pool = ConnectionPool::new(CLOB_HOST, CLOB_PORT, 1, AddressFamily::Auto);
     conn_pool.warmup().await.expect("warmup failed");
 
     // Build a pre-signed order pool.
@@ -343,13 +344,13 @@ fn invalid_token_dispatch_is_classified_as_order_build_failure() {
 /// TEST: `ExecutionThread::process_one()` records the round-robin connection index.
 #[tokio::test]
 async fn process_one_records_connection_index_after_round_robin_advance() {
-    let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 2, AddressFamily::Auto);
+    let mut pool = ConnectionPool::new(CLOB_HOST, CLOB_PORT, 2, AddressFamily::Auto);
     pool.warmup().await.expect("warmup failed");
 
     let dummy_req = http::Request::builder()
         .method("GET")
         .uri("/")
-        .header("host", "clob.polymarket.com")
+        .header("host", CLOB_HOST)
         .body(bytes::Bytes::new())
         .unwrap();
     let _ = pool.send(dummy_req).await;
@@ -357,7 +358,7 @@ async fn process_one_records_connection_index_after_round_robin_advance() {
     let pool = Arc::new(pool);
     let mut template =
         rtt_core::request::RequestTemplate::new(http::Method::GET, "/".parse().unwrap());
-    template.add_header("host", "clob.polymarket.com");
+    template.add_header("host", CLOB_HOST);
 
     let mut msg = rtt_core::trigger::TriggerMessage {
         trigger_id: 1,
@@ -390,13 +391,13 @@ async fn process_one_records_connection_index_after_round_robin_advance() {
 /// TEST: Frame submission time stays distinct from network RTT in the execution lane.
 #[tokio::test]
 async fn write_duration_stays_well_below_network_ttfb() {
-    let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 1, AddressFamily::Auto);
+    let mut pool = ConnectionPool::new(CLOB_HOST, CLOB_PORT, 1, AddressFamily::Auto);
     pool.warmup().await.expect("warmup failed");
     let pool = Arc::new(pool);
 
     let mut template =
         rtt_core::request::RequestTemplate::new(http::Method::GET, "/".parse().unwrap());
-    template.add_header("host", "clob.polymarket.com");
+    template.add_header("host", CLOB_HOST);
 
     let mut msg = rtt_core::trigger::TriggerMessage {
         trigger_id: 1,
@@ -490,7 +491,7 @@ fn pool_exhaustion_returns_none_not_panic() {
 /// TEST: The threaded ingress/queue/execution pipeline still produces one warm record.
 #[tokio::test]
 async fn threaded_end_to_end_pipeline_produces_single_record() {
-    let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 2, AddressFamily::Auto);
+    let mut pool = ConnectionPool::new(CLOB_HOST, CLOB_PORT, 2, AddressFamily::Auto);
     pool.warmup().await.expect("warmup failed");
     let pool = Arc::new(pool);
 
@@ -499,7 +500,7 @@ async fn threaded_end_to_end_pipeline_produces_single_record() {
 
     let mut template =
         rtt_core::request::RequestTemplate::new(http::Method::GET, "/".parse().unwrap());
-    template.add_header("host", "clob.polymarket.com");
+    template.add_header("host", CLOB_HOST);
 
     let mut exec = ExecutionThread::new(q.receiver());
     exec.start(pool.clone(), template);

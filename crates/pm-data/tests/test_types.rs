@@ -1,4 +1,5 @@
 use pm_data::types::*;
+use rtt_core::public_event::NormalizedUpdatePayload;
 
 #[test]
 fn deserialize_book_event() {
@@ -219,4 +220,124 @@ fn order_book_snapshot_construction() {
     };
     assert_eq!(snap.best_bid.as_ref().unwrap().price, "0.55");
     assert_eq!(snap.best_ask.as_ref().unwrap().size, "200");
+}
+
+#[test]
+fn book_events_normalize_into_shared_market_updates() {
+    let json = r#"{
+        "event_type": "book",
+        "asset_id": "123456",
+        "market": "0xabcdef",
+        "timestamp": "1700000000000",
+        "bids": [
+            {"price": "0.55", "size": "100"}
+        ],
+        "asks": [
+            {"price": "0.56", "size": "150"}
+        ],
+        "hash": "book-hash"
+    }"#;
+
+    let msg: WsMessage = serde_json::from_str(json).unwrap();
+    let updates = msg.to_normalized_updates();
+
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].notice.source_id, polymarket_public_source_id());
+    assert_eq!(
+        updates[0].notice.source_kind,
+        rtt_core::SourceKind::PolymarketWs
+    );
+    assert_eq!(updates[0].notice.version, 1_700_000_000_000);
+    assert_eq!(updates[0].notice.source_hash.as_deref(), Some("book-hash"));
+
+    match &updates[0].payload {
+        NormalizedUpdatePayload::BookSnapshot(snapshot) => {
+            assert_eq!(snapshot.market_id.as_str(), "0xabcdef");
+            assert_eq!(snapshot.asset_id.as_str(), "123456");
+            assert_eq!(snapshot.bids[0].price.as_str(), "0.55");
+            assert_eq!(snapshot.asks[0].size.as_str(), "150");
+        }
+        other => panic!("expected book snapshot, got {other:?}"),
+    }
+}
+
+#[test]
+fn price_change_and_bbo_events_normalize_with_exact_values() {
+    let price_change_json = r#"{
+        "event_type": "price_change",
+        "market": "0xabcdef",
+        "timestamp": "1700000000000",
+        "price_changes": [
+            {
+                "asset_id": "123456",
+                "price": "0.55",
+                "size": "100",
+                "side": "BUY",
+                "hash": "delta-hash",
+                "best_bid": "0.55",
+                "best_ask": "0.56"
+            }
+        ]
+    }"#;
+    let best_bid_ask_json = r#"{
+        "event_type": "best_bid_ask",
+        "asset_id": "123456",
+        "market": "0xabcdef",
+        "best_bid": "0.55",
+        "best_ask": "0.56",
+        "spread": "0.01",
+        "timestamp": "1700000000001"
+    }"#;
+
+    let price_change: WsMessage = serde_json::from_str(price_change_json).unwrap();
+    let bbo: WsMessage = serde_json::from_str(best_bid_ask_json).unwrap();
+
+    let delta_updates = price_change.to_normalized_updates();
+    let bbo_updates = bbo.to_normalized_updates();
+
+    match &delta_updates[0].payload {
+        NormalizedUpdatePayload::BookDelta(delta) => {
+            assert_eq!(delta.asset_id.as_str(), "123456");
+            assert_eq!(delta.price.as_str(), "0.55");
+            assert_eq!(delta.size.as_str(), "100");
+            assert_eq!(delta.best_ask.as_ref().unwrap().as_str(), "0.56");
+        }
+        other => panic!("expected delta update, got {other:?}"),
+    }
+
+    match &bbo_updates[0].payload {
+        NormalizedUpdatePayload::BestBidAsk(bbo) => {
+            assert_eq!(bbo.best_bid.as_str(), "0.55");
+            assert_eq!(bbo.best_ask.as_str(), "0.56");
+            assert_eq!(bbo.spread.as_ref().unwrap().as_str(), "0.01");
+        }
+        other => panic!("expected best bid/ask update, got {other:?}"),
+    }
+}
+
+#[test]
+fn reconnect_events_normalize_into_source_scoped_notices() {
+    let msg = WsMessage::Reconnected(ReconnectEvent {
+        sequence: 7,
+        timestamp_ms: 1_700_000_000_123,
+    });
+
+    let updates = msg.to_normalized_updates();
+
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].notice.source_id, polymarket_public_source_id());
+    assert_eq!(
+        updates[0].notice.source_kind,
+        rtt_core::SourceKind::PolymarketWs
+    );
+    assert_eq!(updates[0].notice.version, 7);
+    assert_eq!(updates[0].notice.subject.instrument_id, "_source");
+
+    match &updates[0].payload {
+        NormalizedUpdatePayload::Reconnect(reconnect) => {
+            assert_eq!(reconnect.sequence, 7);
+            assert_eq!(reconnect.timestamp_ms, 1_700_000_000_123);
+        }
+        other => panic!("expected reconnect update, got {other:?}"),
+    }
 }

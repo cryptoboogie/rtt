@@ -83,11 +83,11 @@ impl RequestTemplate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::polymarket::{CLOB_HOST, CLOB_ROOT_URL};
 
     #[test]
     fn create_template() {
-        let tmpl =
-            RequestTemplate::new(Method::GET, "https://clob.polymarket.com/".parse().unwrap());
+        let tmpl = RequestTemplate::new(Method::GET, CLOB_ROOT_URL.parse().unwrap());
         assert_eq!(tmpl.body_len, 0);
     }
 
@@ -125,10 +125,10 @@ mod tests {
     #[test]
     fn build_request_has_headers() {
         let mut tmpl = RequestTemplate::new(Method::GET, "/".parse().unwrap());
-        tmpl.add_header("host", "clob.polymarket.com");
+        tmpl.add_header("host", CLOB_HOST);
         tmpl.add_header("content-type", "application/json");
         let req = tmpl.build_request();
-        assert_eq!(req.headers().get("host").unwrap(), "clob.polymarket.com");
+        assert_eq!(req.headers().get("host").unwrap(), CLOB_HOST);
         assert_eq!(
             req.headers().get("content-type").unwrap(),
             "application/json"

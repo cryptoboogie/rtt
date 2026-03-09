@@ -5,7 +5,7 @@ use crate::orderbook::OrderBookManager;
 use crate::types::{OrderBookSnapshot, WsMessage};
 use crate::ws::WsClient;
 
-/// Full pipeline: WS → parse → update order book → notify via channel.
+/// Full pipeline: WS -> parse -> update order book -> notify via channel.
 pub struct Pipeline {
     ws_client: WsClient,
     order_books: OrderBookManager,
@@ -54,7 +54,6 @@ impl Pipeline {
         let order_books = self.order_books.clone();
         let snapshot_tx = self.snapshot_tx.clone();
 
-        // Spawn the message processing loop
         let processor = tokio::spawn(async move {
             loop {
                 match ws_rx.recv().await {
@@ -72,10 +71,7 @@ impl Pipeline {
             }
         });
 
-        // Run the WebSocket client (blocks until shutdown)
         self.ws_client.run().await;
-
-        // Wait for processor to finish
         let _ = processor.await;
     }
 
@@ -106,8 +102,8 @@ fn process_message(
                 }
             }
         }
-        WsMessage::Reconnected => {
-            info!("WS reconnected — clearing order book state");
+        WsMessage::Reconnected(_) => {
+            info!("WS reconnected - clearing order book state");
             order_books.clear_all();
         }
         WsMessage::BestBidAsk(_) | WsMessage::LastTradePrice(_) | WsMessage::TickSizeChange(_) => {
@@ -157,7 +153,6 @@ mod tests {
         let order_books = OrderBookManager::new();
         let (snapshot_tx, mut snapshot_rx) = broadcast::channel(10);
 
-        // First set up the book
         let book_msg = WsMessage::Book(BookUpdate {
             asset_id: "asset1".to_string(),
             market: "0xmarket".to_string(),
@@ -173,9 +168,8 @@ mod tests {
             hash: Some("hash1".to_string()),
         });
         process_message(&book_msg, &order_books, &snapshot_tx);
-        let _ = snapshot_rx.try_recv(); // consume book notification
+        let _ = snapshot_rx.try_recv();
 
-        // Now apply a price change
         let pc_msg = WsMessage::PriceChange(PriceChangeEvent {
             market: "0xmarket".to_string(),
             timestamp: "1700000001000".to_string(),
@@ -192,7 +186,7 @@ mod tests {
         process_message(&pc_msg, &order_books, &snapshot_tx);
 
         let snap = snapshot_rx.try_recv().unwrap();
-        assert_eq!(snap.best_ask.as_ref().unwrap().price, "0.56"); // 0.56 < 0.57
+        assert_eq!(snap.best_ask.as_ref().unwrap().price, "0.56");
         assert_eq!(snap.hash, "hash2");
     }
 
@@ -212,9 +206,7 @@ mod tests {
         });
         process_message(&msg, &order_books, &snapshot_tx);
 
-        // No snapshot should be emitted
         assert!(snapshot_rx.try_recv().is_err());
-        // No book should exist
         assert!(order_books.get_snapshot("asset1").is_none());
     }
 
@@ -223,7 +215,6 @@ mod tests {
         let order_books = OrderBookManager::new();
         let (snapshot_tx, mut snapshot_rx) = broadcast::channel(10);
 
-        // First populate the book
         let msg = WsMessage::Book(BookUpdate {
             asset_id: "asset1".to_string(),
             market: "0xmarket".to_string(),
@@ -239,12 +230,14 @@ mod tests {
             hash: Some("hash1".to_string()),
         });
         process_message(&msg, &order_books, &snapshot_tx);
-        let _ = snapshot_rx.try_recv(); // consume
+        let _ = snapshot_rx.try_recv();
 
         assert!(order_books.get_snapshot("asset1").is_some());
 
-        // Send Reconnected — should clear all books
-        process_message(&WsMessage::Reconnected, &order_books, &snapshot_tx);
+        process_message(&WsMessage::Reconnected(crate::types::ReconnectEvent {
+            sequence: 1,
+            timestamp_ms: 1_700_000_001_000,
+        }), &order_books, &snapshot_tx);
 
         assert!(order_books.get_snapshot("asset1").is_none());
         assert_eq!(order_books.asset_count(), 0);
