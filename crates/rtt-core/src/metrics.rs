@@ -9,6 +9,8 @@ pub struct TimestampRecord {
     pub t_write_end: u64,
     pub t_first_resp_byte: u64,
     pub t_headers_done: u64,
+    pub t_sign_start: u64,
+    pub t_sign_end: u64,
     pub is_reconnect: bool,
     pub cf_ray_pop: String,
     pub connection_index: usize,
@@ -48,6 +50,11 @@ impl TimestampRecord {
     /// Total trigger-to-first-byte: first_resp_byte - trigger_rx
     pub fn trigger_to_first_byte(&self) -> u64 {
         self.t_first_resp_byte.saturating_sub(self.t_trigger_rx)
+    }
+
+    /// EIP-712 signing duration: sign_end - sign_start
+    pub fn sign_duration(&self) -> u64 {
+        self.t_sign_end.saturating_sub(self.t_sign_start)
     }
 }
 
@@ -159,6 +166,8 @@ mod tests {
             t_write_end: base + 500,
             t_first_resp_byte: base + 1000,
             t_headers_done: base + 1100,
+            t_sign_start: 0,
+            t_sign_end: 0,
             is_reconnect: reconnect,
             cf_ray_pop: String::new(),
             connection_index: 0,
@@ -218,6 +227,20 @@ mod tests {
     fn trigger_to_first_byte() {
         let r = make_record(1000, false);
         assert_eq!(r.trigger_to_first_byte(), 1000);
+    }
+
+    #[test]
+    fn sign_duration() {
+        let mut r = make_record(1000, false);
+        r.t_sign_start = 5000;
+        r.t_sign_end = 5500;
+        assert_eq!(r.sign_duration(), 500);
+    }
+
+    #[test]
+    fn sign_duration_defaults_to_zero() {
+        let r = TimestampRecord::default();
+        assert_eq!(r.sign_duration(), 0);
     }
 
     #[test]

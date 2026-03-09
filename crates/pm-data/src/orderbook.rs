@@ -160,6 +160,18 @@ impl OrderBookManager {
         let books = self.books.read().unwrap();
         books.get(asset_id).map(|b| b.asks.len()).unwrap_or(0)
     }
+
+    /// Clear all order book state. Used on WS reconnect to avoid stale data.
+    pub fn clear_all(&self) {
+        let mut books = self.books.write().unwrap();
+        books.clear();
+    }
+
+    /// Returns the number of tracked assets.
+    pub fn asset_count(&self) -> usize {
+        let books = self.books.read().unwrap();
+        books.len()
+    }
 }
 
 impl Default for OrderBookManager {
@@ -347,6 +359,22 @@ mod tests {
         };
         mgr.apply_price_change(&delta, 1700000001000);
         assert_eq!(mgr.get_hash("asset1"), Some("hash2".to_string()));
+    }
+
+    #[test]
+    fn clear_all_empties_order_book() {
+        let mgr = OrderBookManager::new();
+        let update1 = make_book_update("asset1", &[("0.55", "100")], &[("0.56", "150")]);
+        let update2 = make_book_update("asset2", &[("0.30", "500")], &[("0.35", "600")]);
+        mgr.apply_book_update(&update1);
+        mgr.apply_book_update(&update2);
+        assert_eq!(mgr.asset_count(), 2);
+
+        mgr.clear_all();
+
+        assert_eq!(mgr.asset_count(), 0);
+        assert!(mgr.get_snapshot("asset1").is_none());
+        assert!(mgr.get_snapshot("asset2").is_none());
     }
 
     #[test]

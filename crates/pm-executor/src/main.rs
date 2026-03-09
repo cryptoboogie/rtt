@@ -1,24 +1,29 @@
+mod alert;
 mod bridge;
 mod config;
 mod execution;
 mod health;
+mod health_server;
 mod logging;
 mod safety;
+mod state;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use config::ExecutorConfig;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let validate_creds_only = args.iter().any(|a| a == "--validate-creds");
     let config_path = args
         .iter()
         .position(|a| a == "--config")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .or_else(|| args.get(1).filter(|a| !a.starts_with('-')).map(PathBuf::from))
+        .or_else(|| args.iter().find(|a| !a.starts_with('-') && *a != &args[0]).map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("config.toml"));
 
     let config = ExecutorConfig::load(&config_path).unwrap_or_else(|e| {
@@ -28,9 +33,29 @@ fn main() {
 
     logging::init(&config.logging);
 
-    tracing::info!("Starting pm-executor");
-
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+
+    if validate_creds_only {
+        tracing::info!("Validating credentials...");
+        let (l2_creds, _) =
+            execution::build_credentials(&config.credentials, false)
+                .unwrap_or_else(|e| {
+                    tracing::error!("Credential error: {}", e);
+                    std::process::exit(1);
+                });
+        match rt.block_on(rtt_core::clob_auth::validate_credentials(&l2_creds)) {
+            Ok(()) => {
+                tracing::info!("Credentials validated successfully");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                tracing::error!("Credential validation failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    tracing::info!("Starting pm-executor");
     rt.block_on(run(config));
 }
 
@@ -57,6 +82,18 @@ async fn run(config: ExecutorConfig) {
         std::process::exit(1);
     });
 
+    // Validate credentials against live API (only in live mode)
+    if !config.execution.dry_run {
+        tracing::info!("Validating credentials against live API...");
+        match rtt_core::clob_auth::validate_credentials(&l2_creds).await {
+            Ok(()) => tracing::info!("Credentials validated successfully"),
+            Err(e) => {
+                tracing::error!("Credential validation failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Parse address family
     let af = match config.connection.address_family.as_str() {
         "ipv4" => rtt_core::connection::AddressFamily::V4,
@@ -79,51 +116,35 @@ async fn run(config: ExecutorConfig) {
         tracing::info!(warm_connections = warm, "Connection pool ready");
     }
 
-    // Pre-sign orders (only in live mode)
-    let payloads = if !config.execution.dry_run {
+    // Build signer params for dynamic pricing (sign at trigger's price)
+    let signer_params = if !config.execution.dry_run {
         let signer = signer.expect("signer required for live mode");
         let signer_addr = signer.address();
+        let maker_addr: alloy::primitives::Address = config
+            .credentials
+            .maker_address
+            .parse()
+            .expect("invalid maker_address in config");
 
-        // Build a trigger template for pre-signing
-        let presign_trigger = rtt_core::trigger::TriggerMessage {
-            trigger_id: 0,
-            token_id: config.strategy.token_id.clone(),
-            side: config.strategy.side,
-            price: format!(
-                "{:.2}",
-                config
-                    .strategy
-                    .params
-                    .threshold
-                    .unwrap_or(0.50)
-            ),
-            size: config.strategy.size.clone(),
-            order_type: config.strategy.order_type,
-            timestamp_ns: 0,
-        };
-
-        rtt_core::clob_signer::presign_batch(
-            &signer,
-            &presign_trigger,
+        Some(execution::SignerParams {
+            signer,
+            maker: maker_addr,
             signer_addr,
-            signer_addr,
-            config.execution.fee_rate_bps,
-            config.execution.is_neg_risk,
-            rtt_core::clob_order::SignatureType::Poly,
-            &config.credentials.api_key,
-            config.execution.presign_count,
-        )
-        .await
-        .expect("Failed to pre-sign orders")
+            fee_rate_bps: config.execution.fee_rate_bps,
+            is_neg_risk: config.execution.is_neg_risk,
+            sig_type: rtt_core::clob_order::SignatureType::Poly,
+            owner: config.credentials.api_key.clone(),
+        })
     } else {
-        vec![]
+        None
     };
 
-    let presigned_pool = rtt_core::clob_executor::PreSignedOrderPool::new(payloads)
+    // Empty pre-signed pool (kept for backwards compatibility / future use)
+    let presigned_pool = rtt_core::clob_executor::PreSignedOrderPool::new(vec![])
         .expect("Failed to create pre-signed order pool");
 
     tracing::info!(
-        presigned_count = presigned_pool.len(),
+        dynamic_signing = signer_params.is_some(),
         dry_run = config.execution.dry_run,
         "Execution setup complete"
     );
@@ -136,20 +157,35 @@ async fn run(config: ExecutorConfig) {
     // Create shutdown signal
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
 
-    // Build safety rails
-    let circuit_breaker = safety::CircuitBreaker::new(
+    // Load persisted state
+    let state_path = std::path::Path::new(&config.execution.state_file);
+    let prev_state = state::ExecutorState::load(state_path);
+    if prev_state.orders_fired > 0 || prev_state.tripped {
+        tracing::warn!(
+            prev_orders = prev_state.orders_fired,
+            prev_usd_cents = prev_state.usd_committed_cents,
+            prev_tripped = prev_state.tripped,
+            last_shutdown = %prev_state.last_shutdown,
+            "Restoring state from previous run"
+        );
+    }
+
+    // Build safety rails (with restored counters)
+    let circuit_breaker = safety::CircuitBreaker::with_initial_counts(
         config.safety.max_orders,
         config.safety.max_usd_exposure,
+        prev_state.orders_fired,
+        prev_state.usd_committed_cents,
     );
     let rate_limiter = safety::RateLimiter::new(config.safety.max_triggers_per_second);
     let order_guard = safety::OrderGuard::new();
 
-    tracing::info!(
+    tracing::warn!(
         max_orders = config.safety.max_orders,
         max_usd = config.safety.max_usd_exposure,
         max_triggers_per_sec = config.safety.max_triggers_per_second,
         require_confirmation = config.safety.require_confirmation,
-        "Safety rails configured"
+        "Safety limits active — circuit breaker will halt after these limits"
     );
 
     // Spawn execution thread (dedicated OS thread, not tokio)
@@ -159,6 +195,7 @@ async fn run(config: ExecutorConfig) {
     let exec_dry_run = config.execution.dry_run;
     let exec_creds = l2_creds;
     let exec_cb = circuit_breaker.clone();
+    let exec_webhook = config.safety.alert_webhook_url.clone();
     let exec_handle = std::thread::spawn(move || {
         execution::run_execution_loop(
             trigger_crossbeam_rx,
@@ -166,10 +203,12 @@ async fn run(config: ExecutorConfig) {
             presigned_pool,
             exec_creds,
             exec_dry_run,
+            signer_params,
             exec_cb,
             &rate_limiter,
             order_guard,
             exec_shutdown_clone,
+            exec_webhook,
         );
     });
 
@@ -180,6 +219,9 @@ async fn run(config: ExecutorConfig) {
         config.websocket.snapshot_channel_capacity,
     );
     let snapshot_broadcast_rx = pipeline.subscribe_snapshots();
+    // Grab WS metric arcs before moving pipeline into the spawn
+    let ws_last_message_at = pipeline.ws_client_last_message_at();
+    let ws_reconnect_count = pipeline.ws_client_reconnect_count();
 
     let ws_handle = tokio::spawn(async move {
         pipeline.run().await;
@@ -211,14 +253,35 @@ async fn run(config: ExecutorConfig) {
         shutdown_rx_trigger,
     ));
 
-    // Start health monitoring
+    // Start health monitoring (log-based)
     let shutdown_rx_health = shutdown_tx.subscribe();
     let health_cb = circuit_breaker.clone();
+    let health_state_path = config.execution.state_file.clone();
     let health_handle = tokio::spawn(health::run_health_monitor(
         config.websocket.asset_ids.clone(),
         Some(health_cb),
         shutdown_rx_health,
+        Some(health_state_path),
     ));
+
+    // Start HTTP health endpoint
+    let _health_server_handle = if config.health.enabled {
+        let shutdown_rx_hs = shutdown_tx.subscribe();
+        let hs_cb = circuit_breaker.clone();
+        let hs_lma = ws_last_message_at.clone();
+        let hs_rc = ws_reconnect_count.clone();
+        let start_time = Instant::now();
+        Some(tokio::spawn(health_server::run_health_server(
+            config.health.port,
+            hs_cb,
+            hs_lma,
+            hs_rc,
+            start_time,
+            shutdown_rx_hs,
+        )))
+    } else {
+        None
+    };
 
     tracing::info!("All components started. Waiting for shutdown signal (Ctrl+C)...");
 
@@ -245,6 +308,25 @@ async fn run(config: ExecutorConfig) {
 
     // Wait for execution thread
     let _ = exec_handle.join();
+
+    // Save state on shutdown
+    let (final_orders, final_usd) = circuit_breaker.stats();
+    let final_usd_cents = (final_usd * 100.0) as u64;
+    let final_state = state::ExecutorState::from_stats(
+        final_orders,
+        final_usd_cents,
+        circuit_breaker.is_tripped(),
+    );
+    if let Err(e) = final_state.save(state_path) {
+        tracing::error!(error = %e, "Failed to save state on shutdown");
+    } else {
+        tracing::info!(
+            orders = final_orders,
+            usd = format!("{:.2}", final_usd),
+            path = %state_path.display(),
+            "State persisted"
+        );
+    }
 
     tracing::info!("pm-executor shut down cleanly");
 }

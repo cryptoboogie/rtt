@@ -14,7 +14,7 @@
 
 use pm_strategy::strategy::Strategy;
 use pm_strategy::threshold::ThresholdStrategy;
-use rtt_core::trigger::{OrderBookSnapshot, OrderType, PriceLevel, Side, TriggerMessage};
+use rtt_core::trigger::{OrderBookSnapshot, OrderType, PriceLevel, Side};
 
 /// Helper: build a snapshot with given bid/ask prices for a specific asset.
 fn make_snapshot(asset_id: &str, bid_price: &str, ask_price: &str) -> OrderBookSnapshot {

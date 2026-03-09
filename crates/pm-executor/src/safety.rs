@@ -34,10 +34,21 @@ pub struct CircuitBreaker {
 }
 
 impl CircuitBreaker {
+    #[cfg(test)]
     pub fn new(max_orders: u64, max_usd: f64) -> Self {
+        Self::with_initial_counts(max_orders, max_usd, 0, 0)
+    }
+
+    /// Create with initial counts restored from persisted state.
+    pub fn with_initial_counts(
+        max_orders: u64,
+        max_usd: f64,
+        initial_orders: u64,
+        initial_usd_cents: u64,
+    ) -> Self {
         Self {
-            orders_fired: Arc::new(AtomicU64::new(0)),
-            usd_committed_cents: Arc::new(AtomicU64::new(0)),
+            orders_fired: Arc::new(AtomicU64::new(initial_orders)),
+            usd_committed_cents: Arc::new(AtomicU64::new(initial_usd_cents)),
             max_orders,
             max_usd_cents: (max_usd * 100.0) as u64,
             tripped: Arc::new(AtomicBool::new(false)),
@@ -281,6 +292,23 @@ mod tests {
 
         let (orders, _) = cb.stats();
         assert_eq!(orders, 1000);
+    }
+
+    #[test]
+    fn circuit_breaker_with_initial_counts_starts_at_correct_values() {
+        let cb = CircuitBreaker::with_initial_counts(10, 100.0, 3, 1500);
+        let (orders, usd) = cb.stats();
+        assert_eq!(orders, 3);
+        assert!((usd - 15.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn circuit_breaker_with_initial_counts_respects_limits() {
+        // Start with 4 of 5 orders used
+        let cb = CircuitBreaker::with_initial_counts(5, 1000.0, 4, 0);
+        assert!(cb.check_and_record("0.01", "1").is_ok()); // 5th order OK
+        assert!(cb.check_and_record("0.01", "1").is_err()); // 6th trips
+        assert!(cb.is_tripped());
     }
 
     // --- RateLimiter tests ---

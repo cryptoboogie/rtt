@@ -40,10 +40,14 @@ fee_rate_bps = 0
 dry_run = true   # SAFETY: set to false only when ready for real orders
 
 [safety]
-max_orders = 10          # Circuit breaker: max orders before stopping
-max_usd_exposure = 50.0  # Circuit breaker: max total USD committed
+max_orders = 5           # Circuit breaker: max orders before stopping
+max_usd_exposure = 10.0  # Circuit breaker: max total USD committed
 max_triggers_per_second = 2  # Rate limit
 require_confirmation = true  # Wait for order response before next
+
+[health]
+enabled = true
+port = 9090
 
 [logging]
 level = "info"

@@ -94,6 +94,8 @@ enum OrderType { GTC, GTD, FOK, FAK }
 ```
 All types derive `Serialize`/`Deserialize`. Prices and sizes are strings (decimal precision preserved).
 
+**Note:** Polymarket’s order/CLOB path is colocated in **eu-west-1** (Dublin). AWS eu-west-1 is Ireland/Dublin; eu-west-2 is London — so eu-west-1 is the Dublin region.
+
 #### `metrics.rs` — Latency instrumentation
 ```rust
 struct TimestampRecord {
@@ -105,6 +107,8 @@ struct TimestampRecord {
     t_write_end,        // H2 frame dispatched to kernel (microseconds)
     t_first_resp_byte,  // First response byte from server (milliseconds)
     t_headers_done,     // Response fully collected
+    t_sign_start,       // EIP-712 signing started (dynamic pricing)
+    t_sign_end,         // EIP-712 signing completed
     is_reconnect: bool,
     cf_ray_pop: String, // Cloudflare POP code (e.g. "EWR", "DUB")
     connection_index: usize,
@@ -118,6 +122,7 @@ Derived metrics (all in nanoseconds):
 - `write_duration()` = write_end - write_begin (frame submission, NOT RTT)
 - `warm_ttfb()` = first_resp_byte - write_begin (network physics)
 - `trigger_to_first_byte()` = first_resp_byte - trigger_rx (total latency)
+- `sign_duration()` = sign_end - sign_start (EIP-712 signing overhead)
 
 `StatsAggregator` computes p50/p95/p99/p99.9/max over warm samples only (reconnects filtered).
 
@@ -154,13 +159,15 @@ Derived metrics (all in nanoseconds):
 - Headers: POLY_ADDRESS (lowercase), POLY_API_KEY, POLY_PASSPHRASE, POLY_SIGNATURE, POLY_TIMESTAMP
 - `L2Credentials { api_key, secret, passphrase, address }`
 - Address in headers = EOA signer (not proxy wallet)
+- `validate_credentials(creds)` — async, hits GET /auth/api-keys (read-only, no orders placed)
+- `build_validation_request(creds)` — builds HMAC headers for validation
 
 #### `clob_request.rs` — Request building
 - `build_order_request(payload, creds)` — Full POST /order with fresh HMAC
 - `build_order_template(payload)` — Pre-serialize body, register salt patch slot
 - `build_request_from_template(template, creds)` — Hot-path: recompute HMAC only
 
-#### `clob_executor.rs` — Pre-signed order pool + hot path
+#### `clob_executor.rs` — Order dispatch (pre-signed and dynamic)
 ```rust
 struct PreSignedOrderPool {
     bodies: Vec<Vec<u8>>,  // Pre-serialized JSON payloads
@@ -168,11 +175,14 @@ struct PreSignedOrderPool {
 }
 ```
 - `dispatch(creds)` — Consume next body, recompute HMAC headers only (body frozen)
-- `process_one_clob(pool, presigned, creds, msg, rt)` — Hot-path function:
-  1. `presigned.dispatch()` → pre-signed order with fresh HMAC
-  2. `pool.send_start()` → submit H2 frame (microseconds)
-  3. `handle.collect()` → await response (milliseconds)
-  4. Returns `(TimestampRecord, Option<Vec<u8>>)` with response body
+- `process_one_clob(pool, presigned, creds, msg, rt)` — Pre-signed hot-path function (legacy)
+- `sign_and_dispatch(pool, signer, trigger, creds, maker, signer_addr, ...)` — **Dynamic pricing hot-path** (default):
+  1. `build_order(trigger, ...)` → builds Order at **trigger's price** (not config price)
+  2. `sign_order(signer, order, ...)` → EIP-712 sign (~100-500us)
+  3. Build `SignedOrderPayload` → serialize to JSON → compute HMAC headers
+  4. `pool.send_start(req)` → submit H2 frame (microseconds)
+  5. `handle.collect()` → await response (milliseconds)
+  6. Returns `(TimestampRecord, Option<Vec<u8>>)` with sign_duration populated
 
 #### `executor.rs` — Threading primitives
 - `IngressThread` — Stamps `timestamp_ns` on triggers, sends to crossbeam queue
@@ -196,8 +206,10 @@ Real-time market data from Polymarket WebSocket.
 #### `ws.rs` — WebSocket client
 - Connects to `wss://ws-subscriptions-clob.polymarket.com/ws/market`
 - Subscribes to asset channels with `{"type": "subscribe", "assets_ids": [...]}`
-- 10-second ping interval, auto-reconnect on disconnect (2-second delay)
-- Broadcasts `WsMessage` enum to subscribers
+- 10-second ping interval, auto-reconnect with exponential backoff (1s base, 2x factor, 60s cap, 500ms jitter)
+- Broadcasts `WsMessage` enum to subscribers (including `WsMessage::Reconnected` on reconnect)
+- `reconnect_count: Arc<AtomicU64>` — incremented on each reconnect
+- `last_message_at: Arc<AtomicU64>` — epoch millis of last received message
 
 #### `types.rs` — WebSocket message types
 ```rust
@@ -207,6 +219,7 @@ enum WsMessage {
     LastTradePrice(...),        // Informational, not used
     TickSizeChange(...),        // Informational, not used
     BestBidAsk(...),            // Informational, not used
+    Reconnected,                // Emitted after WS reconnect (clears order book)
 }
 ```
 Tagged by `event_type` field in JSON.
@@ -216,6 +229,7 @@ Tagged by `event_type` field in JSON.
 - `BookState` uses `BTreeMap<String, String>` for price ladders (sorted by price string)
 - `apply_book_update()` — Full snapshot replacement
 - `apply_price_change()` — Incremental delta (upsert/remove on "0" size)
+- `clear_all()` — Empties all order books (called on WS reconnect)
 - Best bid = last BTreeMap entry (highest), best ask = first (lowest)
 
 #### `pipeline.rs` — Orchestrator
@@ -266,13 +280,15 @@ Main binary. Wires all components together.
 
 #### `main.rs` — Entry point
 1. Loads `config.toml` (or `--config <path>`)
-2. Builds credentials (validates only in live mode)
-3. Constructs strategy from config
-4. Live mode: warms HTTP/2 pool, pre-signs orders
-5. Creates channel pipeline: broadcast → mpsc → mpsc → crossbeam
-6. Spawns execution loop on dedicated OS thread
-7. Starts WebSocket pipeline, bridges, strategy runner, health monitor
-8. Waits for Ctrl+C, graceful shutdown with 5-second timeout
+2. `--validate-creds` flag: validates credentials against live API and exits
+3. Builds credentials (validates only in live mode)
+4. Live mode: validates credentials against API, warms HTTP/2 pool, builds `SignerParams` for dynamic pricing
+5. Loads persisted state from `state.json` (restores circuit breaker counters)
+6. Creates channel pipeline: broadcast → mpsc → mpsc → crossbeam
+7. Spawns execution loop on dedicated OS thread (with signer for dynamic pricing)
+8. Starts WebSocket pipeline, bridges, strategy runner, health monitor, HTTP health server
+9. Waits for Ctrl+C, graceful shutdown with 5-second timeout
+10. Persists state (orders fired, USD committed, tripped status) on shutdown
 
 #### `config.rs` — Configuration
 ```rust
@@ -281,12 +297,13 @@ struct ExecutorConfig {
     connection: ConnectionConfig,   // pool_size=2, address_family="auto"
     websocket: WebSocketConfig,     // asset_ids, channel capacities
     strategy: StrategyConfig,       // reuses pm-strategy config
-    execution: ExecutionConfig,     // presign_count=100, dry_run=true
-    safety: SafetyConfig,           // circuit breaker, rate limiter
+    execution: ExecutionConfig,     // presign_count=100, dry_run=true, state_file="state.json"
+    safety: SafetyConfig,           // max_orders=5, max_usd_exposure=10.0, alert_webhook_url
+    health: HealthConfig,           // enabled=true, port=9090
     logging: LoggingConfig,         // level="info"
 }
 ```
-All credential fields support `POLY_*` env var overrides.
+All credential fields support `POLY_*` env var overrides. `alert_webhook_url` supports `POLY_ALERT_WEBHOOK_URL`.
 
 #### `bridge.rs` — Channel adapters
 - `broadcast_to_mpsc()` — Forwards OrderBookSnapshot, handles `Lagged` by logging warning
@@ -294,18 +311,41 @@ All credential fields support `POLY_*` env var overrides.
 
 #### `execution.rs` — Execution loop
 - `build_credentials()` — Dry-run allows empty creds; live validates all fields
+- `SignerParams` — Holds signer, maker, fee_rate_bps, etc. for dynamic pricing
 - `run_execution_loop()` — Spin loop on `crossbeam::try_recv()` with `yield_now()`
   - Creates dedicated tokio runtime inside OS thread
   - 4-layer safety: CircuitBreaker → RateLimiter → OrderGuard → CircuitBreaker amount check
-  - Auto-refills pre-signed pool when <20% remaining (cursor reset)
+  - With `signer_params`: uses `sign_and_dispatch()` (signs at trigger's price)
+  - Without `signer_params`: falls back to `process_one_clob()` (pre-signed orders)
+  - Sends webhook alert on circuit breaker trip
 
 #### `safety.rs` — Lock-free safety rails
-- **CircuitBreaker**: Atomic counters for orders fired and USD committed (cents). Once tripped, stays tripped (restart required). Limits: `max_orders`, `max_usd_exposure`.
-- **RateLimiter**: 1-second sliding window. Drops excess triggers (not queued). Limit: `max_triggers_per_second`.
+- **CircuitBreaker**: Atomic counters for orders fired and USD committed (cents). Once tripped, stays tripped (restart required). Limits: `max_orders=5`, `max_usd_exposure=10.0` (conservative defaults).
+  - `with_initial_counts()` — Restores counters from persisted state on startup
+- **RateLimiter**: 1-second sliding window. Drops excess triggers (not queued). Limit: `max_triggers_per_second=2`.
 - **OrderGuard**: `AtomicBool` CAS. Ensures single in-flight order at a time (when `require_confirmation=true`).
+
+#### `alert.rs` — Webhook alerting
+- `send_alert(url, message)` — Fire-and-forget POST to Slack-compatible webhook
+- Sends `{"text": "..."}` JSON body with 5-second timeout
+- Called on circuit breaker trip (with order/USD stats in message)
+
+#### `state.rs` — State persistence
+- `ExecutorState { orders_fired, usd_committed_cents, last_shutdown, tripped }`
+- `load(path)` — Returns `Default` on missing/corrupt file (safe startup)
+- `save(path)` — Writes pretty JSON
+- `from_stats()` — Builds state from circuit breaker stats with ISO 8601 timestamp
+- Persisted every 30s by health monitor and on graceful shutdown
 
 #### `health.rs` — Periodic health reporting
 - 30-second interval, logs: asset count, orders fired, USD committed, circuit breaker status
+- Persists state to `state_file` every 30 seconds
+
+#### `health_server.rs` — HTTP health endpoint
+- Raw hyper HTTP/1 server on configurable port (default 9090)
+- `GET /health` — Returns 200 if healthy, 503 if circuit breaker tripped or WS stale (>60s)
+- `GET /status` — Returns JSON with orders_fired, usd_committed, tripped, uptime_secs, reconnects, ws_stale
+- Graceful shutdown via watch channel
 
 #### `logging.rs` — Structured logging
 - `tracing_subscriber` with env-filter
@@ -332,15 +372,25 @@ rtt-bench --trigger-test  # single trigger
 5. **Bridge** → `mpsc_to_crossbeam()` **stamps `timestamp_ns = clock::now_ns()`**, sends to crossbeam channel
 6. **Execution loop** (OS thread) → `try_recv()` gets `TriggerMessage`
 7. **Safety checks** → CircuitBreaker → RateLimiter → OrderGuard → CircuitBreaker amount
-8. **`process_one_clob()`**:
-   - `presigned.dispatch(creds)` → consumes next pre-serialized body, computes fresh HMAC headers → `Request<Bytes>`
+8. **`sign_and_dispatch()`** (dynamic pricing, default):
+   - `build_order(trigger, ...)` → Order at trigger's price
+   - `sign_order(signer, order, ...)` → EIP-712 sign (~100-500us, measured in `sign_duration`)
+   - Build `SignedOrderPayload` → serialize → compute HMAC → `Request<Bytes>`
    - `pool.send_start(req)` → submits H2 frame to kernel buffer → returns `SendHandle` (microseconds)
    - `handle.collect()` → awaits server response (milliseconds: network RTT + server processing)
-   - Records all 8 timestamps, extracts cf-ray POP
+   - Records all 10 timestamps (including sign_start/sign_end), extracts cf-ray POP
 9. **Response parsed** → `OrderResponse { success, order_id, status, error_msg, ... }`
-10. **OrderGuard released**, auto-refill if pool <20%
+10. **OrderGuard released**
 
-### Pre-signing flow (startup)
+### Dynamic signing flow (default, Spec 02)
+
+1. Trigger arrives with market price from strategy
+2. `build_order(trigger, maker, signer, ...)` → Order at trigger's exact price
+3. `sign_order(signer, order, is_neg_risk)` → EIP-712 sign on Polygon (chain_id=137)
+4. Build `SignedOrderPayload`, serialize to JSON, compute HMAC headers
+5. Dispatch via warm H2 connection pool
+
+### Pre-signing flow (legacy, not used in default path)
 
 1. Strategy threshold determines the order price
 2. `presign_batch()` creates N orders with unique random salts (53-bit masked)
@@ -350,10 +400,11 @@ rtt-bench --trigger-test  # single trigger
 
 ## Key Design Decisions
 
-### DECISION: Pre-sign orders at startup with fixed price
-- **ALTERNATIVES CONSIDERED**: Sign orders at trigger time; use a signing sidecar service; template with runtime salt patching
-- **REASON**: EIP-712 signing involves alloy's async signer and is too slow for the hot path. Pre-signing moves all crypto off the critical path. Salt patching was tried and abandoned because it invalidates the EIP-712 signature (salt is part of the signed struct hash — see S4-Bugfix in IMPLEMENTATION_LOG.md).
-- **TRADEOFFS**: Price is fixed at startup (strategy threshold). Cannot adapt to market movements. Re-signing at different prices planned but not implemented. Pool is finite (default 100 orders) — auto-refill resets cursor but reuses same salts (exchange rejects duplicate salts for filled orders).
+### DECISION: Dynamic pricing — sign orders at trigger time (Spec 02)
+- **PREVIOUS**: Pre-sign orders at startup with fixed price from config threshold
+- **CURRENT**: Sign each order at trigger arrival using the trigger's market price via `sign_and_dispatch()`
+- **REASON**: Pre-signing at a fixed price made orders fill at wrong prices or get rejected when the market moved. Dynamic pricing adds ~100-500us for EIP-712 signing to the hot path but ensures correct pricing.
+- **TRADEOFFS**: Signing on hot path adds latency (measured via `sign_duration()` metric). Pre-signed pool kept as fallback (`process_one_clob`) but not used in default path. `PreSignedOrderPool` retained for potential future use (price ladders, pre-computed levels).
 
 ### DECISION: Dedicated OS thread for execution, not tokio task
 - **ALTERNATIVES CONSIDERED**: tokio::spawn, tokio::spawn_blocking, async execution loop
@@ -484,7 +535,7 @@ Dry-run mode allows all credentials to be empty.
 ## Running
 
 ```bash
-# All tests (196 pass, 1 ignored)
+# All tests (251 pass, 2 ignored)
 cargo test --workspace
 
 # Unit tests only (no network)
@@ -526,7 +577,7 @@ cargo test -p rtt-core -- --ignored test_clob_end_to_end_pipeline
 
 6. **No TLS session resumption** — Each `warmup()` does a full TLS handshake. Session tickets/PSK not implemented.
 
-7. **Release build latency not characterized** — Debug build: ~80µs trigger-to-wire. Expected 5-10x improvement with `--release`. C++ baseline was ~8µs. Not yet measured.
+7. **Release build trigger-to-wire is ~56µs** — Down from ~136µs in debug (2.4x improvement). Dispatch (HMAC + request build) is 2.7µs in release vs 176µs in debug (65x). The remaining ~56µs trigger-to-wire is dominated by queue_delay (~34µs) from the async-to-sync crossbeam bridge, not CPU work. C++ baseline was ~8µs — the gap is the channel bridge overhead. Profile: `opt-level=3, lto="thin", codegen-units=1`.
 
 8. **No QUIC/HTTP3** — Cloudflare advertises h3 via alt-svc header. Stub exists but no implementation.
 
@@ -537,7 +588,7 @@ cargo test -p rtt-core -- --ignored test_clob_end_to_end_pipeline
 Based on IMPLEMENTATION_LOG.md and known limitations:
 
 - **Dynamic re-signing** — Sign orders at runtime prices, not just startup threshold. Requires moving signing to a background thread or using a pre-computed price ladder.
-- **Release build benchmarking** — Characterize `--release` latency. Target <20µs trigger-to-wire.
+- **Reduce trigger-to-wire below 56µs** — The ~34µs queue_delay from the crossbeam bridge dominates. A dedicated SPSC ring buffer (e.g. `rtrb`) or direct invocation could cut this further. C++ baseline was ~8µs.
 - **Pool auto-replenishment** — Actually re-sign new orders instead of cursor reset. Requires background signing thread.
 - **Multi-strategy support** — Run multiple strategies on different assets simultaneously.
 - **TLS session resumption** — Reduce reconnect latency with session tickets.

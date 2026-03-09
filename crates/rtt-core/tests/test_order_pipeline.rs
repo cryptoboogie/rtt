@@ -201,7 +201,7 @@ fn hmac_auth_headers_are_complete_and_correctly_signed() {
     };
 
     // Verify each header is present and has a reasonable value.
-    assert_eq!(find("POLY_ADDRESS"), creds.address);
+    assert_eq!(find("POLY_ADDRESS"), creds.address.to_lowercase());
     assert_eq!(find("POLY_API_KEY"), creds.api_key);
     assert_eq!(find("POLY_PASSPHRASE"), creds.passphrase);
     assert_eq!(find("POLY_TIMESTAMP"), timestamp);

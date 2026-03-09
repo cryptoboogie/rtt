@@ -755,3 +755,148 @@ Trigger received
 ---
 
 **Session 8 Totals: 100 unit tests pass, 1 ignored. First real trade executed.**
+
+---
+
+## Session 9 — Release Build Characterization
+
+### Spec: `specs/03-release-build-test.md`
+
+## 9.1 — Add release profile to workspace Cargo.toml
+- **Files changed**: `Cargo.toml`
+- **Changes**: Added `[profile.release]` with `opt-level = 3`, `lto = "thin"`, `codegen-units = 1`
+- **Tests run**: N/A (build config only)
+- **Deviation**: None
+
+## 9.2 — Release test suite: all tests pass
+- **Command**: `cargo test --workspace --release`
+- **Result**: 251 passed, 0 failed, 2 ignored (`test_clob_end_to_end_pipeline`, `raw_ws_connect_and_subscribe`)
+- **Compilation time**: 1m 08s (first release build)
+- **No test adjustments needed** — all timing thresholds (1ms) are generous enough for both debug and release.
+- **`test_hot_path_latency`**: Passed without threshold change. The 1ms bound works for both modes.
+- **`hmac_auth_headers_are_complete_and_correctly_signed`**: Passed in release mode.
+
+## 9.3 — Verify fire.sh already uses --release
+- **Files changed**: None
+- **Observation**: `scripts/fire.sh` already uses `cargo test --release -p rtt-core` (line 48). No changes needed.
+
+## 9.4 — Release vs debug latency comparison
+
+Measured via `test_execution_pipeline.rs` tests with `--nocapture`:
+
+| Metric | Debug | Release | Speedup |
+|---|---|---|---|
+| **Dispatch speed** (HMAC + request build, per call) | 176 us | 2.7 us | **65x** |
+| **trigger_to_wire** (dequeue to H2 frame submit) | 136.3 us | 56.0 us | **2.4x** |
+| **write_duration** (H2 frame submission) | 19.9 us | 1.8 us | **11x** |
+| **queue_delay** (crossbeam recv to exec start) | 75.0 us | 34.1 us | **2.2x** |
+| **warm_ttfb** (network physics, not our code) | 23.6 ms | 43.0 ms | ~1x (variance) |
+
+Key findings:
+- **Dispatch is 65x faster in release** (176us -> 2.7us). HMAC-SHA256 + request building dominates in debug.
+- **trigger_to_wire drops to ~56us** from ~136us in debug. This is the end-to-end metric for what our code controls.
+- **write_duration (H2 frame submission) drops to 1.8us** — near the theoretical minimum for kernel buffer submission.
+- **warm_ttfb is network-dependent** and varies between runs (not affected by build mode).
+- The C++ prototype achieved ~8us trigger-to-wire. The Rust release build at ~56us is ~7x slower, but most of that is queue_delay (34us) from the async-to-sync bridge, not CPU work.
+
+## 9.5 — Benchmark (rtt-bench) not run
+- **Reason**: `cargo run --release -p rtt-bench` requires live network connections to Polymarket servers. Not attempted in this session.
+
+---
+
+**Session 9 Totals: 251 tests pass (release), 2 ignored. Release profile configured. Latency characterized: 2.7us dispatch, 56us trigger-to-wire.**
+
+---
+
+## Session 10 — Production Hardening (Specs 01-08)
+
+Implemented all 8 engineering specs from `specs/` in a single session.
+
+### 10.1 — Spec 01: WS Reconnect + Resubscribe
+- **Spec**: `specs/01-ws-reconnect-resubscribe.md`
+- **Files changed**: `crates/pm-data/src/ws.rs`, `crates/pm-data/src/types.rs`, `crates/pm-data/src/orderbook.rs`, `crates/pm-data/src/pipeline.rs`
+- **Changes**:
+  - Added `BackoffState` with exponential backoff (1s base, 2x factor, 60s cap, 500ms jitter)
+  - Added `reconnect_count: Arc<AtomicU64>` and `last_message_at: Arc<AtomicU64>` to WsClient
+  - Added `WsMessage::Reconnected` variant (skipped by serde)
+  - Added `clear_all()` and `asset_count()` to OrderBookManager
+  - Pipeline clears order books on reconnect
+- **Tests**: 6 new tests (backoff delays, cap, reset, jitter, reconnect counter, last_message_at), `clear_all_empties_order_book`, `process_reconnected_clears_order_book`
+- **Deviation**: Used SystemTime seed for jitter instead of adding rand dependency to pm-data
+
+### 10.2 — Spec 02: Dynamic Pricing
+- **Spec**: `specs/02-dynamic-pricing.md`
+- **Files changed**: `crates/rtt-core/src/metrics.rs`, `crates/rtt-core/src/clob_executor.rs`, `crates/pm-executor/src/execution.rs`, `crates/pm-executor/src/main.rs`
+- **Changes**:
+  - Added `t_sign_start`, `t_sign_end` fields and `sign_duration()` method to TimestampRecord
+  - Added `sign_and_dispatch()` function: builds order at trigger's price, signs with EIP-712, dispatches
+  - Added `SignerParams` struct to execution.rs; loop uses `sign_and_dispatch` when signer available
+  - Main.rs builds SignerParams in live mode; pre-signing removed from default path (pool kept empty)
+  - Logs `sign_duration_us` in order dispatch trace
+- **Tests**: `sign_duration`, `sign_duration_defaults_to_zero`, `test_sign_and_dispatch_uses_trigger_price`, `test_sign_and_dispatch_sign_duration_populated`
+- **Deviation**: PreSignedOrderPool kept as empty fallback rather than removed entirely (per spec scope boundaries)
+
+### 10.3 — Spec 03: Release Build Test
+- **Spec**: `specs/03-release-build-test.md`
+- **Files changed**: `Cargo.toml` (workspace root)
+- **Changes**: `[profile.release]` with opt-level=3, lto="thin", codegen-units=1 (added in session 9)
+- **Results**: `cargo test --workspace --release --lib` — all pass. `fire.sh` already uses `--release`.
+- **Deviation**: Benchmark (`rtt-bench`) not run — requires live network. Latency already characterized in session 9.
+
+### 10.4 — Spec 04: Credential Validation E2E
+- **Spec**: `specs/04-credential-validation-e2e.md`
+- **Files changed**: `crates/rtt-core/src/clob_auth.rs`, `crates/rtt-core/Cargo.toml`, `crates/pm-executor/src/main.rs`
+- **Changes**:
+  - Added `validate_credentials()` async function (GET /auth/api-keys, read-only)
+  - Added `build_validation_request()` for testing
+  - Added `--validate-creds` CLI flag to pm-executor
+  - Live mode now validates credentials at startup before warming pool
+  - Added reqwest (native-tls) to rtt-core deps
+- **Tests**: `test_build_validation_request_has_correct_headers`, `test_validate_credentials_live` (#[ignore])
+- **Deviation**: Used native-tls instead of rustls-tls for reqwest to avoid CryptoProvider conflict with existing rustls usage
+
+### 10.5 — Spec 05: Circuit Breaker Tuning
+- **Spec**: `specs/05-circuit-breaker-tuning.md`
+- **Files changed**: `crates/pm-executor/src/config.rs`, `config.toml`
+- **Changes**:
+  - Defaults: max_orders=5, max_usd_exposure=10.0, max_triggers_per_second=2
+  - Updated config.toml to match
+- **Tests**: Updated existing assertion tests for new defaults
+
+### 10.6 — Spec 06: Circuit Breaker Alerting
+- **Spec**: `specs/06-circuit-breaker-alerting.md`
+- **Files changed**: `crates/pm-executor/src/alert.rs` (new), `crates/pm-executor/src/execution.rs`, `crates/pm-executor/src/config.rs`, `crates/pm-executor/Cargo.toml`
+- **Changes**:
+  - New `alert.rs` module: fire-and-forget webhook POST (Slack-compatible `{"text":"..."}`)
+  - `alert_webhook_url: Option<String>` in SafetyConfig with POLY_ALERT_WEBHOOK_URL env override
+  - Execution loop sends alert on circuit breaker trip (both initial check and amount check)
+- **Tests**: All existing execution tests updated with `alert_webhook_url: None` parameter
+
+### 10.7 — Spec 07: State Persistence
+- **Spec**: `specs/07-state-persistence.md`
+- **Files changed**: `crates/pm-executor/src/state.rs` (new), `crates/pm-executor/src/safety.rs`, `crates/pm-executor/src/health.rs`, `crates/pm-executor/src/main.rs`, `crates/pm-executor/src/config.rs`
+- **Changes**:
+  - New `state.rs` module: `ExecutorState` with load/save/from_stats
+  - `CircuitBreaker::with_initial_counts()` for restoring counters on startup
+  - Health monitor persists state every 30s
+  - Main.rs loads state on startup, saves on shutdown
+  - `state_file` config field (default "state.json")
+- **Tests**: `save_and_load_roundtrip`, `load_corrupt_file_returns_default`, `circuit_breaker_with_initial_counts_*`
+
+### 10.8 — Spec 08: Health Endpoint
+- **Spec**: `specs/08-health-endpoint.md`
+- **Files changed**: `crates/pm-executor/src/health_server.rs` (new), `crates/pm-executor/src/main.rs`, `crates/pm-executor/src/config.rs`, `crates/pm-executor/Cargo.toml`
+- **Changes**:
+  - Raw hyper HTTP/1 server: GET /health (200/503), GET /status (JSON)
+  - Stale WS detection (>60s since last message)
+  - `HealthConfig { enabled, port }` with defaults true/9090
+  - Wired into main.rs with circuit breaker and WS metric arcs
+- **Tests**: `health_ok`, `health_503_tripped`, `health_503_stale`, `status_json`, `shutdown`
+
+### 10.9 — Architecture & Documentation Updates
+- **Files changed**: `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**: Updated all component descriptions, data flow diagrams, and design decisions to reflect specs 01-08
+
+---
+
+**Session 10 Totals: 184 lib tests pass (24 pm-data + 105 rtt-core + 46 pm-executor + 9 pm-strategy), 55 pm-executor total (46 unit + 5 full pipeline + 4 integration), 2 ignored. All 8 specs implemented.**

@@ -18,6 +18,10 @@ pub enum WsMessage {
     TickSizeChange(TickSizeChangeEvent),
     #[serde(rename = "best_bid_ask")]
     BestBidAsk(BestBidAskEvent),
+    /// Emitted internally when the WS connection reconnects.
+    /// Not deserialized from JSON — only produced by WsClient.
+    #[serde(skip)]
+    Reconnected,
 }
 
 #[derive(Debug, Clone, Deserialize)]

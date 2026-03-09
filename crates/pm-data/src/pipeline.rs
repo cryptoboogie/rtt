@@ -34,6 +34,16 @@ impl Pipeline {
         self.order_books.clone()
     }
 
+    /// Arc to the WsClient's last_message_at counter.
+    pub fn ws_client_last_message_at(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+        self.ws_client.last_message_at_arc()
+    }
+
+    /// Arc to the WsClient's reconnect counter.
+    pub fn ws_client_reconnect_count(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+        self.ws_client.reconnect_count_arc()
+    }
+
     /// Run the pipeline. This spawns the WS client and processes messages.
     pub async fn run(&mut self) {
         let mut ws_rx = self.ws_client.subscribe();
@@ -91,6 +101,10 @@ fn process_message(
                     let _ = snapshot_tx.send(snap);
                 }
             }
+        }
+        WsMessage::Reconnected => {
+            info!("WS reconnected — clearing order book state");
+            order_books.clear_all();
         }
         WsMessage::BestBidAsk(_) | WsMessage::LastTradePrice(_) | WsMessage::TickSizeChange(_) => {
             // These don't modify the order book, just informational
@@ -198,6 +212,38 @@ mod tests {
         assert!(snapshot_rx.try_recv().is_err());
         // No book should exist
         assert!(order_books.get_snapshot("asset1").is_none());
+    }
+
+    #[test]
+    fn process_reconnected_clears_order_book() {
+        let order_books = OrderBookManager::new();
+        let (snapshot_tx, mut snapshot_rx) = broadcast::channel(10);
+
+        // First populate the book
+        let msg = WsMessage::Book(BookUpdate {
+            asset_id: "asset1".to_string(),
+            market: "0xmarket".to_string(),
+            timestamp: "1700000000000".to_string(),
+            bids: vec![WsOrderBookLevel {
+                price: "0.55".to_string(),
+                size: "100".to_string(),
+            }],
+            asks: vec![WsOrderBookLevel {
+                price: "0.56".to_string(),
+                size: "150".to_string(),
+            }],
+            hash: Some("hash1".to_string()),
+        });
+        process_message(&msg, &order_books, &snapshot_tx);
+        let _ = snapshot_rx.try_recv(); // consume
+
+        assert!(order_books.get_snapshot("asset1").is_some());
+
+        // Send Reconnected — should clear all books
+        process_message(&WsMessage::Reconnected, &order_books, &snapshot_tx);
+
+        assert!(order_books.get_snapshot("asset1").is_none());
+        assert_eq!(order_books.asset_count(), 0);
     }
 
     #[test]

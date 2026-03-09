@@ -13,6 +13,32 @@ pub struct ExecutorConfig {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub safety: SafetyConfig,
+    #[serde(default)]
+    pub health: HealthConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthConfig {
+    #[serde(default = "default_health_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_health_port")]
+    pub port: u16,
+}
+
+impl Default for HealthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_health_enabled(),
+            port: default_health_port(),
+        }
+    }
+}
+
+fn default_health_enabled() -> bool {
+    true
+}
+fn default_health_port() -> u16 {
+    9090
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +84,8 @@ pub struct ExecutionConfig {
     pub fee_rate_bps: u64,
     #[serde(default = "default_dry_run")]
     pub dry_run: bool,
+    #[serde(default = "default_state_file")]
+    pub state_file: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +104,8 @@ pub struct SafetyConfig {
     pub max_triggers_per_second: u64,
     #[serde(default = "default_require_confirmation")]
     pub require_confirmation: bool,
+    #[serde(default)]
+    pub alert_webhook_url: Option<String>,
 }
 
 impl Default for SafetyConfig {
@@ -85,18 +115,19 @@ impl Default for SafetyConfig {
             max_usd_exposure: default_max_usd_exposure(),
             max_triggers_per_second: default_max_triggers_per_second(),
             require_confirmation: default_require_confirmation(),
+            alert_webhook_url: None,
         }
     }
 }
 
 fn default_max_orders() -> u64 {
-    10
+    5
 }
 fn default_max_usd_exposure() -> f64 {
-    50.0
+    10.0
 }
 fn default_max_triggers_per_second() -> u64 {
-    1
+    2
 }
 fn default_require_confirmation() -> bool {
     true
@@ -119,6 +150,9 @@ fn default_presign_count() -> usize {
 }
 fn default_dry_run() -> bool {
     true
+}
+fn default_state_file() -> String {
+    "state.json".to_string()
 }
 fn default_log_level() -> String {
     "info".to_string()
@@ -150,6 +184,9 @@ impl ExecutorConfig {
         }
         if let Ok(v) = std::env::var("POLY_SIGNER_ADDRESS") {
             self.credentials.signer_address = v;
+        }
+        if let Ok(v) = std::env::var("POLY_ALERT_WEBHOOK_URL") {
+            self.safety.alert_webhook_url = Some(v);
         }
     }
 }
@@ -339,9 +376,9 @@ threshold = 0.45
 [logging]
 "#;
         let config: ExecutorConfig = toml::from_str(minimal_toml).unwrap();
-        assert_eq!(config.safety.max_orders, 10);
-        assert!((config.safety.max_usd_exposure - 50.0).abs() < 0.01);
-        assert_eq!(config.safety.max_triggers_per_second, 1);
+        assert_eq!(config.safety.max_orders, 5);
+        assert!((config.safety.max_usd_exposure - 10.0).abs() < 0.01);
+        assert_eq!(config.safety.max_triggers_per_second, 2);
         assert!(config.safety.require_confirmation);
     }
 

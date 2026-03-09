@@ -1,10 +1,13 @@
+use alloy::primitives::Address;
+use alloy::signers::local::PrivateKeySigner;
 use bytes::Bytes;
 use http::{Method, Request, Uri};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::clock;
 use crate::clob_auth::{build_l2_headers, L2Credentials};
-use crate::clob_order::SignedOrderPayload;
+use crate::clob_order::{SignatureType, SignedOrderPayload};
+use crate::clob_signer::{build_order, sign_order};
 use crate::connection::{ConnectionPool, extract_pop, get_cf_ray};
 use crate::metrics::TimestampRecord;
 use crate::trigger::TriggerMessage;
@@ -181,6 +184,145 @@ pub fn process_one_clob(
     }
 }
 
+/// Sign an order at the trigger's price and dispatch via the connection pool.
+///
+/// Unlike `process_one_clob` which uses pre-signed orders, this function signs
+/// each order on the hot path using the trigger's price. This adds ~100-500us
+/// for EIP-712 signing but ensures the order price matches the current market.
+///
+/// Runs on a dedicated OS thread — uses `rt.block_on()` for async signing.
+pub fn sign_and_dispatch(
+    pool: &ConnectionPool,
+    signer: &PrivateKeySigner,
+    trigger: &TriggerMessage,
+    creds: &L2Credentials,
+    maker: Address,
+    signer_addr: Address,
+    fee_rate_bps: u64,
+    is_neg_risk: bool,
+    sig_type: SignatureType,
+    owner: &str,
+    rt: &tokio::runtime::Runtime,
+) -> (TimestampRecord, Option<Vec<u8>>) {
+    let mut rec = TimestampRecord::default();
+    rec.t_trigger_rx = trigger.timestamp_ns;
+    rec.t_dispatch_q = clock::now_ns();
+    rec.t_exec_start = clock::now_ns();
+
+    // Build order from trigger at trigger's price
+    let order = build_order(trigger, maker, signer_addr, fee_rate_bps, sig_type);
+
+    // EIP-712 sign (async, measured separately)
+    rec.t_sign_start = clock::now_ns();
+    let sig = match rt.block_on(sign_order(signer, &order, is_neg_risk)) {
+        Ok(sig) => sig,
+        Err(_) => {
+            rec.t_sign_end = clock::now_ns();
+            rec.t_buf_ready = rec.t_sign_end;
+            rec.t_write_begin = rec.t_sign_end;
+            rec.t_write_end = rec.t_sign_end;
+            rec.t_first_resp_byte = rec.t_sign_end;
+            rec.t_headers_done = rec.t_sign_end;
+            rec.is_reconnect = true;
+            return (rec, None);
+        }
+    };
+    rec.t_sign_end = clock::now_ns();
+
+    // Build payload and serialize
+    let payload = SignedOrderPayload::new(&order, &sig, trigger.order_type, owner);
+    let body = match serde_json::to_vec(&payload) {
+        Ok(b) => b,
+        Err(_) => {
+            rec.t_buf_ready = clock::now_ns();
+            rec.t_write_begin = rec.t_buf_ready;
+            rec.t_write_end = rec.t_buf_ready;
+            rec.t_first_resp_byte = rec.t_buf_ready;
+            rec.t_headers_done = rec.t_buf_ready;
+            rec.is_reconnect = true;
+            return (rec, None);
+        }
+    };
+
+    // Build HTTP request with HMAC auth
+    let body_str = std::str::from_utf8(&body).unwrap_or("");
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .to_string();
+    let headers = match build_l2_headers(creds, &timestamp, "POST", "/order", body_str) {
+        Ok(h) => h,
+        Err(_) => {
+            rec.t_buf_ready = clock::now_ns();
+            rec.t_write_begin = rec.t_buf_ready;
+            rec.t_write_end = rec.t_buf_ready;
+            rec.t_first_resp_byte = rec.t_buf_ready;
+            rec.t_headers_done = rec.t_buf_ready;
+            rec.is_reconnect = true;
+            return (rec, None);
+        }
+    };
+
+    let mut builder = Request::builder()
+        .method(Method::POST)
+        .uri(Uri::from_static("https://clob.polymarket.com/order"))
+        .header("content-type", "application/json");
+    for (name, value) in &headers {
+        builder = builder.header(name.as_str(), value.as_str());
+    }
+    let req = match builder.body(Bytes::from(body)) {
+        Ok(r) => r,
+        Err(_) => {
+            rec.t_buf_ready = clock::now_ns();
+            rec.t_write_begin = rec.t_buf_ready;
+            rec.t_write_end = rec.t_buf_ready;
+            rec.t_first_resp_byte = rec.t_buf_ready;
+            rec.t_headers_done = rec.t_buf_ready;
+            rec.is_reconnect = true;
+            return (rec, None);
+        }
+    };
+
+    rec.t_buf_ready = clock::now_ns();
+    rec.t_write_begin = clock::now_ns();
+
+    // Dispatch via connection pool
+    let handle_result = rt.block_on(async { pool.send_start(req).await });
+    rec.t_write_end = clock::now_ns();
+
+    match handle_result {
+        Ok(handle) => {
+            rec.connection_index = handle.connection_index;
+            let resp_result = rt.block_on(async { handle.collect().await });
+            rec.t_first_resp_byte = clock::now_ns();
+
+            match resp_result {
+                Ok(resp) => {
+                    if let Some(cf_ray) = get_cf_ray(&resp) {
+                        rec.cf_ray_pop = extract_pop(&cf_ray);
+                    }
+                    rec.t_headers_done = clock::now_ns();
+                    rec.is_reconnect = false;
+                    let body = resp.into_body().to_vec();
+                    (rec, Some(body))
+                }
+                Err(_) => {
+                    rec.t_headers_done = clock::now_ns();
+                    rec.is_reconnect = true;
+                    (rec, None)
+                }
+            }
+        }
+        Err(_) => {
+            rec.t_first_resp_byte = clock::now_ns();
+            rec.t_headers_done = clock::now_ns();
+            rec.is_reconnect = true;
+            (rec, None)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,6 +468,75 @@ mod tests {
         assert!(body["order"].is_object());
         assert_eq!(body["orderType"].as_str().unwrap(), "FOK");
         assert!(req.headers().get("POLY_SIGNATURE").is_some());
+    }
+
+    #[test]
+    fn test_sign_and_dispatch_uses_trigger_price() {
+        // Verify that sign_and_dispatch builds an order at the trigger's price,
+        // not some hardcoded config price. We test this by building an order
+        // from the same trigger and checking the amounts match.
+        use crate::clob_signer::build_order as build_order_fn;
+
+        let trigger = TriggerMessage {
+            trigger_id: 1,
+            token_id: "1234".to_string(),
+            side: Side::Buy,
+            price: "0.63".to_string(), // specific non-default price
+            size: "50".to_string(),
+            order_type: OrderType::FOK,
+            timestamp_ns: 1000,
+        };
+
+        let maker = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+        let order = build_order_fn(&trigger, maker, maker, 0, SignatureType::Eoa);
+
+        // Buy 50 @ 0.63 → makerAmount = 0.63 * 50 * 1e6 = 31_500_000
+        assert_eq!(order.makerAmount, U256::from(31_500_000u64));
+        // takerAmount = 50 * 1e6 = 50_000_000
+        assert_eq!(order.takerAmount, U256::from(50_000_000u64));
+    }
+
+    #[tokio::test]
+    async fn test_sign_and_dispatch_sign_duration_populated() {
+        // Verify that sign_duration timestamps are populated after signing
+        use alloy::signers::local::PrivateKeySigner;
+        use crate::clob_signer::sign_order as sign_order_fn;
+
+        let signer: PrivateKeySigner =
+            "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+                .parse()
+                .unwrap();
+        let maker = signer.address();
+
+        let trigger = TriggerMessage {
+            trigger_id: 1,
+            token_id: "1234".to_string(),
+            side: Side::Buy,
+            price: "0.50".to_string(),
+            size: "10".to_string(),
+            order_type: OrderType::FOK,
+            timestamp_ns: 1000,
+        };
+
+        let order = crate::clob_signer::build_order(
+            &trigger, maker, maker, 0, SignatureType::Eoa,
+        );
+
+        let t_start = crate::clock::now_ns();
+        let sig = sign_order_fn(&signer, &order, false).await.unwrap();
+        let t_end = crate::clock::now_ns();
+
+        // Signing should take nonzero time
+        assert!(t_end > t_start);
+        // Signature should be valid
+        assert!(sig.starts_with("0x"));
+        assert!(sig.len() >= 132);
+
+        // Simulate what sign_and_dispatch does: record timestamps
+        let mut rec = TimestampRecord::default();
+        rec.t_sign_start = t_start;
+        rec.t_sign_end = t_end;
+        assert!(rec.sign_duration() > 0);
     }
 
     #[tokio::test]

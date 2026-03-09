@@ -1,10 +1,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use crossbeam_channel::Receiver;
 use rtt_core::clob_auth::L2Credentials;
-use rtt_core::clob_executor::{PreSignedOrderPool, process_one_clob};
+use rtt_core::clob_executor::{PreSignedOrderPool, process_one_clob, sign_and_dispatch};
+use rtt_core::clob_order::SignatureType;
 use rtt_core::clob_response::parse_order_response;
 use rtt_core::connection::ConnectionPool;
 use rtt_core::trigger::TriggerMessage;
@@ -57,21 +59,35 @@ pub fn build_credentials(
     Ok((l2, Some(signer)))
 }
 
+/// Parameters for dynamic signing on the hot path.
+pub struct SignerParams {
+    pub signer: PrivateKeySigner,
+    pub maker: Address,
+    pub signer_addr: Address,
+    pub fee_rate_bps: u64,
+    pub is_neg_risk: bool,
+    pub sig_type: SignatureType,
+    pub owner: String,
+}
+
 /// The execution loop — runs on a dedicated OS thread (not tokio).
 ///
 /// Reads triggers from the crossbeam channel and either:
 /// - Dry-run: logs what it would do (with safety checks still applied)
-/// - Live: dispatches a pre-signed order via `process_one_clob()`
+/// - Live with signer_params: signs each order at the trigger's price via `sign_and_dispatch()`
+/// - Live without signer_params: dispatches a pre-signed order via `process_one_clob()`
 pub fn run_execution_loop(
     rx: Receiver<TriggerMessage>,
     pool: Arc<ConnectionPool>,
     mut presigned: PreSignedOrderPool,
     creds: L2Credentials,
     dry_run: bool,
+    signer_params: Option<SignerParams>,
     circuit_breaker: CircuitBreaker,
     rate_limiter: &RateLimiter,
     order_guard: OrderGuard,
     shutdown: Arc<AtomicBool>,
+    alert_webhook_url: Option<String>,
 ) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -90,6 +106,11 @@ pub fn run_execution_loop(
                 // Safety check 1: Circuit breaker — if tripped, stop entirely
                 if circuit_breaker.is_tripped() {
                     tracing::error!("Circuit breaker tripped! Stopping execution loop.");
+                    if let Some(ref url) = alert_webhook_url {
+                        let (orders, usd) = circuit_breaker.stats();
+                        let msg = format!("Circuit breaker tripped: {} orders, ${:.2} committed", orders, usd);
+                        rt.block_on(crate::alert::send_alert(url, &msg));
+                    }
                     break;
                 }
 
@@ -111,13 +132,6 @@ pub fn run_execution_loop(
                     continue;
                 }
 
-                // Safety check 4: Circuit breaker amount check
-                if let Err(e) = circuit_breaker.check_and_record(&trigger.price, &trigger.size) {
-                    tracing::error!("Circuit breaker tripped: {}", e);
-                    order_guard.release();
-                    break;
-                }
-
                 if dry_run {
                     tracing::info!(
                         trigger_id = trigger.trigger_id,
@@ -131,13 +145,42 @@ pub fn run_execution_loop(
                     continue;
                 }
 
-                let (rec, resp_body) = process_one_clob(&pool, &mut presigned, &creds, &trigger, &rt);
+                // Safety check 4: Circuit breaker amount check (live orders only)
+                if let Err(e) = circuit_breaker.check_and_record(&trigger.price, &trigger.size) {
+                    tracing::error!("Circuit breaker tripped: {}", e);
+                    if let Some(ref url) = alert_webhook_url {
+                        let (orders, usd) = circuit_breaker.stats();
+                        let msg = format!("Circuit breaker tripped: {} orders, ${:.2} committed — {}", orders, usd, e);
+                        rt.block_on(crate::alert::send_alert(url, &msg));
+                    }
+                    order_guard.release();
+                    break;
+                }
+
+                let (rec, resp_body) = if let Some(ref sp) = signer_params {
+                    sign_and_dispatch(
+                        &pool,
+                        &sp.signer,
+                        &trigger,
+                        &creds,
+                        sp.maker,
+                        sp.signer_addr,
+                        sp.fee_rate_bps,
+                        sp.is_neg_risk,
+                        sp.sig_type,
+                        &sp.owner,
+                        &rt,
+                    )
+                } else {
+                    process_one_clob(&pool, &mut presigned, &creds, &trigger, &rt)
+                };
 
                 // Release order guard after response received
                 order_guard.release();
 
                 tracing::info!(
                     trigger_id = trigger.trigger_id,
+                    sign_duration_us = rec.sign_duration() as f64 / 1000.0,
                     trigger_to_wire_us = rec.trigger_to_wire() as f64 / 1000.0,
                     write_duration_us = rec.write_duration() as f64 / 1000.0,
                     warm_ttfb_ms = rec.warm_ttfb() as f64 / 1_000_000.0,
@@ -323,14 +366,15 @@ mod tests {
 
         let (pool, presigned, creds) = dummy_pool_and_creds();
 
-        run_execution_loop(rx, pool, presigned, creds, true, cb, &rl, og, shutdown);
+        run_execution_loop(rx, pool, presigned, creds, true, None, cb, &rl, og, shutdown, None);
     }
 
     #[test]
     fn circuit_breaker_stops_execution_loop() {
         let (tx, rx) = crossbeam_channel::bounded(16);
         let shutdown = Arc::new(AtomicBool::new(false));
-        // Allow only 2 orders
+        // Allow only 2 orders — uses live mode (dry_run=false) so check_and_record runs.
+        // Dispatch will fail (empty pool, no connections), but breaker still counts.
         let cb = CircuitBreaker::new(2, 1000.0);
         let rl = RateLimiter::new(100);
         let og = OrderGuard::new();
@@ -342,7 +386,7 @@ mod tests {
         drop(tx);
 
         let (pool, presigned, creds) = dummy_pool_and_creds();
-        run_execution_loop(rx, pool, presigned, creds, true, cb.clone(), &rl, og, shutdown);
+        run_execution_loop(rx, pool, presigned, creds, false, None, cb.clone(), &rl, og, shutdown, None);
 
         // Only 2 orders should have been recorded before tripping
         let (orders, _) = cb.stats();
@@ -355,7 +399,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::bounded(16);
         let shutdown = Arc::new(AtomicBool::new(false));
         let cb = CircuitBreaker::new(100, 1000.0);
-        // Allow only 1 per second
+        // Allow only 1 per second — uses live mode so check_and_record runs.
         let rl = RateLimiter::new(1);
         let og = OrderGuard::new();
 
@@ -366,7 +410,7 @@ mod tests {
         drop(tx);
 
         let (pool, presigned, creds) = dummy_pool_and_creds();
-        run_execution_loop(rx, pool, presigned, creds, true, cb.clone(), &rl, og, shutdown);
+        run_execution_loop(rx, pool, presigned, creds, false, None, cb.clone(), &rl, og, shutdown, None);
 
         // Only 1 should have passed the rate limiter
         let (orders, _) = cb.stats();
@@ -391,7 +435,7 @@ mod tests {
         drop(tx);
 
         let (pool, presigned, creds) = dummy_pool_and_creds();
-        run_execution_loop(rx, pool, presigned, creds, true, cb.clone(), &rl, og, shutdown);
+        run_execution_loop(rx, pool, presigned, creds, true, None, cb.clone(), &rl, og, shutdown, None);
 
         // No orders should have been processed (guard was held)
         let (orders, _) = cb.stats();

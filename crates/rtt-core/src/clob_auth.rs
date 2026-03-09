@@ -70,6 +70,54 @@ pub fn load_credentials_from_env() -> Result<(L2Credentials, String, String), Bo
     ))
 }
 
+/// Build a validation request for GET /auth/api-keys.
+/// Returns (method, path, headers) for testing/use.
+pub fn build_validation_request(
+    creds: &L2Credentials,
+) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+    let timestamp = format!(
+        "{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs()
+    );
+    build_l2_headers(creds, &timestamp, "GET", "/auth/api-keys", "")
+}
+
+/// Validate L2 credentials by hitting GET /auth/api-keys.
+/// Returns Ok(()) if the server accepts our HMAC auth.
+/// Returns Err with the HTTP status and body if rejected.
+pub async fn validate_credentials(creds: &L2Credentials) -> Result<(), String> {
+    let timestamp = format!(
+        "{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_secs()
+    );
+    let headers = build_l2_headers(creds, &timestamp, "GET", "/auth/api-keys", "")
+        .map_err(|e| format!("Failed to build auth headers: {}", e))?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+
+    let mut req = client.get("https://clob.polymarket.com/auth/api-keys");
+    for (name, value) in &headers {
+        req = req.header(name, value);
+    }
+
+    let resp = req.send().await.map_err(|e| format!("Request failed: {}", e))?;
+    let status = resp.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("Credential validation failed: HTTP {} — {}", status, body))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +171,28 @@ mod tests {
     }
 
     #[test]
+    fn test_build_validation_request_has_correct_headers() {
+        let creds = L2Credentials {
+            api_key: "val-key".to_string(),
+            secret: URL_SAFE.encode(b"val-secret"),
+            passphrase: "val-pass".to_string(),
+            address: "0xVALIDATOR".to_string(),
+        };
+        let headers = build_validation_request(&creds).unwrap();
+        let names: Vec<&str> = headers.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"POLY_ADDRESS"));
+        assert!(names.contains(&"POLY_API_KEY"));
+        assert!(names.contains(&"POLY_PASSPHRASE"));
+        assert!(names.contains(&"POLY_SIGNATURE"));
+        assert!(names.contains(&"POLY_TIMESTAMP"));
+        assert_eq!(headers.len(), 5);
+
+        let find = |name: &str| headers.iter().find(|(n, _)| n == name).unwrap().1.clone();
+        assert_eq!(find("POLY_ADDRESS"), "0xvalidator"); // lowercased
+        assert_eq!(find("POLY_API_KEY"), "val-key");
+    }
+
+    #[test]
     fn test_credentials_from_env() {
         // Set env vars for test
         std::env::set_var("POLY_API_KEY", "test-key");
@@ -147,5 +217,15 @@ mod tests {
         std::env::remove_var("POLY_ADDRESS");
         std::env::remove_var("POLY_PRIVATE_KEY");
         std::env::remove_var("POLY_PROXY_ADDRESS");
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires live POLY_* env vars — does not place orders
+    async fn test_validate_credentials_live() {
+        let (creds, _, _) = load_credentials_from_env()
+            .expect("Set POLY_API_KEY, POLY_SECRET, POLY_PASSPHRASE, POLY_ADDRESS, POLY_PRIVATE_KEY, POLY_PROXY_ADDRESS");
+        validate_credentials(&creds)
+            .await
+            .expect("Credential validation should succeed with valid env vars");
     }
 }
