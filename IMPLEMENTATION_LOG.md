@@ -1412,3 +1412,15 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test -p pm-data --lib`
 - **Commit**: N/A (working tree only)
 - **Deviation**: Intentionally left `pm-executor/src/main.rs` untouched even though the `11c` spec lists runtime wiring, because the compatibility wrapper now provides the new surfaces without crossing the integration-owner boundary early.
+
+### 12a.1 — Add the runtime hot-state model and notice-resolution store
+- **Spec**: `specs/12a-hot-state-and-update-notices.md`
+- **Files changed**: `crates/rtt-core/src/hot_state.rs`, `crates/rtt-core/src/lib.rs`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added `HotStateStore` with per-source book/reference state, fixed-point `HotStateValue` conversion, and market-metadata registration for tick and lot units
+  - Added notice-resolution helpers so a runtime can project current book/reference state or reconstruct a legacy `OrderBookSnapshot` from `UpdateNotice`
+  - Kept the work scoped to `rtt-core` so `12a` can build the runtime layer on top of `11c` without redesigning the feed plane
+- **Tests**:
+  - `cargo test -p rtt-core hot_state`
+- **Commit**: N/A (working tree only)
+- **Deviation**: This is the first `12a` sub-task only; the notice-driven strategy runtime and backtest migration remain to be implemented on top of this store.
