@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use rtt_core::{
+    feed_source::InstrumentKind,
     BestBidAskUpdate, InstrumentRef, NormalizedUpdate, NormalizedUpdatePayload, ReconnectUpdate,
     ReferencePriceUpdate, SourceId, SourceStatusUpdate, TickSizeChangeUpdate, TradeTickUpdate,
     UpdateNotice,
@@ -85,6 +86,21 @@ impl ReferenceStore {
         state.retain(|key, _| &key.source_id != source_id);
     }
 
+    pub fn clear_instrument(
+        &self,
+        source_id: &SourceId,
+        instrument_kind: InstrumentKind,
+        instrument_id: &str,
+    ) {
+        let instrument_kind = format!("{instrument_kind:?}");
+        let mut state = self.state.write().unwrap();
+        state.retain(|key, _| {
+            !(&key.source_id == source_id
+                && key.instrument_kind == instrument_kind
+                && key.instrument_id == instrument_id)
+        });
+    }
+
     pub fn len(&self) -> usize {
         let state = self.state.read().unwrap();
         state.len()
@@ -138,5 +154,78 @@ mod tests {
             "62000.00"
         );
         assert_eq!(state.last_notice.expect("notice").version, 11);
+    }
+
+    #[test]
+    fn clear_instrument_removes_only_matching_subject_for_source() {
+        let store = ReferenceStore::new();
+        let source_id = SourceId::new("reference-mid");
+        let other_source_id = SourceId::new("reference-alt");
+
+        let updates = [
+            (
+                source_id.clone(),
+                "BTC-USD",
+                "62000.00",
+                11_u64,
+            ),
+            (
+                source_id.clone(),
+                "ETH-USD",
+                "3200.00",
+                12_u64,
+            ),
+            (
+                other_source_id.clone(),
+                "BTC-USD",
+                "62100.00",
+                13_u64,
+            ),
+        ];
+
+        for (source_id, instrument_id, price, version) in updates {
+            let subject = InstrumentRef {
+                source_id: source_id.clone(),
+                kind: InstrumentKind::Symbol,
+                instrument_id: instrument_id.to_string(),
+            };
+            store.apply_update(&NormalizedUpdate {
+                notice: UpdateNotice {
+                    source_id: source_id.clone(),
+                    source_kind: SourceKind::ExternalReference,
+                    subject: subject.clone(),
+                    kind: UpdateKind::ReferencePrice,
+                    version,
+                    source_hash: None,
+                },
+                payload: NormalizedUpdatePayload::ReferencePrice(ReferencePriceUpdate {
+                    price: Price::new(price),
+                    notional: None,
+                    timestamp_ms: 1_700_000_000_000 + version,
+                }),
+            });
+        }
+
+        store.clear_instrument(&source_id, InstrumentKind::Symbol, "BTC-USD");
+
+        let btc_subject = InstrumentRef {
+            source_id: source_id.clone(),
+            kind: InstrumentKind::Symbol,
+            instrument_id: "BTC-USD".to_string(),
+        };
+        let eth_subject = InstrumentRef {
+            source_id: source_id.clone(),
+            kind: InstrumentKind::Symbol,
+            instrument_id: "ETH-USD".to_string(),
+        };
+        let other_btc_subject = InstrumentRef {
+            source_id: other_source_id,
+            kind: InstrumentKind::Symbol,
+            instrument_id: "BTC-USD".to_string(),
+        };
+
+        assert!(store.resolve_subject(&btc_subject).is_none());
+        assert!(store.resolve_subject(&eth_subject).is_some());
+        assert!(store.resolve_subject(&other_btc_subject).is_some());
     }
 }
