@@ -21,8 +21,8 @@ The system is a streaming pipeline with four stages, connected by typed channels
          │ JSON frames (book snapshots, price_change deltas)
          ▼
 ┌─────────────────┐
-│    pm-data       │  WsClient → OrderBookManager → Pipeline
-│   (async tokio)  │  Maintains local order book per asset_id
+│    pm-data       │  WsClient → FeedManager → {OrderBookManager, ReferenceStore} → Pipeline
+│   (async tokio)  │  Emits `NormalizedUpdate`/`UpdateNotice` and preserves the legacy snapshot path
 └────────┬────────┘
          │ broadcast<OrderBookSnapshot>
          ▼
@@ -255,7 +255,7 @@ enum WsMessage {
 ```
 Tagged by `event_type` field in JSON.
 - `polymarket_public_source_id()` identifies the shared public-feed source instance
-- `to_normalized_updates()` converts raw Polymarket wire messages into `rtt_core::NormalizedUpdate` values without changing the legacy order-book path yet
+- `to_normalized_updates()` converts raw Polymarket wire messages into `rtt_core::NormalizedUpdate` values; the feed-manager layer now scopes those updates to the owning source instance before applying stores and broadcasting notices
 
 #### `registry_provider.rs` — Discovery provider boundary
 - `RegistryProvider` is the async control-plane trait for paged market discovery
@@ -280,10 +280,21 @@ Tagged by `event_type` field in JSON.
 - `clear_all()` — Empties all order books (called on WS reconnect)
 - Best bid = last BTreeMap entry (highest), best ask = first (lowest)
 
-#### `pipeline.rs` — Orchestrator
-- Subscribes to WsClient, processes messages, updates OrderBookManager
-- Broadcasts `OrderBookSnapshot` to downstream subscribers
-- Only `Book` and `PriceChange` messages modify state; reconnect clears the store and the richer normalized update mapping lives alongside this legacy snapshot path until later feed-manager work
+#### `reference_store.rs` — Non-depth source state
+- `ReferenceStore` keeps the latest non-book state keyed by source-scoped subject
+- Tracks last seen reference-price, trade-tick, BBO, tick-size-change, reconnect, and source-status updates plus the last emitted `UpdateNotice`
+- Provides the small-notice resolution seam for feeds that are not backed by full depth and for informational Polymarket events that should survive past parsing
+
+#### `feed.rs` — Feed-manager and source-adapter boundary
+- `ScopedPolymarketAdapter` rewrites normalized updates onto the owning `SourceId`, so shared and dedicated source instances can reuse the frozen `11a` event model without mutating it
+- `PolymarketFeedManager` is the explicit owner for one live Polymarket source instance: it owns the `WsClient`, authoritative stores, notice/update fan-out, reconnect/reset behavior, and conservative asset-set reconfiguration
+- `FeedStores` keeps full state in-process while `FeedOutputs` broadcasts small `UpdateNotice`s plus richer `NormalizedUpdate`s for consumers that need them
+- The manager preserves the legacy `OrderBookSnapshot` broadcast only for `BookSnapshot` / `BookDelta` payloads so the old runtime path continues to work during the `11c` → `12a` transition
+
+#### `pipeline.rs` — Compatibility wrapper
+- `Pipeline` is now a thin wrapper over the shared Polymarket `FeedManager`
+- Still exposes `subscribe_snapshots()` / `order_books()` / WS health counters for the legacy trigger/runtime path
+- Also exposes `subscribe_updates()`, `subscribe_notices()`, `reference_store()`, and `reconfigure_assets()` for the new notice-driven path and later runtime work
 
 ### pm-strategy
 
@@ -415,8 +426,8 @@ rtt-bench --trigger-test  # single trigger
 ### Trigger-to-wire path (hot path)
 
 1. **WebSocket frame arrives** → `WsClient` parses JSON → broadcasts `WsMessage`
-2. **Pipeline processes** → `OrderBookManager.apply_book_update()` or `apply_price_change()` → broadcasts `OrderBookSnapshot`
-3. **Bridge** → `broadcast_to_mpsc()` forwards snapshot
+2. **FeedManager processes** → scopes `NormalizedUpdate`s to its source instance, applies `OrderBookManager` / `ReferenceStore`, emits `UpdateNotice`, and still broadcasts `OrderBookSnapshot` for book-changing events
+3. **Bridge** → `broadcast_to_mpsc()` forwards the legacy snapshot stream
 4. **StrategyRunner** → calls `strategy.on_book_update(snapshot)` → if condition met, returns `TriggerMessage { trigger_id, token_id, side, price, size, order_type, timestamp_ns: 0 }`
 5. **Bridge** → `mpsc_to_crossbeam()` **stamps `timestamp_ns = clock::now_ns()`**, sends to crossbeam channel
 6. **Execution loop** (OS thread) → `try_recv()` gets `TriggerMessage`

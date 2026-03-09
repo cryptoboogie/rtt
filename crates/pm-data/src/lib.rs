@@ -1,6 +1,8 @@
 pub mod market_registry;
+pub mod feed;
 pub mod orderbook;
 pub mod pipeline;
+pub mod reference_store;
 pub mod registry_provider;
 pub mod snapshot;
 pub mod types;
