@@ -1386,3 +1386,15 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test -p pm-data snapshot::tests`
 - **Commit**: `feat: add 11b registry selection model`
 - **Deviation**: The provider/refresh loop is still stubbed at this point; this sub-task only establishes the normalized snapshot and policy layer that downstream refresh logic will feed.
+
+### 11b.2 — Add paged registry refresh, retry/backoff, and Gamma normalization
+- **Spec**: `specs/11b-market-registry-and-universe-selection.md`
+- **Files changed**: `crates/pm-data/Cargo.toml`, `crates/pm-data/src/market_registry.rs`, `crates/pm-data/src/registry_provider.rs`, `crates/pm-data/src/snapshot.rs`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added the async registry provider contract, typed page requests/responses, and a Gamma provider that normalizes live event pages into shared `MarketMeta` while quarantining malformed market records
+  - Implemented `MarketRegistry` refresh orchestration with explicit page traversal, retryable transient failures, exponential backoff, and last-known-good fallback on refresh failure
+  - Extended registry snapshots with provider identity, sequence, refresh timestamps, and quarantined-record capture so degraded-mode refreshes can return the prior known-good state intact
+- **Tests**:
+  - `cargo test -p pm-data --lib`
+- **Commit**: `feat: add 11b paged registry refresh`
+- **Deviation**: The refresh cadence is represented in `RegistryRefreshPolicy` but is not yet wired into a long-running scheduler; that remains off the executor path for this branch.

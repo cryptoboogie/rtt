@@ -5,7 +5,17 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegistrySnapshot {
+    pub provider: String,
+    pub sequence: u64,
+    pub refreshed_at_ms: u64,
     pub markets: BTreeMap<MarketId, MarketMeta>,
+    pub quarantined: Vec<QuarantinedMarketRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuarantinedMarketRecord {
+    pub record_id: Option<String>,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -163,7 +173,13 @@ mod tests {
             market("market-3", MarketStatus::Closed, true),
             market("market-4", MarketStatus::Active, false),
         ]);
-        let snapshot = RegistrySnapshot { markets };
+        let snapshot = RegistrySnapshot {
+            provider: "fixture".to_string(),
+            sequence: 1,
+            refreshed_at_ms: 1_700_000_000_000,
+            markets,
+            quarantined: Vec::new(),
+        };
         let policy = UniverseSelectionPolicy {
             active_only: true,
             require_reward: true,
