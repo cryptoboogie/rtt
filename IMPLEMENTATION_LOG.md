@@ -1374,3 +1374,15 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test --workspace`
 - **Commit**: N/A (working tree only)
 - **Deviation**: The test now validates connection liveness and reconnect-free operation rather than per-asset market traffic frequency, which was the real source of the prior flake.
+
+### 11b.1 — Add normalized registry snapshot selection and bypass rules
+- **Spec**: `specs/11b-market-registry-and-universe-selection.md`
+- **Files changed**: `crates/pm-data/src/lib.rs`, `crates/pm-data/src/snapshot.rs`, `crates/pm-data/src/market_registry.rs`, `crates/pm-data/src/registry_provider.rs`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added the initial registry snapshot and universe-selection types in `pm-data`, including deterministic include/exclude decisions over normalized `MarketMeta`
+  - Implemented policy precedence for explicit exclude, explicit include, active-only filtering, and reward-required filtering
+  - Added an explicit registry-bypass result so direct source bindings can skip discovery-backed universe selection entirely
+- **Tests**:
+  - `cargo test -p pm-data snapshot::tests`
+- **Commit**: `feat: add 11b registry selection model`
+- **Deviation**: The provider/refresh loop is still stubbed at this point; this sub-task only establishes the normalized snapshot and policy layer that downstream refresh logic will feed.
