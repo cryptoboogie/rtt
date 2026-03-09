@@ -1374,3 +1374,41 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test --workspace`
 - **Commit**: N/A (working tree only)
 - **Deviation**: The test now validates connection liveness and reconnect-free operation rather than per-asset market traffic frequency, which was the real source of the prior flake.
+
+### 11c.1 — Add a source-scoped feed-manager and adapter boundary
+- **Spec**: `specs/11c-feed-manager-and-normalized-public-updates.md`
+- **Files changed**: `crates/pm-data/src/lib.rs`, `crates/pm-data/src/feed.rs`, `crates/pm-data/src/reference_store.rs`
+- **Changes**:
+  - Added `feed.rs` with `ScopedPolymarketAdapter`, `FeedStores`, `FeedOutputs`, and `PolymarketFeedManager` so one explicit owner now exists for each live Polymarket source instance
+  - Added `reference_store.rs` so non-depth informational updates survive parsing and can be resolved by source-scoped subject instead of being discarded
+  - Kept the frozen `11a` normalized event model intact by rewriting `source_id` / `subject.source_id` in the adapter layer rather than changing the shared `11a` contracts
+- **Tests**:
+  - `cargo test -p pm-data --lib`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Left `WsMessage::to_normalized_updates()` source-id defaults unchanged and treated source-instance scoping as an `11c` ownership concern so the `11a` foundation stayed stable.
+
+### 11c.2 — Preserve normalized updates and small notices alongside the legacy snapshot path
+- **Spec**: `specs/11c-feed-manager-and-normalized-public-updates.md`
+- **Files changed**: `crates/pm-data/src/feed.rs`, `crates/pm-data/src/pipeline.rs`
+- **Changes**:
+  - Implemented notice/update fan-out from the feed manager while continuing to emit legacy `OrderBookSnapshot` values only for book-changing events
+  - Applied normalized book updates into `OrderBookManager`, applied informational events into `ReferenceStore`, and added notice-resolution helpers so downstream code can fetch current state from stores
+  - Added conservative `reconfigure_assets()` support that clears authoritative state and swaps the desired Polymarket asset set without pretending `11d` diffing already exists
+- **Tests**:
+  - `cargo test -p pm-data pipeline::tests --lib`
+  - `cargo test -p pm-data --lib`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Kept the legacy snapshot bridge as the runtime default and did not remove or redesign the current trigger/runner contract; notice-first runtime consumption remains deferred to `12a`.
+
+### 11c.3 — Rewire the compatibility pipeline to sit on the feed-manager seam
+- **Spec**: `specs/11c-feed-manager-and-normalized-public-updates.md`
+- **Files changed**: `crates/pm-data/src/pipeline.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Turned `Pipeline` into a thin wrapper over the shared Polymarket `FeedManager`, preserving `Pipeline::new()` and `subscribe_snapshots()` so `pm-executor` and `scripts/fire.sh` remain unaffected
+  - Exposed `subscribe_updates()`, `subscribe_notices()`, `reference_store()`, and `reconfigure_assets()` on the pipeline so later `12a`/`12b` work can consume the notice-driven seam without redoing the feed wiring
+  - Updated the architecture doc to describe the new feed-manager plus store topology and the transitional legacy snapshot bridge
+- **Tests**:
+  - `cargo test -p pm-data pipeline::tests --lib`
+  - `cargo test -p pm-data --lib`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Intentionally left `pm-executor/src/main.rs` untouched even though the `11c` spec lists runtime wiring, because the compatibility wrapper now provides the new surfaces without crossing the integration-owner boundary early.

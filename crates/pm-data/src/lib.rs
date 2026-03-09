@@ -1,5 +1,7 @@
+pub mod feed;
 pub mod orderbook;
 pub mod pipeline;
+pub mod reference_store;
 pub mod types;
 pub mod ws;
 
