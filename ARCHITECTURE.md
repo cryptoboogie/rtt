@@ -329,8 +329,13 @@ struct StrategyParams { threshold: Option<f64>, max_spread: Option<f64> }
 - Forwards `TriggerMessage` to mpsc sender
 - Exits when input channel closes
 
+#### `runtime.rs` — Notice-driven runtime bridge
+- `NoticeDrivenRuntime` consumes `rtt_core::UpdateNotice` values, resolves the current `OrderBookSnapshot` view from `HotStateStore`, and invokes the existing `Strategy` trait without widening strategy-facing contracts
+- This is the `12a` migration seam from feed-manager notices to strategy logic while the legacy snapshot runner remains available
+
 #### `backtest.rs` — Offline replay
 - `BacktestRunner::run(strategy, snapshots)` — Replay historical data through any strategy
+- `BacktestRunner::run_notice_replay(strategy, markets, updates)` — Replay normalized updates through `HotStateStore` and compare behavior against the legacy snapshot path
 - `load_snapshots(path)` — Load from JSON file
 
 ### pm-executor

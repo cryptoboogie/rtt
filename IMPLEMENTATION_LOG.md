@@ -1449,3 +1449,29 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test -p pm-data --lib`
 - **Commit**: N/A (working tree only)
 - **Deviation**: Intentionally left `pm-executor/src/main.rs` untouched even though the `11c` spec lists runtime wiring, because the compatibility wrapper now provides the new surfaces without crossing the integration-owner boundary early.
+
+### 12a.1 — Add the runtime hot-state model and notice-resolution store
+- **Spec**: `specs/12a-hot-state-and-update-notices.md`
+- **Files changed**: `crates/rtt-core/src/hot_state.rs`, `crates/rtt-core/src/lib.rs`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added `HotStateStore` with per-source book/reference state, fixed-point `HotStateValue` conversion, and market-metadata registration for tick and lot units
+  - Added notice-resolution helpers so a runtime can project current book/reference state or reconstruct a legacy `OrderBookSnapshot` from `UpdateNotice`
+  - Kept the work scoped to `rtt-core` so `12a` can build the runtime layer on top of `11c` without redesigning the feed plane
+- **Tests**:
+  - `cargo test -p rtt-core hot_state`
+- **Commit**: N/A (working tree only)
+- **Deviation**: This is the first `12a` sub-task only; the notice-driven strategy runtime and backtest migration remain to be implemented on top of this store.
+
+### 12a.2 — Add the notice-driven runtime and replay bridge
+- **Spec**: `specs/12a-hot-state-and-update-notices.md`
+- **Files changed**: `crates/pm-strategy/src/lib.rs`, `crates/pm-strategy/src/runtime.rs`, `crates/pm-strategy/src/backtest.rs`, `crates/pm-strategy/tests/runtime_test.rs`, `crates/pm-strategy/tests/backtest_test.rs`, `crates/rtt-core/src/hot_state.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added `NoticeDrivenRuntime`, which consumes small `UpdateNotice` values and resolves strategy snapshots from `HotStateStore` without changing the existing strategy trait
+  - Added `BacktestRunner::run_notice_replay()` and parity coverage so a fixed normalized update stream can be replayed through the hot-state path and compared with the legacy snapshot runner
+  - Tightened hot-state notice resolution so book and reference lookups only resolve the exact stored version named by the notice, preventing delayed consumers from accidentally reading newer state
+- **Tests**:
+  - `cargo test -p rtt-core hot_state`
+  - `cargo test -p pm-strategy`
+  - `cargo test --workspace`
+- **Commit**: `feat: add 12a notice-driven runtime replay`
+- **Deviation**: Left `pm-executor/src/main.rs` on the legacy snapshot runner for this branch; the new notice-driven runtime surface is available for Wave 1 integration without crossing the integration-owner boundary early.

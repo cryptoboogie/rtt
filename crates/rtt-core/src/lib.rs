@@ -10,6 +10,7 @@ pub mod connection;
 pub mod executor;
 pub mod feed_source;
 pub mod h3_stub;
+pub mod hot_state;
 pub mod market;
 pub mod metrics;
 pub mod polymarket;
@@ -22,6 +23,10 @@ pub use clob_executor::{
     process_one_clob, sign_and_dispatch, DispatchError, DispatchOutcome, PreSignedOrderPool,
 };
 pub use feed_source::{InstrumentKind, InstrumentRef, SourceId, SourceKind};
+pub use hot_state::{
+    HotBookLevel, HotBookState, HotReferenceState, HotStateStore, HotStateValue, HotStateView,
+    NoticeResolution, HOT_VALUE_SCALE,
+};
 pub use market::{
     AssetId, MarketId, MarketMeta, MarketStatus, MinOrderSize, Notional, OutcomeSide, OutcomeToken,
     Price, RewardFreshness, RewardParams, Size, TickSize,
