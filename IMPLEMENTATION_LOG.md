@@ -1022,3 +1022,17 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test --workspace`
 - **Commit**: N/A (working tree only)
 - **Deviation**: `cargo test --workspace` timed out in `pm-data` under the default sandboxed network lane, then passed cleanly when rerun with unrestricted network access. No code changes were needed for that follow-up verification.
+
+### 11.10 — Derive Live Canary Size From Price
+- **Spec**: N/A (operational canary support)
+- **Files changed**: `scripts/fire.sh`, `crates/rtt-core/src/clob_executor.rs`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Reworked `scripts/fire.sh` into reusable shell functions so it can derive an integer share size from `PRICE` and guarantee at least `$1.00` notional before dispatch
+  - Added notional display to the script output so the canary run makes its computed size explicit
+  - Wired the ignored real-order test to honor an exported `SIZE` env var while preserving the historical default of `2` for non-script callers
+- **Tests**:
+  - `bash -lc 'source scripts/fire.sh; compute_size 0.95; compute_size 0.14; compute_size 0.032; compute_notional 0.14 8'`
+  - `bash -n scripts/fire.sh`
+  - `cargo test -p rtt-core test_live_test_size`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Rounded size up to the next whole share with a `$1.00` floor, so low-priced tokens intentionally overshoot the minimum rather than risk falling below it.

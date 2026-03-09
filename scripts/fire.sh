@@ -9,64 +9,113 @@ set -euo pipefail
 # First run builds the test binary (~3-5 min). Subsequent runs are instant.
 # To force rebuild: rm .test_binary_path
 
-if [ $# -lt 1 ]; then
-    echo "Usage: ./scripts/fire.sh <token_id> [price] [fee_rate_bps] [neg_risk]"
-    echo ""
-    echo "  token_id       The condition token ID to buy"
-    echo "  price          Bid price (default: 0.95)"
-    echo "  fee_rate_bps   Taker fee in bps (default: 1000 = 10%)"
-    echo "  neg_risk       true/false (default: false)"
-    exit 1
-fi
+MIN_ORDER_NOTIONAL="1.00"
 
-TOKEN_ID="$1"
-PRICE="${2:-0.95}"
-FEE_RATE_BPS="${3:-1000}"
-NEG_RISK="${4:-false}"
+compute_size() {
+    local price="$1"
 
-cd "$(dirname "$0")/.."
+    awk -v price="$price" -v min_notional="$MIN_ORDER_NOTIONAL" '
+        BEGIN {
+            if ((price + 0) <= 0) {
+                exit 1
+            }
 
-if [ ! -f .env ]; then
-    echo "Error: .env not found in $(pwd)"
-    exit 1
-fi
+            required = min_notional / price
+            size = int(required)
+            if (required > size) {
+                size += 1
+            }
+            if (size < 1) {
+                size = 1
+            }
 
-set -a
-source .env
-set +a
+            print size
+        }
+    '
+}
 
-export TOKEN_ID
-export PRICE
-export FEE_RATE_BPS
-export NEG_RISK
-export SIG_TYPE=2  # GNOSIS_SAFE (proxy wallet as maker, EOA as signer)
+compute_notional() {
+    local price="$1"
+    local size="$2"
 
-# Build test binary once, cache the path
-CACHE_FILE=".test_binary_path"
-if [ ! -f "$CACHE_FILE" ] || [ ! -f "$(cat "$CACHE_FILE" 2>/dev/null)" ]; then
-    echo "Building test binary (one-time)..."
-    BINARY=$(cargo test --release -p rtt-core --no-run --message-format=json 2>/dev/null \
-        | grep '"executable"' \
-        | grep 'rtt.core' \
-        | tail -1 \
-        | sed 's/.*"executable":"\([^"]*\)".*/\1/')
-    if [ -z "$BINARY" ]; then
-        echo "Error: could not find test binary"
+    awk -v price="$price" -v size="$size" '
+        BEGIN {
+            printf "%.2f", price * size
+        }
+    '
+}
+
+main() {
+    if [ $# -lt 1 ]; then
+        echo "Usage: ./scripts/fire.sh <token_id> [price] [fee_rate_bps] [neg_risk]"
+        echo ""
+        echo "  token_id       The condition token ID to buy"
+        echo "  price          Bid price (default: 0.95)"
+        echo "  fee_rate_bps   Taker fee in bps (default: 1000 = 10%)"
+        echo "  neg_risk       true/false (default: false)"
         exit 1
     fi
-    echo "$BINARY" > "$CACHE_FILE"
-    echo "Cached: $BINARY"
+
+    TOKEN_ID="$1"
+    PRICE="${2:-0.95}"
+    FEE_RATE_BPS="${3:-1000}"
+    NEG_RISK="${4:-false}"
+    SIZE="$(compute_size "$PRICE")" || {
+        echo "Error: invalid price '$PRICE'" >&2
+        exit 1
+    }
+    NOTIONAL="$(compute_notional "$PRICE" "$SIZE")"
+
+    cd "$(dirname "$0")/.."
+
+    if [ ! -f .env ]; then
+        echo "Error: .env not found in $(pwd)"
+        exit 1
+    fi
+
+    set -a
+    source .env
+    set +a
+
+    export TOKEN_ID
+    export PRICE
+    export SIZE
+    export FEE_RATE_BPS
+    export NEG_RISK
+    export SIG_TYPE=2  # GNOSIS_SAFE (proxy wallet as maker, EOA as signer)
+
+    # Build test binary once, cache the path
+    CACHE_FILE=".test_binary_path"
+    if [ ! -f "$CACHE_FILE" ] || [ ! -f "$(cat "$CACHE_FILE" 2>/dev/null)" ]; then
+        echo "Building test binary (one-time)..."
+        BINARY=$(cargo test --release -p rtt-core --no-run --message-format=json 2>/dev/null \
+            | grep '"executable"' \
+            | grep 'rtt.core' \
+            | tail -1 \
+            | sed 's/.*"executable":"\([^"]*\)".*/\1/')
+        if [ -z "$BINARY" ]; then
+            echo "Error: could not find test binary"
+            exit 1
+        fi
+        echo "$BINARY" > "$CACHE_FILE"
+        echo "Cached: $BINARY"
+    fi
+
+    BINARY=$(cat "$CACHE_FILE")
+
+    echo "=== fire.sh ==="
+    echo "token_id:      ${TOKEN_ID:0:12}...${TOKEN_ID: -6}"
+    echo "price:         $PRICE"
+    echo "size:          $SIZE (derived)"
+    echo "notional:      \$$NOTIONAL"
+    echo "type:          FOK"
+    echo "fee_rate_bps:  $FEE_RATE_BPS"
+    echo "neg_risk:      $NEG_RISK"
+    echo ""
+
+    "$BINARY" test_clob_end_to_end_pipeline --ignored --nocapture
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
 fi
-
-BINARY=$(cat "$CACHE_FILE")
-
-echo "=== fire.sh ==="
-echo "token_id:      ${TOKEN_ID:0:12}...${TOKEN_ID: -6}"
-echo "price:         $PRICE"
-echo "size:          2 (hardcoded)"
-echo "type:          FOK"
-echo "fee_rate_bps:  $FEE_RATE_BPS"
-echo "neg_risk:      $NEG_RISK"
-echo ""
-
-"$BINARY" test_clob_end_to_end_pipeline --ignored --nocapture

@@ -316,6 +316,12 @@ pub fn sign_and_dispatch(
 }
 
 #[cfg(test)]
+fn live_test_size_from_env(size: Option<String>) -> String {
+    size.filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "2".to_string())
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::clob_order::{Order, SignedOrderPayload};
@@ -472,6 +478,18 @@ mod tests {
         assert_eq!(order.takerAmount, U256::from(50_000_000u64));
     }
 
+    #[test]
+    fn test_live_test_size_defaults_to_two() {
+        assert_eq!(live_test_size_from_env(None), "2");
+        assert_eq!(live_test_size_from_env(Some("".to_string())), "2");
+        assert_eq!(live_test_size_from_env(Some("   ".to_string())), "2");
+    }
+
+    #[test]
+    fn test_live_test_size_uses_env_override() {
+        assert_eq!(live_test_size_from_env(Some("8".to_string())), "8");
+    }
+
     #[tokio::test]
     async fn test_sign_and_dispatch_sign_duration_populated() {
         // Verify that sign_duration timestamps are populated after signing
@@ -550,13 +568,14 @@ mod tests {
         let token_id = std::env::var("TOKEN_ID")
             .expect("TOKEN_ID env var required — the condition token to buy");
         let price = std::env::var("PRICE").unwrap_or_else(|_| "0.95".to_string());
+        let size = live_test_size_from_env(std::env::var("SIZE").ok());
 
         let trigger = TriggerMessage {
             trigger_id: 1,
             token_id,
             side: Side::Buy,
             price,
-            size: "2".to_string(),
+            size,
             order_type: OrderType::FOK,
             timestamp_ns: clock::now_ns(),
         };
