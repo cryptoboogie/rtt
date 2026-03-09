@@ -3,14 +3,40 @@ use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer;
 use alloy::sol_types::eip712_domain;
 use alloy::sol_types::SolStruct;
+use std::fmt;
 
 use crate::clob_order::{
-    compute_amounts, generate_salt, ClobSide, Order, SignatureType, SignedOrderPayload,
-    EXCHANGE_ADDRESS, NEG_RISK_EXCHANGE_ADDRESS,
+    compute_amounts, generate_salt, AmountError, ClobSide, Order, SignatureType,
+    SignedOrderPayload, EXCHANGE_ADDRESS, NEG_RISK_EXCHANGE_ADDRESS,
 };
 use crate::trigger::TriggerMessage;
 
 const CHAIN_ID: u64 = 137; // Polygon mainnet
+
+#[derive(Debug)]
+pub enum BuildOrderError {
+    InvalidTokenId(String),
+    Amount(AmountError),
+}
+
+impl fmt::Display for BuildOrderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidTokenId(value) => {
+                write!(f, "token_id is not a valid decimal integer: {value}")
+            }
+            Self::Amount(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for BuildOrderError {}
+
+impl From<AmountError> for BuildOrderError {
+    fn from(value: AmountError) -> Self {
+        Self::Amount(value)
+    }
+}
 
 /// Build the EIP-712 domain for order signing.
 pub fn make_domain(is_neg_risk: bool) -> alloy::sol_types::Eip712Domain {
@@ -51,13 +77,13 @@ pub fn build_order(
     signer_addr: Address,
     fee_rate_bps: u64,
     signature_type: SignatureType,
-) -> Order {
+) -> Result<Order, BuildOrderError> {
     let clob_side = ClobSide::from(trigger.side);
-    let (maker_amount, taker_amount) = compute_amounts(&trigger.price, &trigger.size, clob_side);
-    let token_id =
-        U256::from_str_radix(trigger.token_id.as_str(), 10).unwrap_or_else(|_| U256::from(0u64));
+    let (maker_amount, taker_amount) = compute_amounts(&trigger.price, &trigger.size, clob_side)?;
+    let token_id = U256::from_str_radix(trigger.token_id.as_str(), 10)
+        .map_err(|_| BuildOrderError::InvalidTokenId(trigger.token_id.clone()))?;
 
-    Order {
+    Ok(Order {
         salt: U256::from(generate_salt()),
         maker,
         signer: signer_addr,
@@ -70,7 +96,7 @@ pub fn build_order(
         feeRateBps: U256::from(fee_rate_bps),
         side: clob_side as u8,
         signatureType: signature_type as u8,
-    }
+    })
 }
 
 /// Pre-sign a batch of orders for the same trigger parameters but different salts.
@@ -87,7 +113,7 @@ pub async fn presign_batch(
 ) -> Result<Vec<SignedOrderPayload>, Box<dyn std::error::Error + Send + Sync>> {
     let mut results = Vec::with_capacity(count);
     for _ in 0..count {
-        let order = build_order(trigger, maker, signer_addr, fee_rate_bps, signature_type);
+        let order = build_order(trigger, maker, signer_addr, fee_rate_bps, signature_type)?;
         let sig = sign_order(signer, &order, is_neg_risk).await?;
         let payload = SignedOrderPayload::new(&order, &sig, trigger.order_type, owner);
         results.push(payload);
@@ -185,7 +211,7 @@ mod tests {
             timestamp_ns: 0,
         };
         let maker = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-        let order = build_order(&trigger, maker, maker, 0, SignatureType::Eoa);
+        let order = build_order(&trigger, maker, maker, 0, SignatureType::Eoa).unwrap();
 
         assert_eq!(order.maker, maker);
         assert_eq!(order.signer, maker);
@@ -196,6 +222,23 @@ mod tests {
         assert_eq!(order.takerAmount, U256::from(100_000_000u64));
         assert_eq!(order.side, 0); // Buy
         assert_eq!(order.signatureType, 0); // EOA
+    }
+
+    #[test]
+    fn test_build_order_rejects_invalid_token_id() {
+        let trigger = TriggerMessage {
+            trigger_id: 1,
+            token_id: "not-a-token".to_string(),
+            side: Side::Buy,
+            price: "0.50".to_string(),
+            size: "100".to_string(),
+            order_type: OrderType::FOK,
+            timestamp_ns: 0,
+        };
+        let maker = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+
+        let err = build_order(&trigger, maker, maker, 0, SignatureType::Eoa).unwrap_err();
+        assert!(matches!(err, BuildOrderError::InvalidTokenId(_)));
     }
 
     #[tokio::test]

@@ -25,14 +25,17 @@
 //!   warm_ttfb = t_first_resp_byte - t_write_begin   (network physics)
 
 use rtt_core::clob_auth::L2Credentials;
-use rtt_core::clob_executor::PreSignedOrderPool;
 use rtt_core::clob_order::{Order, SignedOrderPayload};
 use rtt_core::connection::{AddressFamily, ConnectionPool};
 use rtt_core::executor::{ExecutionThread, IngressThread};
 use rtt_core::queue::TriggerQueue;
-use rtt_core::trigger::OrderType;
+use rtt_core::trigger::{OrderType, Side, TriggerMessage};
+use rtt_core::{
+    process_one_clob, sign_and_dispatch, DispatchError, DispatchOutcome, PreSignedOrderPool,
+};
 
 use alloy::primitives::{address, Address, U256};
+use alloy::signers::local::PrivateKeySigner;
 use base64::engine::general_purpose::URL_SAFE;
 use base64::Engine;
 use std::sync::Arc;
@@ -67,6 +70,12 @@ fn test_payloads(count: usize) -> Vec<SignedOrderPayload> {
             SignedOrderPayload::new(&order, "0xdeadbeef", OrderType::FOK, "owner-uuid")
         })
         .collect()
+}
+
+fn test_signer() -> PrivateKeySigner {
+    "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+        .parse()
+        .expect("valid test signer")
 }
 
 /// TEST: The hot path dispatches a pre-signed order in under 1ms.
@@ -131,9 +140,6 @@ fn hot_path_dispatch_is_fast() {
 /// are actually helping.
 #[tokio::test]
 async fn full_execution_records_all_timestamps_in_order() {
-    use rtt_core::clob_executor::process_one_clob;
-    use rtt_core::trigger::{Side, TriggerMessage};
-
     println!("\n=== Execution Pipeline: Full Timestamp Chain ===");
 
     // Warm a connection pool.
@@ -160,13 +166,20 @@ async fn full_execution_records_all_timestamps_in_order() {
     };
 
     // Run process_one_clob on a blocking thread (it uses block_on internally).
-    let (rec, _body) = tokio::task::spawn_blocking(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        process_one_clob(&conn_pool, &mut presigned, &creds, &trigger, &rt)
-    })
+    let (rec, _body) = tokio::task::spawn_blocking(
+        move || -> (rtt_core::metrics::TimestampRecord, Option<Vec<u8>>) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            match process_one_clob(&conn_pool, &mut presigned, &creds, &trigger, &rt) {
+                DispatchOutcome::Sent { record, body } => (record, body),
+                DispatchOutcome::Rejected { error, .. } => {
+                    panic!("dispatch should succeed: {error}")
+                }
+            }
+        },
+    )
     .await
     .unwrap();
 
@@ -250,6 +263,83 @@ async fn full_execution_records_all_timestamps_in_order() {
     println!("=== PASS ===\n");
 }
 
+#[test]
+fn pool_exhaustion_is_classified_without_poisoning_reconnect_metrics() {
+    let pool = ConnectionPool::new("localhost", 443, 0, AddressFamily::Auto);
+    let mut presigned = PreSignedOrderPool::new(vec![]).unwrap();
+    let creds = test_creds();
+    let trigger = TriggerMessage {
+        trigger_id: 1,
+        token_id: "1234".to_string(),
+        side: Side::Buy,
+        price: "0.50".to_string(),
+        size: "1".to_string(),
+        order_type: OrderType::FOK,
+        timestamp_ns: rtt_core::clock::now_ns(),
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let outcome = process_one_clob(&pool, &mut presigned, &creds, &trigger, &rt);
+    match outcome {
+        DispatchOutcome::Rejected { record, error } => {
+            assert!(matches!(error, DispatchError::PoolExhausted));
+            assert!(
+                !record.is_reconnect,
+                "pool exhaustion should not look like a reconnect sample"
+            );
+        }
+        DispatchOutcome::Sent { .. } => panic!("pool exhaustion should not send"),
+    }
+}
+
+#[test]
+fn invalid_token_dispatch_is_classified_as_order_build_failure() {
+    let pool = ConnectionPool::new("localhost", 443, 0, AddressFamily::Auto);
+    let signer = test_signer();
+    let creds = test_creds();
+    let trigger = TriggerMessage {
+        trigger_id: 1,
+        token_id: "not-a-token".to_string(),
+        side: Side::Buy,
+        price: "0.50".to_string(),
+        size: "1".to_string(),
+        order_type: OrderType::FOK,
+        timestamp_ns: rtt_core::clock::now_ns(),
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let outcome = sign_and_dispatch(
+        &pool,
+        &signer,
+        &trigger,
+        &creds,
+        signer.address(),
+        signer.address(),
+        0,
+        false,
+        rtt_core::clob_order::SignatureType::Eoa,
+        "owner-uuid",
+        &rt,
+    );
+
+    match outcome {
+        DispatchOutcome::Rejected { record, error } => {
+            assert!(matches!(error, DispatchError::BuildOrder(_)));
+            assert!(
+                !record.is_reconnect,
+                "build failures should not be counted as reconnect samples"
+            );
+        }
+        DispatchOutcome::Sent { .. } => panic!("invalid token should not dispatch"),
+    }
+}
+
 /// TEST: `ExecutionThread::process_one()` records the round-robin connection index.
 #[tokio::test]
 async fn process_one_records_connection_index_after_round_robin_advance() {
@@ -281,7 +371,7 @@ async fn process_one_records_connection_index_after_round_robin_advance() {
     msg.timestamp_ns = rtt_core::clock::now_ns();
 
     let pool_clone = pool.clone();
-    let rec = tokio::task::spawn_blocking(move || {
+    let rec = tokio::task::spawn_blocking(move || -> rtt_core::metrics::TimestampRecord {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -320,7 +410,7 @@ async fn write_duration_stays_well_below_network_ttfb() {
     msg.timestamp_ns = rtt_core::clock::now_ns();
 
     let pool_clone = pool.clone();
-    let rec = tokio::task::spawn_blocking(move || {
+    let rec = tokio::task::spawn_blocking(move || -> rtt_core::metrics::TimestampRecord {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

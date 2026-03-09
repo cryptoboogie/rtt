@@ -13,35 +13,97 @@
 
 use bytes::Bytes;
 use http::{Method, Request, Uri};
+use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::clob_auth::{build_l2_headers, L2Credentials};
 use crate::clob_order::SignedOrderPayload;
 
-/// Build a POST /order request from a SignedOrderPayload and L2 credentials.
-pub fn build_order_request(
-    signed_order: &SignedOrderPayload,
-    creds: &L2Credentials,
-) -> Result<Request<Bytes>, Box<dyn std::error::Error>> {
-    let body = serde_json::to_string(signed_order)?;
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)?
-        .as_secs()
-        .to_string();
+const ORDER_METHOD: &str = "POST";
+const ORDER_PATH: &str = "/order";
+const ORDER_URI: &str = "https://clob.polymarket.com/order";
 
-    let headers = build_l2_headers(creds, &timestamp, "POST", "/order", &body)?;
+#[derive(Debug)]
+pub enum RequestBuildError {
+    Serialize(serde_json::Error),
+    Utf8(std::str::Utf8Error),
+    Time(std::time::SystemTimeError),
+    Auth(String),
+    Http(http::Error),
+}
+
+impl fmt::Display for RequestBuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Serialize(err) => write!(f, "failed to serialize signed order payload: {err}"),
+            Self::Utf8(err) => write!(f, "request body is not valid UTF-8: {err}"),
+            Self::Time(err) => write!(f, "failed to read current unix timestamp: {err}"),
+            Self::Auth(err) => write!(f, "failed to build L2 auth headers: {err}"),
+            Self::Http(err) => write!(f, "failed to assemble HTTP request: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for RequestBuildError {}
+
+fn unix_timestamp_secs() -> Result<String, RequestBuildError> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(RequestBuildError::Time)?
+        .as_secs()
+        .to_string())
+}
+
+pub fn encode_order_payload(signed_order: &SignedOrderPayload) -> Result<Bytes, RequestBuildError> {
+    serde_json::to_vec(signed_order)
+        .map(Bytes::from)
+        .map_err(RequestBuildError::Serialize)
+}
+
+pub fn build_order_request_from_bytes(
+    body: Bytes,
+    creds: &L2Credentials,
+) -> Result<Request<Bytes>, RequestBuildError> {
+    let timestamp = unix_timestamp_secs()?;
+    build_order_request_from_bytes_with_timestamp(body, creds, &timestamp)
+}
+
+pub fn build_order_request_from_bytes_with_timestamp(
+    body: Bytes,
+    creds: &L2Credentials,
+    timestamp: &str,
+) -> Result<Request<Bytes>, RequestBuildError> {
+    let body_str = std::str::from_utf8(body.as_ref()).map_err(RequestBuildError::Utf8)?;
+    let headers = build_l2_headers(creds, timestamp, ORDER_METHOD, ORDER_PATH, body_str)
+        .map_err(|err| RequestBuildError::Auth(err.to_string()))?;
 
     let mut builder = Request::builder()
         .method(Method::POST)
-        .uri(Uri::from_static("https://clob.polymarket.com/order"))
+        .uri(Uri::from_static(ORDER_URI))
         .header("content-type", "application/json");
 
     for (name, value) in &headers {
         builder = builder.header(name.as_str(), value.as_str());
     }
 
-    let req = builder.body(Bytes::from(body))?;
-    Ok(req)
+    builder.body(body).map_err(RequestBuildError::Http)
+}
+
+pub fn build_order_request(
+    signed_order: &SignedOrderPayload,
+    creds: &L2Credentials,
+) -> Result<Request<Bytes>, RequestBuildError> {
+    let body = encode_order_payload(signed_order)?;
+    build_order_request_from_bytes(body, creds)
+}
+
+pub fn build_order_request_with_timestamp(
+    signed_order: &SignedOrderPayload,
+    creds: &L2Credentials,
+    timestamp: &str,
+) -> Result<Request<Bytes>, RequestBuildError> {
+    let body = encode_order_payload(signed_order)?;
+    build_order_request_from_bytes_with_timestamp(body, creds, timestamp)
 }
 
 #[cfg(test)]
@@ -93,17 +155,30 @@ mod tests {
             "application/json"
         );
 
-        // All POLY_* headers present
         assert!(req.headers().get("POLY_ADDRESS").is_some());
         assert!(req.headers().get("POLY_API_KEY").is_some());
         assert!(req.headers().get("POLY_PASSPHRASE").is_some());
         assert!(req.headers().get("POLY_SIGNATURE").is_some());
         assert!(req.headers().get("POLY_TIMESTAMP").is_some());
 
-        // Body is valid JSON
         let body = req.body();
         let v: serde_json::Value = serde_json::from_slice(body).unwrap();
         assert!(v["order"].is_object());
         assert_eq!(v["orderType"].as_str().unwrap(), "FOK");
+    }
+
+    #[test]
+    fn test_build_order_request_from_cached_body_matches_payload_builder() {
+        let creds = test_creds();
+        let payload = test_signed_order();
+        let timestamp = "1700000000";
+
+        let from_payload = build_order_request_with_timestamp(&payload, &creds, timestamp).unwrap();
+        let cached_body = encode_order_payload(&payload).unwrap();
+        let from_cached =
+            build_order_request_from_bytes_with_timestamp(cached_body, &creds, timestamp).unwrap();
+
+        assert_eq!(from_payload.headers(), from_cached.headers());
+        assert_eq!(from_payload.body(), from_cached.body());
     }
 }

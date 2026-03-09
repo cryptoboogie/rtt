@@ -1036,3 +1036,74 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test -p rtt-core test_live_test_size`
 - **Commit**: N/A (working tree only)
 - **Deviation**: Rounded size up to the next whole share with a `$1.00` floor, so low-priced tokens intentionally overshoot the minimum rather than risk falling below it.
+
+### 11.11 — Spec 09: Finish Typed Dispatch Classification for the CLOB Path
+- **Spec**: `specs/09-rtt-core-refactor.md`
+- **Files changed**: `crates/rtt-core/src/clob_executor.rs`, `crates/pm-executor/src/execution.rs`, `crates/rtt-core/tests/test_execution_pipeline.rs`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added `DispatchError` / `DispatchOutcome` so the live order path now distinguishes pool exhaustion, order-build, signing, request-build, and connection failures instead of collapsing them into tuple returns plus a generic `is_reconnect` bit
+  - Kept `TimestampRecord.is_reconnect` exclusive to reconnect/cold-path samples; invalid token IDs, pre-signed pool exhaustion, and request-build failures now preserve timestamps without poisoning warm latency stats
+  - Updated `pm-executor` to match on typed outcomes, log rejection classes explicitly, and trip the circuit breaker only when the sample actually entered a reconnect/cold path
+- **Tests**:
+  - `cargo test -p rtt-core --test '*'`
+  - `cargo test -p rtt-core --lib`
+  - `cargo test --workspace --lib`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Continued from an in-progress refactor branch that already contained the fixed-point amount conversion and shared request-encoder work; this session closed the typed-dispatch gap that was still breaking the integration lane.
+
+### 11.12 — Spec 09: Reconnect Failed Collect Paths Before Reuse
+- **Spec**: `specs/09-rtt-core-refactor.md`
+- **Files changed**: `crates/rtt-core/src/connection.rs`, `crates/rtt-core/src/executor.rs`, `crates/rtt-core/src/clob_executor.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added `ConnectionPool::collect(handle)` so split `send_start()` / `collect()` callers reconnect unhealthy H2 sessions before reuse
+  - Switched `rtt-core` execution callers onto the pool-managed collect helper, keeping the split timing model while hardening failed-collect recovery
+  - Updated `ARCHITECTURE.md` to reflect fixed-point amount math, fallible order building, shared request encoding, `Bytes`-backed pre-signed payload storage, and typed dispatch/reconnect semantics
+- **Tests**:
+  - `cargo test -p rtt-core --test '*'`
+  - `cargo test -p rtt-core --lib`
+  - `cargo test --workspace --lib`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: The benchmark baseline/comparison commands called out in Spec 09 were not run in this continuation pass because the immediate goal was to restore a coherent, fully green code/test state on top of an already-dirty latency-refactor branch.
+
+### 11.13 — Stabilize Dispatch API Imports for `rtt-core` Integration Tests
+- **Spec**: N/A (user-reported API/tooling fix)
+- **Files changed**: `crates/rtt-core/src/lib.rs`, `crates/rtt-core/tests/test_execution_pipeline.rs`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Re-exported the public CLOB dispatch surface from the `rtt-core` crate root: `process_one_clob`, `sign_and_dispatch`, `DispatchError`, `DispatchOutcome`, and `PreSignedOrderPool`
+  - Updated `test_execution_pipeline.rs` to import those symbols from the crate root instead of the nested module path
+  - Kept runtime behavior unchanged; this pass only made the public API surface more explicit for integration tests and editor tooling
+- **Tests**:
+  - `cargo test -p rtt-core --test test_execution_pipeline --no-run`
+  - `cargo test -p rtt-core --lib`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: `cargo check --tests -p rtt-core` and `cargo test -p rtt-core --test test_execution_pipeline --no-run` already proved the nested import compiled. The crate-root re-export was still added because the user-reported failure was editor-facing, and an explicit top-level API is the lower-risk way to make that surface easier for tooling to resolve.
+
+### 11.14 — Make `spawn_blocking` Return Type Explicit in Execution Pipeline Test
+- **Spec**: N/A (user-reported API/tooling fix)
+- **Files changed**: `crates/rtt-core/tests/test_execution_pipeline.rs`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added an explicit closure return type to the `tokio::task::spawn_blocking` call that drives `process_one_clob` in the full execution integration test
+  - Kept the test logic unchanged; the annotation only removes the editor-facing “type annotations needed / cannot infer type” diagnostic around the closure result
+- **Tests**:
+  - `cargo test -p rtt-core --test test_execution_pipeline --no-run`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: `cargo` already compiled the test without this annotation; the change is specifically to make the result type obvious to tooling at the closure boundary.
+
+### 11.15 — Restore `rtt-core` Bench Target and Finish Blocking-Closure Type Hints
+- **Spec**: N/A (user-reported API/tooling fix)
+- **Files changed**: `crates/rtt-core/benches/clob_cpu_paths.rs`, `crates/rtt-core/src/clob_executor.rs`, `crates/rtt-core/tests/test_execution_pipeline.rs`, `Cargo.lock`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added the missing `crates/rtt-core/benches/clob_cpu_paths.rs` Criterion target so the existing `[[bench]]` entry in `crates/rtt-core/Cargo.toml` now resolves to a real source file
+  - Seeded the bench with CPU-path coverage for fixed-point amount conversion, cached-body request assembly, and pre-signed dispatch so the target is immediately useful instead of a stub
+  - Added explicit `spawn_blocking` return types at the remaining `rtt-core` test sites, including the end-to-end helper in `clob_executor.rs` and the execution-lane tests in `test_execution_pipeline.rs`
+  - Let `Cargo.lock` record the Criterion transitive dependency set that was previously missing from the worktree
+- **Tests**:
+  - `cargo check -p rtt-core --tests --benches`
+  - `cargo test -p pm-data --test test_integration keepalive_no_disconnect_over_20_seconds -- --nocapture`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: The first post-change `cargo test --workspace` run failed in the live `pm-data` keepalive test after a 14s message gap from the upstream feed; the targeted retry passed cleanly and the subsequent full workspace rerun was green, so this was treated as a transient live-network flake rather than a regression from the `rtt-core` changes.

@@ -17,8 +17,11 @@
 //!   -> HMAC auth headers -> HTTP POST /order
 
 use rtt_core::clob_auth::{build_l2_headers, L2Credentials};
-use rtt_core::clob_order::{Order, SignedOrderPayload};
-use rtt_core::clob_request::build_order_request;
+use rtt_core::clob_order::{compute_amounts, ClobSide, Order, SignatureType, SignedOrderPayload};
+use rtt_core::clob_request::{
+    build_order_request, build_order_request_from_bytes_with_timestamp,
+    build_order_request_with_timestamp, encode_order_payload,
+};
 use rtt_core::clob_signer::{build_order, presign_batch, sign_order};
 use rtt_core::trigger::{OrderType, Side, TriggerMessage};
 
@@ -74,13 +77,8 @@ async fn trade_signal_becomes_signed_order() {
     // Step 1: Build the Order struct from the trigger.
     // This converts price/size into USDC fixed-point amounts:
     //   BUY 100 @ 0.50 -> makerAmount=50_000_000 (USDC), takerAmount=100_000_000 (tokens)
-    let order = build_order(
-        &trigger,
-        maker,
-        maker,
-        0,
-        rtt_core::clob_order::SignatureType::Eoa,
-    );
+    let order = build_order(&trigger, maker, maker, 0, SignatureType::Eoa)
+        .expect("build_order should succeed");
     assert_eq!(order.tokenId, U256::from(1234u64));
     assert_eq!(order.makerAmount, U256::from(50_000_000u64));
     assert_eq!(order.takerAmount, U256::from(100_000_000u64));
@@ -140,7 +138,7 @@ async fn presigned_batch_has_unique_salts_and_valid_signatures() {
         maker,
         0,
         false,
-        rtt_core::clob_order::SignatureType::Eoa,
+        SignatureType::Eoa,
         "owner-uuid",
         10,
     )
@@ -184,6 +182,76 @@ async fn presigned_batch_has_unique_salts_and_valid_signatures() {
         assert_eq!(p.owner, "owner-uuid");
         assert_eq!(p.order.side, "BUY");
     }
+}
+
+#[test]
+fn compute_amounts_handles_polymarket_decimals_exactly() {
+    let (maker, taker) = compute_amounts("0.45", "100", ClobSide::Buy).expect("valid amount");
+    assert_eq!(maker, U256::from(45_000_000u64));
+    assert_eq!(taker, U256::from(100_000_000u64));
+
+    let (maker, taker) = compute_amounts("0.3333", "3", ClobSide::Buy).expect("valid amount");
+    assert_eq!(maker, U256::from(999_900u64));
+    assert_eq!(taker, U256::from(3_000_000u64));
+
+    let (maker, taker) = compute_amounts("0.125", "1.5", ClobSide::Sell).expect("valid amount");
+    assert_eq!(maker, U256::from(1_500_000u64));
+    assert_eq!(taker, U256::from(187_500u64));
+}
+
+#[test]
+fn compute_amounts_rejects_malformed_precision_and_overflow() {
+    let err = compute_amounts("abc", "1", ClobSide::Buy).expect_err("price should reject");
+    assert!(
+        err.to_string().contains("price"),
+        "unexpected error for malformed price: {err}"
+    );
+
+    let err =
+        compute_amounts("0.1234567", "1", ClobSide::Buy).expect_err("precision should reject");
+    assert!(
+        err.to_string().contains("precision"),
+        "unexpected precision error: {err}"
+    );
+
+    let err = compute_amounts(
+        "1",
+        "340282366920938463463374607431768211456",
+        ClobSide::Buy,
+    )
+    .expect_err("overflow should reject");
+    assert!(
+        err.to_string().contains("overflow"),
+        "unexpected overflow error: {err}"
+    );
+}
+
+#[test]
+fn build_order_rejects_invalid_token_id_instead_of_zero() {
+    let trigger = TriggerMessage {
+        trigger_id: 1,
+        token_id: "not-a-token".to_string(),
+        side: Side::Buy,
+        price: "0.50".to_string(),
+        size: "100".to_string(),
+        order_type: OrderType::FOK,
+        timestamp_ns: 0,
+    };
+
+    let signer = test_signer();
+    let err = build_order(
+        &trigger,
+        signer.address(),
+        signer.address(),
+        0,
+        SignatureType::Eoa,
+    )
+    .expect_err("invalid token_id should not coerce to zero");
+
+    assert!(
+        err.to_string().contains("token_id"),
+        "unexpected invalid token error: {err}"
+    );
 }
 
 /// TEST: HMAC auth headers are correctly computed.
@@ -334,4 +402,37 @@ fn complete_order_request_has_correct_structure() {
         "BUY",
         "side should be BUY"
     );
+}
+
+#[test]
+fn shared_request_encoder_produces_same_shape_for_payload_and_cached_body() {
+    let creds = test_creds();
+    let order = Order {
+        salt: U256::from(1234567890u64),
+        maker: address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266"),
+        signer: address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266"),
+        taker: Address::ZERO,
+        tokenId: U256::from(9999u64),
+        makerAmount: U256::from(50_000_000u64),
+        takerAmount: U256::from(100_000_000u64),
+        expiration: U256::ZERO,
+        nonce: U256::ZERO,
+        feeRateBps: U256::ZERO,
+        side: 0,
+        signatureType: 0,
+    };
+    let payload = SignedOrderPayload::new(&order, "0xdeadbeef", OrderType::FOK, "owner-uuid");
+    let timestamp = "1700000000";
+
+    let req_from_payload = build_order_request_with_timestamp(&payload, &creds, timestamp)
+        .expect("payload path should build");
+    let cached_body = encode_order_payload(&payload).expect("payload should encode");
+    let req_from_cached =
+        build_order_request_from_bytes_with_timestamp(cached_body, &creds, timestamp)
+            .expect("cached body path should build");
+
+    assert_eq!(req_from_payload.method(), req_from_cached.method());
+    assert_eq!(req_from_payload.uri(), req_from_cached.uri());
+    assert_eq!(req_from_payload.headers(), req_from_cached.headers());
+    assert_eq!(req_from_payload.body(), req_from_cached.body());
 }

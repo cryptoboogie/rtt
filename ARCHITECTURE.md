@@ -109,7 +109,7 @@ struct TimestampRecord {
     t_headers_done,     // Response fully collected
     t_sign_start,       // EIP-712 signing started (dynamic pricing)
     t_sign_end,         // EIP-712 signing completed
-    is_reconnect: bool,
+    is_reconnect: bool, // true only for reconnect/cold-path samples
     cf_ray_pop: String, // Cloudflare POP code (e.g. "EWR", "DUB")
     connection_index: usize,
 }
@@ -130,7 +130,9 @@ Derived metrics (all in nanoseconds):
 - `ConnectionPool::new(host, port, pool_size, address_family)`
 - `warmup()` — DNS → TCP (NODELAY) → TLS (rustls, ALPN h2) → H2 SETTINGS
 - `send_start(req) -> SendHandle` — Submit H2 frame (returns in microseconds)
-- `SendHandle::collect() -> Response` — Await server response (milliseconds)
+- `ConnectionPool::collect(handle) -> Response` — Await server response (milliseconds) and reconnect failed connections before reuse
+- `ConnectionError` — typed pool/send/collect/reconnect failures
+- `health_check_detailed()` — Per-connection success/failure status for warmed sessions
 - Round-robin via `AtomicUsize`, reconnect on failure
 - `extract_pop(cf_ray)` — Parse Cloudflare POP from cf-ray header
 
@@ -143,7 +145,7 @@ Derived metrics (all in nanoseconds):
 #### `clob_order.rs` — Polymarket order types
 - `Order` defined via alloy `sol!` macro (automatic EIP-712 struct hash)
 - Exchange addresses: standard (`0x4bFb...`) and neg-risk (`0xC5d5...`)
-- `compute_amounts(price, size, side)` — USDC (6 decimals) math
+- `compute_amounts(price, size, side)` — fixed-point base-unit math with explicit `AmountError`
 - `generate_salt()` — Random u64 masked to 53 bits (JSON number safety)
 - `SignedOrderPayload` — Order + signature + orderType + owner (API-ready JSON)
 - `SignatureType` — EOA (0), Poly (1), GnosisSafe (2)
@@ -151,7 +153,7 @@ Derived metrics (all in nanoseconds):
 #### `clob_signer.rs` — EIP-712 signing
 - `make_domain(is_neg_risk)` — EIP-712 domain for Polygon chain_id=137
 - `sign_order(signer, order, is_neg_risk)` — Produce hex signature
-- `build_order(trigger, maker, signer, fee_rate_bps, sig_type)` — TriggerMessage → Order
+- `build_order(trigger, maker, signer, fee_rate_bps, sig_type)` — fallible `TriggerMessage -> Order` conversion (`BuildOrderError` for invalid token IDs or amount math)
 - `presign_batch(signer, trigger, ..., count)` — Sign N orders with unique salts at startup
 
 #### `clob_auth.rs` — L2 API authentication
@@ -164,26 +166,29 @@ Derived metrics (all in nanoseconds):
 - `build_validation_request(creds)` — builds HMAC headers for validation
 
 #### `clob_request.rs` — Request building
+- `encode_order_payload(payload)` — Shared JSON encoder for signed orders
 - `build_order_request(payload, creds)` — Full POST /order with fresh HMAC
+- `build_order_request_from_bytes(body, creds)` — Shared request assembly for cached immutable payload bytes
+- `RequestBuildError` — typed serialization/auth/http assembly failures
 - Signed-payload mutation helpers are intentionally not public API
 - Live integration coverage for request/auth/transport lives under `crates/rtt-core/tests/`
 
 #### `clob_executor.rs` — Order dispatch (pre-signed and dynamic)
 ```rust
 struct PreSignedOrderPool {
-    bodies: Vec<Vec<u8>>,  // Pre-serialized JSON payloads
+    bodies: Vec<Bytes>,    // Immutable pre-serialized JSON payloads
     cursor: usize,         // Next to consume
 }
 ```
 - `dispatch(creds)` — Consume next body, recompute HMAC headers only (body frozen)
-- `process_one_clob(pool, presigned, creds, msg, rt)` — Pre-signed hot-path function (legacy)
+- `process_one_clob(pool, presigned, creds, msg, rt)` — Pre-signed hot-path function (legacy) returning `DispatchOutcome`
 - `sign_and_dispatch(pool, signer, trigger, creds, maker, signer_addr, ...)` — **Dynamic pricing hot-path** (default):
   1. `build_order(trigger, ...)` → builds Order at **trigger's price** (not config price)
   2. `sign_order(signer, order, ...)` → EIP-712 sign (~100-500us)
-  3. Build `SignedOrderPayload` → serialize to JSON → compute HMAC headers
+  3. Build `SignedOrderPayload` → serialize to JSON → shared request encoder computes HMAC headers
   4. `pool.send_start(req)` → submit H2 frame (microseconds)
-  5. `handle.collect()` → await response (milliseconds)
-  6. Returns `(TimestampRecord, Option<Vec<u8>>)` with sign_duration populated
+  5. `pool.collect(handle)` → await response (milliseconds)
+  6. Returns `DispatchOutcome::{Sent, Rejected}` with `DispatchError` classification; `is_reconnect` is reserved for reconnect/cold-path samples only
 
 #### `executor.rs` — Threading primitives
 - `IngressThread` — Stamps `timestamp_ns` on triggers, sends to crossbeam queue
@@ -319,6 +324,7 @@ All credential fields support `POLY_*` env var overrides. `alert_webhook_url` su
   - 4-layer safety: CircuitBreaker → RateLimiter → OrderGuard → CircuitBreaker amount check
   - With `signer_params`: uses `sign_and_dispatch()` (signs at trigger's price)
   - Without `signer_params`: falls back to `process_one_clob()` (pre-signed orders)
+  - Handles `DispatchOutcome` explicitly so build/request/pool failures do not masquerade as reconnect samples
   - Sends webhook alert on circuit breaker trip
 
 #### `safety.rs` — Lock-free safety rails
@@ -377,9 +383,10 @@ rtt-bench --trigger-test  # single trigger
 8. **`sign_and_dispatch()`** (dynamic pricing, default):
    - `build_order(trigger, ...)` → Order at trigger's price
    - `sign_order(signer, order, ...)` → EIP-712 sign (~100-500us, measured in `sign_duration`)
-   - Build `SignedOrderPayload` → serialize → compute HMAC → `Request<Bytes>`
+   - Build `SignedOrderPayload` → shared encoder serializes → computes HMAC → `Request<Bytes>`
    - `pool.send_start(req)` → submits H2 frame to kernel buffer → returns `SendHandle` (microseconds)
-   - `handle.collect()` → awaits server response (milliseconds: network RTT + server processing)
+   - `pool.collect(handle)` → awaits server response (milliseconds: network RTT + server processing)
+   - Returns typed `DispatchOutcome`; only reconnect/cold-path failures set `is_reconnect`
    - Records all 10 timestamps (including sign_start/sign_end), extracts cf-ray POP
 9. **Response parsed** → `OrderResponse { success, order_id, status, error_msg, ... }`
 10. **OrderGuard released**
@@ -397,7 +404,7 @@ rtt-bench --trigger-test  # single trigger
 1. Strategy threshold determines the order price
 2. `presign_batch()` creates N orders with unique random salts (53-bit masked)
 3. Each order is EIP-712 signed on Polygon (chain_id=137)
-4. Orders are serialized to JSON and stored as `Vec<Vec<u8>>` in `PreSignedOrderPool`
+4. Orders are serialized to JSON and stored as immutable `Bytes` in `PreSignedOrderPool`
 5. At trigger time, body is used as-is (signature remains valid), only HMAC headers recomputed
 
 ## Key Design Decisions

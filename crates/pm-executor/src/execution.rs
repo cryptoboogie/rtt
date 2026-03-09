@@ -5,7 +5,9 @@ use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use crossbeam_channel::Receiver;
 use rtt_core::clob_auth::L2Credentials;
-use rtt_core::clob_executor::{process_one_clob, sign_and_dispatch, PreSignedOrderPool};
+use rtt_core::clob_executor::{
+    process_one_clob, sign_and_dispatch, DispatchError, DispatchOutcome, PreSignedOrderPool,
+};
 use rtt_core::clob_order::SignatureType;
 use rtt_core::clob_response::parse_order_response;
 use rtt_core::connection::ConnectionPool;
@@ -163,7 +165,7 @@ pub fn run_execution_loop(
                     break;
                 }
 
-                let (rec, resp_body) = if let Some(ref sp) = signer_params {
+                let outcome = if let Some(ref sp) = signer_params {
                     sign_and_dispatch(
                         &pool,
                         &sp.signer,
@@ -184,17 +186,55 @@ pub fn run_execution_loop(
                 // Release order guard after response received
                 order_guard.release();
 
-                tracing::info!(
-                    trigger_id = trigger.trigger_id,
-                    sign_duration_us = rec.sign_duration() as f64 / 1000.0,
-                    trigger_to_wire_us = rec.trigger_to_wire() as f64 / 1000.0,
-                    write_duration_us = rec.write_duration() as f64 / 1000.0,
-                    warm_ttfb_ms = rec.warm_ttfb() as f64 / 1_000_000.0,
-                    connection = rec.connection_index,
-                    pop = %rec.cf_ray_pop,
-                    reconnect = rec.is_reconnect,
-                    "Order dispatched"
-                );
+                let resp_body = match outcome {
+                    DispatchOutcome::Sent { record, body } => {
+                        tracing::info!(
+                            trigger_id = trigger.trigger_id,
+                            sign_duration_us = record.sign_duration() as f64 / 1000.0,
+                            trigger_to_wire_us = record.trigger_to_wire() as f64 / 1000.0,
+                            write_duration_us = record.write_duration() as f64 / 1000.0,
+                            warm_ttfb_ms = record.warm_ttfb() as f64 / 1_000_000.0,
+                            connection = record.connection_index,
+                            pop = %record.cf_ray_pop,
+                            reconnect = record.is_reconnect,
+                            "Order dispatched"
+                        );
+                        body
+                    }
+                    DispatchOutcome::Rejected { record, error } => {
+                        let level_message = match &error {
+                            DispatchError::PoolExhausted => "Pre-signed order pool exhausted",
+                            DispatchError::BuildOrder(_) => "Order build rejected before dispatch",
+                            DispatchError::Sign(_) => "Order signing failed before dispatch",
+                            DispatchError::RequestBuild(_) => {
+                                "Order request assembly failed before dispatch"
+                            }
+                            DispatchError::Connection(_) => "Order dispatch failed on connection",
+                        };
+
+                        tracing::error!(
+                            trigger_id = trigger.trigger_id,
+                            error = %error,
+                            sign_duration_us = record.sign_duration() as f64 / 1000.0,
+                            trigger_to_wire_us = record.trigger_to_wire() as f64 / 1000.0,
+                            write_duration_us = record.write_duration() as f64 / 1000.0,
+                            warm_ttfb_ms = record.warm_ttfb() as f64 / 1_000_000.0,
+                            connection = record.connection_index,
+                            reconnect = record.is_reconnect,
+                            "{level_message}"
+                        );
+
+                        if record.is_reconnect {
+                            tracing::warn!(
+                                "Order dispatch entered reconnect/cold path, tripping circuit breaker"
+                            );
+                            circuit_breaker.trip();
+                            break;
+                        }
+
+                        None
+                    }
+                };
 
                 // Log order response
                 if let Some(body) = &resp_body {
@@ -221,15 +261,6 @@ pub fn run_execution_loop(
                             );
                         }
                     }
-                }
-
-                // Trip circuit breaker on pool exhaustion (server error equivalent)
-                if rec.is_reconnect {
-                    tracing::warn!(
-                        "Order dispatch failed (is_reconnect=true), tripping circuit breaker"
-                    );
-                    circuit_breaker.trip();
-                    break;
                 }
 
                 // Auto-refill: if pool is below 20% remaining, reset cursor.

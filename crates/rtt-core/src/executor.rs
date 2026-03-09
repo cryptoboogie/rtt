@@ -77,7 +77,7 @@ impl ExecutionThread {
                 rec.connection_index = handle.connection_index;
 
                 // Phase 2: Await response (network RTT)
-                let resp_result = rt.block_on(async { handle.collect().await });
+                let resp_result = rt.block_on(async { pool.collect(handle).await });
 
                 rec.t_first_resp_byte = clock::now_ns();
 

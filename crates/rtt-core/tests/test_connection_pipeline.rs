@@ -268,3 +268,20 @@ async fn connection_pool_health_check_confirms_warm_connections() {
         "all warmed connections should pass health checks"
     );
 }
+
+/// TEST: Detailed health checks report one status per warmed connection.
+#[tokio::test]
+async fn connection_pool_health_check_reports_each_connection() {
+    let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 2, AddressFamily::Auto);
+    pool.warmup().await.expect("warmup failed");
+
+    let statuses = pool.health_check_detailed().await;
+    assert_eq!(statuses.len(), 2, "should report both warm connections");
+    assert_eq!(statuses[0].index, 0);
+    assert_eq!(statuses[1].index, 1);
+    assert!(
+        statuses.iter().all(|status| status.healthy),
+        "all warmed connections should report healthy: {:?}",
+        statuses
+    );
+}

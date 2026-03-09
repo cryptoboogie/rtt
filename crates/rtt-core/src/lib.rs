@@ -14,6 +14,10 @@ pub mod queue;
 pub mod request;
 pub mod trigger;
 
+pub use clob_executor::{
+    process_one_clob, sign_and_dispatch, DispatchError, DispatchOutcome, PreSignedOrderPool,
+};
+
 #[cfg(test)]
 mod tests {
     #[test]

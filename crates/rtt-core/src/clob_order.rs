@@ -1,6 +1,7 @@
 use alloy::primitives::{Address, U256};
 use alloy::sol;
 use serde::Serialize;
+use std::fmt;
 
 use crate::trigger::{OrderType, Side};
 
@@ -54,6 +55,132 @@ pub enum SignatureType {
 
 /// USDC has 6 decimal places.
 const USDC_DECIMALS: u32 = 6;
+const BASE_UNIT_SCALE: u128 = 10u128.pow(USDC_DECIMALS);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AmountError {
+    InvalidFormat {
+        field: &'static str,
+        value: String,
+    },
+    UnsupportedPrecision {
+        field: &'static str,
+        value: String,
+        max_decimals: u32,
+    },
+    Overflow {
+        field: &'static str,
+        value: String,
+    },
+}
+
+impl fmt::Display for AmountError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidFormat { field, value } => {
+                write!(f, "{field} has invalid decimal format: {value}")
+            }
+            Self::UnsupportedPrecision {
+                field,
+                value,
+                max_decimals,
+            } => write!(
+                f,
+                "{field} exceeds supported precision ({max_decimals} decimals max): {value}"
+            ),
+            Self::Overflow { field, value } => {
+                write!(f, "{field} overflow while converting amount: {value}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AmountError {}
+
+fn parse_scaled_decimal(value: &str, field: &'static str) -> Result<u128, AmountError> {
+    if value.is_empty() {
+        return Err(AmountError::InvalidFormat {
+            field,
+            value: value.to_string(),
+        });
+    }
+
+    let mut whole = 0u128;
+    let mut fractional = 0u128;
+    let mut fractional_digits = 0u32;
+    let mut saw_dot = false;
+    let mut saw_digit = false;
+
+    for byte in value.bytes() {
+        match byte {
+            b'0'..=b'9' => {
+                saw_digit = true;
+                let digit = (byte - b'0') as u128;
+                if saw_dot {
+                    if fractional_digits >= USDC_DECIMALS {
+                        return Err(AmountError::UnsupportedPrecision {
+                            field,
+                            value: value.to_string(),
+                            max_decimals: USDC_DECIMALS,
+                        });
+                    }
+                    fractional = fractional
+                        .checked_mul(10)
+                        .and_then(|scaled| scaled.checked_add(digit))
+                        .ok_or_else(|| AmountError::Overflow {
+                            field,
+                            value: value.to_string(),
+                        })?;
+                    fractional_digits += 1;
+                } else {
+                    whole = whole
+                        .checked_mul(10)
+                        .and_then(|scaled| scaled.checked_add(digit))
+                        .ok_or_else(|| AmountError::Overflow {
+                            field,
+                            value: value.to_string(),
+                        })?;
+                }
+            }
+            b'.' if !saw_dot => saw_dot = true,
+            _ => {
+                return Err(AmountError::InvalidFormat {
+                    field,
+                    value: value.to_string(),
+                })
+            }
+        }
+    }
+
+    if !saw_digit {
+        return Err(AmountError::InvalidFormat {
+            field,
+            value: value.to_string(),
+        });
+    }
+
+    let scaled_whole = whole
+        .checked_mul(BASE_UNIT_SCALE)
+        .ok_or_else(|| AmountError::Overflow {
+            field,
+            value: value.to_string(),
+        })?;
+    let fractional_scale = 10u128.pow(USDC_DECIMALS - fractional_digits);
+    let scaled_fractional =
+        fractional
+            .checked_mul(fractional_scale)
+            .ok_or_else(|| AmountError::Overflow {
+                field,
+                value: value.to_string(),
+            })?;
+
+    scaled_whole
+        .checked_add(scaled_fractional)
+        .ok_or_else(|| AmountError::Overflow {
+            field,
+            value: value.to_string(),
+        })
+}
 
 /// Compute maker and taker amounts from price, size, and side.
 ///
@@ -61,17 +188,24 @@ const USDC_DECIMALS: u32 = 6;
 /// For SELL: maker sells tokens (size), taker pays USDC (price * size).
 ///
 /// All amounts are in 6-decimal fixed point (USDC units, 1e6 = $1).
-pub fn compute_amounts(price: &str, size: &str, side: ClobSide) -> (U256, U256) {
-    let price_f: f64 = price.parse().expect("invalid price");
-    let size_f: f64 = size.parse().expect("invalid size");
-    let scale = 10u64.pow(USDC_DECIMALS) as f64;
-
-    let usdc_amount = (price_f * size_f * scale).trunc() as u64;
-    let token_amount = (size_f * scale).trunc() as u64;
+pub fn compute_amounts(
+    price: &str,
+    size: &str,
+    side: ClobSide,
+) -> Result<(U256, U256), AmountError> {
+    let price_scaled = parse_scaled_decimal(price, "price")?;
+    let token_amount = parse_scaled_decimal(size, "size")?;
+    let usdc_amount = price_scaled
+        .checked_mul(token_amount)
+        .and_then(|value| value.checked_div(BASE_UNIT_SCALE))
+        .ok_or_else(|| AmountError::Overflow {
+            field: "makerAmount",
+            value: format!("price={price} size={size}"),
+        })?;
 
     match side {
-        ClobSide::Buy => (U256::from(usdc_amount), U256::from(token_amount)),
-        ClobSide::Sell => (U256::from(token_amount), U256::from(usdc_amount)),
+        ClobSide::Buy => Ok((U256::from(usdc_amount), U256::from(token_amount))),
+        ClobSide::Sell => Ok((U256::from(token_amount), U256::from(usdc_amount))),
     }
 }
 
@@ -110,9 +244,9 @@ impl OrderJson {
         let side_str = if order.side == 0 { "BUY" } else { "SELL" };
         Self {
             salt: order.salt.to::<u64>(),
-            maker: format!("{:?}", order.maker),
-            signer: format!("{:?}", order.signer),
-            taker: format!("{:?}", order.taker),
+            maker: order.maker.to_string(),
+            signer: order.signer.to_string(),
+            taker: order.taker.to_string(),
             token_id: order.tokenId.to_string(),
             maker_amount: order.makerAmount.to_string(),
             taker_amount: order.takerAmount.to_string(),
@@ -183,7 +317,7 @@ mod tests {
     #[test]
     fn test_buy_amounts() {
         // 100 shares @ $0.45 → maker=45_000_000 (USDC), taker=100_000_000 (tokens)
-        let (maker, taker) = compute_amounts("0.45", "100", ClobSide::Buy);
+        let (maker, taker) = compute_amounts("0.45", "100", ClobSide::Buy).unwrap();
         assert_eq!(maker, U256::from(45_000_000u64));
         assert_eq!(taker, U256::from(100_000_000u64));
     }
@@ -191,9 +325,27 @@ mod tests {
     #[test]
     fn test_sell_amounts() {
         // 100 shares @ $0.45 → maker=100_000_000 (tokens), taker=45_000_000 (USDC)
-        let (maker, taker) = compute_amounts("0.45", "100", ClobSide::Sell);
+        let (maker, taker) = compute_amounts("0.45", "100", ClobSide::Sell).unwrap();
         assert_eq!(maker, U256::from(100_000_000u64));
         assert_eq!(taker, U256::from(45_000_000u64));
+    }
+
+    #[test]
+    fn test_amount_precision_rejected() {
+        let err = compute_amounts("0.1234567", "1", ClobSide::Buy).unwrap_err();
+        assert!(matches!(
+            err,
+            AmountError::UnsupportedPrecision { field: "price", .. }
+        ));
+    }
+
+    #[test]
+    fn test_amount_invalid_format_rejected() {
+        let err = compute_amounts("abc", "1", ClobSide::Buy).unwrap_err();
+        assert!(matches!(
+            err,
+            AmountError::InvalidFormat { field: "price", .. }
+        ));
     }
 
     #[test]

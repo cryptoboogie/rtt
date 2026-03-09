@@ -10,16 +10,145 @@
 use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use bytes::Bytes;
-use http::{Method, Request, Uri};
-use std::time::{SystemTime, UNIX_EPOCH};
+use http::Request;
+use std::fmt;
 
-use crate::clob_auth::{build_l2_headers, L2Credentials};
+use crate::clob_auth::L2Credentials;
 use crate::clob_order::{SignatureType, SignedOrderPayload};
-use crate::clob_signer::{build_order, sign_order};
+use crate::clob_request::{
+    build_order_request_from_bytes, build_order_request_from_bytes_with_timestamp,
+    encode_order_payload, RequestBuildError,
+};
+use crate::clob_signer::{build_order, sign_order, BuildOrderError};
 use crate::clock;
-use crate::connection::{extract_pop, get_cf_ray, ConnectionPool};
+use crate::connection::{extract_pop, get_cf_ray, ConnectionError, ConnectionPool};
 use crate::metrics::TimestampRecord;
 use crate::trigger::TriggerMessage;
+
+#[derive(Debug)]
+pub enum DispatchError {
+    PoolExhausted,
+    BuildOrder(BuildOrderError),
+    Sign(String),
+    RequestBuild(RequestBuildError),
+    Connection(ConnectionError),
+}
+
+impl fmt::Display for DispatchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PoolExhausted => write!(f, "pre-signed order pool is exhausted"),
+            Self::BuildOrder(err) => err.fmt(f),
+            Self::Sign(err) => write!(f, "failed to sign order: {err}"),
+            Self::RequestBuild(err) => err.fmt(f),
+            Self::Connection(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for DispatchError {}
+
+#[derive(Debug)]
+pub enum DispatchOutcome {
+    Sent {
+        record: TimestampRecord,
+        body: Option<Vec<u8>>,
+    },
+    Rejected {
+        record: TimestampRecord,
+        error: DispatchError,
+    },
+}
+
+impl From<RequestBuildError> for DispatchError {
+    fn from(value: RequestBuildError) -> Self {
+        Self::RequestBuild(value)
+    }
+}
+
+impl From<BuildOrderError> for DispatchError {
+    fn from(value: BuildOrderError) -> Self {
+        Self::BuildOrder(value)
+    }
+}
+
+impl From<ConnectionError> for DispatchError {
+    fn from(value: ConnectionError) -> Self {
+        Self::Connection(value)
+    }
+}
+
+fn finalize_record(rec: &mut TimestampRecord, now: u64) {
+    if rec.t_buf_ready == 0 {
+        rec.t_buf_ready = now;
+    }
+    if rec.t_write_begin == 0 {
+        rec.t_write_begin = now;
+    }
+    if rec.t_write_end == 0 {
+        rec.t_write_end = now;
+    }
+    if rec.t_first_resp_byte == 0 {
+        rec.t_first_resp_byte = now;
+    }
+    if rec.t_headers_done == 0 {
+        rec.t_headers_done = now;
+    }
+}
+
+fn reject(mut rec: TimestampRecord, error: DispatchError, is_reconnect: bool) -> DispatchOutcome {
+    let now = clock::now_ns();
+    finalize_record(&mut rec, now);
+    rec.is_reconnect = is_reconnect;
+    DispatchOutcome::Rejected { record: rec, error }
+}
+
+fn send(mut rec: TimestampRecord, resp: http::Response<Bytes>) -> DispatchOutcome {
+    if let Some(cf_ray) = get_cf_ray(&resp) {
+        rec.cf_ray_pop = extract_pop(&cf_ray);
+    }
+    rec.t_headers_done = clock::now_ns();
+    rec.is_reconnect = false;
+    DispatchOutcome::Sent {
+        record: rec,
+        body: Some(resp.into_body().to_vec()),
+    }
+}
+
+fn connection_failure_is_reconnect(error: &ConnectionError) -> bool {
+    !matches!(error, ConnectionError::PoolEmpty)
+}
+
+fn dispatch_request(
+    pool: &ConnectionPool,
+    req: Request<Bytes>,
+    mut rec: TimestampRecord,
+    rt: &tokio::runtime::Runtime,
+) -> DispatchOutcome {
+    rec.t_write_begin = clock::now_ns();
+    let handle_result = rt.block_on(async { pool.send_start(req).await });
+    rec.t_write_end = clock::now_ns();
+
+    let handle = match handle_result {
+        Ok(handle) => handle,
+        Err(err) => {
+            let is_reconnect = connection_failure_is_reconnect(&err);
+            return reject(rec, err.into(), is_reconnect);
+        }
+    };
+
+    rec.connection_index = handle.connection_index;
+    let resp_result = rt.block_on(async { pool.collect(handle).await });
+    rec.t_first_resp_byte = clock::now_ns();
+
+    match resp_result {
+        Ok(resp) => send(rec, resp),
+        Err(err) => {
+            let is_reconnect = connection_failure_is_reconnect(&err);
+            reject(rec, err.into(), is_reconnect)
+        }
+    }
+}
 
 /// A pool of pre-signed orders ready for hot-path dispatch.
 ///
@@ -28,16 +157,16 @@ use crate::trigger::TriggerMessage;
 /// the EIP-712 signature) is NOT modified — changing any signed field would
 /// invalidate the signature.
 pub struct PreSignedOrderPool {
-    bodies: Vec<Vec<u8>>, // pre-serialized JSON bodies
+    bodies: Vec<Bytes>, // pre-serialized JSON bodies
     cursor: usize,
 }
 
 impl PreSignedOrderPool {
     /// Create from a vector of signed order payloads.
-    pub fn new(payloads: Vec<SignedOrderPayload>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(payloads: Vec<SignedOrderPayload>) -> Result<Self, RequestBuildError> {
         let mut bodies = Vec::with_capacity(payloads.len());
         for payload in &payloads {
-            let body = serde_json::to_vec(payload)?;
+            let body = encode_order_payload(payload)?;
             bodies.push(body);
         }
         Ok(Self { bodies, cursor: 0 })
@@ -57,33 +186,29 @@ impl PreSignedOrderPool {
     pub fn dispatch(
         &mut self,
         creds: &L2Credentials,
-    ) -> Result<Option<Request<Bytes>>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Request<Bytes>>, RequestBuildError> {
         if self.cursor >= self.bodies.len() {
             return Ok(None);
         }
 
-        let body = &self.bodies[self.cursor];
+        let body = self.bodies[self.cursor].clone();
         self.cursor += 1;
 
-        // Only recompute HMAC headers (includes fresh timestamp)
-        let body_str = std::str::from_utf8(body)?;
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_secs()
-            .to_string();
-        let headers = build_l2_headers(creds, &timestamp, "POST", "/order", body_str)?;
+        build_order_request_from_bytes(body, creds).map(Some)
+    }
 
-        let mut builder = Request::builder()
-            .method(Method::POST)
-            .uri(Uri::from_static("https://clob.polymarket.com/order"))
-            .header("content-type", "application/json");
-
-        for (name, value) in &headers {
-            builder = builder.header(name.as_str(), value.as_str());
+    pub fn dispatch_with_timestamp(
+        &mut self,
+        creds: &L2Credentials,
+        timestamp: &str,
+    ) -> Result<Option<Request<Bytes>>, RequestBuildError> {
+        if self.cursor >= self.bodies.len() {
+            return Ok(None);
         }
 
-        let req = builder.body(Bytes::from(body.clone()))?;
-        Ok(Some(req))
+        let body = self.bodies[self.cursor].clone();
+        self.cursor += 1;
+        build_order_request_from_bytes_with_timestamp(body, creds, timestamp).map(Some)
     }
 
     /// Reset cursor to reuse orders (e.g., after refill).
@@ -98,15 +223,15 @@ impl PreSignedOrderPool {
 }
 
 /// Process a single CLOB trigger: dispatch pre-signed order on warm connection.
-/// Returns a TimestampRecord with all checkpoints populated, plus the response body
-/// (if available) for logging/parsing by the caller.
+/// Returns a typed dispatch outcome so callers can distinguish reconnect/cold-path
+/// samples from build/pool/request failures without poisoning latency stats.
 pub fn process_one_clob(
     pool: &ConnectionPool,
     presigned: &mut PreSignedOrderPool,
     creds: &L2Credentials,
     msg: &TriggerMessage,
     rt: &tokio::runtime::Runtime,
-) -> (TimestampRecord, Option<Vec<u8>>) {
+) -> DispatchOutcome {
     let mut rec = TimestampRecord::default();
     rec.t_trigger_rx = msg.timestamp_ns;
     rec.t_dispatch_q = clock::now_ns();
@@ -117,63 +242,11 @@ pub fn process_one_clob(
 
     let req = match presigned.dispatch(creds) {
         Ok(Some(req)) => req,
-        Ok(None) => {
-            // Pool exhausted — mark as reconnect to filter from stats
-            rec.t_write_begin = clock::now_ns();
-            rec.t_write_end = rec.t_write_begin;
-            rec.t_first_resp_byte = rec.t_write_begin;
-            rec.t_headers_done = rec.t_write_begin;
-            rec.is_reconnect = true;
-            return (rec, None);
-        }
-        Err(_) => {
-            rec.t_write_begin = clock::now_ns();
-            rec.t_write_end = rec.t_write_begin;
-            rec.t_first_resp_byte = rec.t_write_begin;
-            rec.t_headers_done = rec.t_write_begin;
-            rec.is_reconnect = true;
-            return (rec, None);
-        }
+        Ok(None) => return reject(rec, DispatchError::PoolExhausted, false),
+        Err(err) => return reject(rec, err.into(), false),
     };
 
-    rec.t_write_begin = clock::now_ns();
-
-    // Phase 1: Submit frame to H2 pipeline
-    let handle_result = rt.block_on(async { pool.send_start(req).await });
-    rec.t_write_end = clock::now_ns();
-
-    match handle_result {
-        Ok(handle) => {
-            rec.connection_index = handle.connection_index;
-
-            // Phase 2: Await response
-            let resp_result = rt.block_on(async { handle.collect().await });
-            rec.t_first_resp_byte = clock::now_ns();
-
-            match resp_result {
-                Ok(resp) => {
-                    if let Some(cf_ray) = get_cf_ray(&resp) {
-                        rec.cf_ray_pop = extract_pop(&cf_ray);
-                    }
-                    rec.t_headers_done = clock::now_ns();
-                    rec.is_reconnect = false;
-                    let body = resp.into_body().to_vec();
-                    (rec, Some(body))
-                }
-                Err(_) => {
-                    rec.t_headers_done = clock::now_ns();
-                    rec.is_reconnect = true;
-                    (rec, None)
-                }
-            }
-        }
-        Err(_) => {
-            rec.t_first_resp_byte = clock::now_ns();
-            rec.t_headers_done = clock::now_ns();
-            rec.is_reconnect = true;
-            (rec, None)
-        }
-    }
+    dispatch_request(pool, req, rec, rt)
 }
 
 /// Sign an order at the trigger's price and dispatch via the connection pool.
@@ -195,124 +268,43 @@ pub fn sign_and_dispatch(
     sig_type: SignatureType,
     owner: &str,
     rt: &tokio::runtime::Runtime,
-) -> (TimestampRecord, Option<Vec<u8>>) {
+) -> DispatchOutcome {
     let mut rec = TimestampRecord::default();
     rec.t_trigger_rx = trigger.timestamp_ns;
     rec.t_dispatch_q = clock::now_ns();
     rec.t_exec_start = clock::now_ns();
 
     // Build order from trigger at trigger's price
-    let order = build_order(trigger, maker, signer_addr, fee_rate_bps, sig_type);
+    let order = match build_order(trigger, maker, signer_addr, fee_rate_bps, sig_type) {
+        Ok(order) => order,
+        Err(err) => return reject(rec, err.into(), false),
+    };
 
     // EIP-712 sign (async, measured separately)
     rec.t_sign_start = clock::now_ns();
     let sig = match rt.block_on(sign_order(signer, &order, is_neg_risk)) {
         Ok(sig) => sig,
-        Err(_) => {
+        Err(err) => {
             rec.t_sign_end = clock::now_ns();
-            rec.t_buf_ready = rec.t_sign_end;
-            rec.t_write_begin = rec.t_sign_end;
-            rec.t_write_end = rec.t_sign_end;
-            rec.t_first_resp_byte = rec.t_sign_end;
-            rec.t_headers_done = rec.t_sign_end;
-            rec.is_reconnect = true;
-            return (rec, None);
+            return reject(rec, DispatchError::Sign(err.to_string()), false);
         }
     };
     rec.t_sign_end = clock::now_ns();
 
-    // Build payload and serialize
+    // Build payload and serialize through the shared request encoder.
     let payload = SignedOrderPayload::new(&order, &sig, trigger.order_type, owner);
-    let body = match serde_json::to_vec(&payload) {
-        Ok(b) => b,
-        Err(_) => {
-            rec.t_buf_ready = clock::now_ns();
-            rec.t_write_begin = rec.t_buf_ready;
-            rec.t_write_end = rec.t_buf_ready;
-            rec.t_first_resp_byte = rec.t_buf_ready;
-            rec.t_headers_done = rec.t_buf_ready;
-            rec.is_reconnect = true;
-            return (rec, None);
-        }
+    let body = match encode_order_payload(&payload) {
+        Ok(body) => body,
+        Err(err) => return reject(rec, err.into(), false),
     };
 
-    // Build HTTP request with HMAC auth
-    let body_str = std::str::from_utf8(&body).unwrap_or("");
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        .to_string();
-    let headers = match build_l2_headers(creds, &timestamp, "POST", "/order", body_str) {
-        Ok(h) => h,
-        Err(_) => {
-            rec.t_buf_ready = clock::now_ns();
-            rec.t_write_begin = rec.t_buf_ready;
-            rec.t_write_end = rec.t_buf_ready;
-            rec.t_first_resp_byte = rec.t_buf_ready;
-            rec.t_headers_done = rec.t_buf_ready;
-            rec.is_reconnect = true;
-            return (rec, None);
-        }
-    };
-
-    let mut builder = Request::builder()
-        .method(Method::POST)
-        .uri(Uri::from_static("https://clob.polymarket.com/order"))
-        .header("content-type", "application/json");
-    for (name, value) in &headers {
-        builder = builder.header(name.as_str(), value.as_str());
-    }
-    let req = match builder.body(Bytes::from(body)) {
+    let req = match build_order_request_from_bytes(body, creds) {
         Ok(r) => r,
-        Err(_) => {
-            rec.t_buf_ready = clock::now_ns();
-            rec.t_write_begin = rec.t_buf_ready;
-            rec.t_write_end = rec.t_buf_ready;
-            rec.t_first_resp_byte = rec.t_buf_ready;
-            rec.t_headers_done = rec.t_buf_ready;
-            rec.is_reconnect = true;
-            return (rec, None);
-        }
+        Err(err) => return reject(rec, err.into(), false),
     };
 
     rec.t_buf_ready = clock::now_ns();
-    rec.t_write_begin = clock::now_ns();
-
-    // Dispatch via connection pool
-    let handle_result = rt.block_on(async { pool.send_start(req).await });
-    rec.t_write_end = clock::now_ns();
-
-    match handle_result {
-        Ok(handle) => {
-            rec.connection_index = handle.connection_index;
-            let resp_result = rt.block_on(async { handle.collect().await });
-            rec.t_first_resp_byte = clock::now_ns();
-
-            match resp_result {
-                Ok(resp) => {
-                    if let Some(cf_ray) = get_cf_ray(&resp) {
-                        rec.cf_ray_pop = extract_pop(&cf_ray);
-                    }
-                    rec.t_headers_done = clock::now_ns();
-                    rec.is_reconnect = false;
-                    let body = resp.into_body().to_vec();
-                    (rec, Some(body))
-                }
-                Err(_) => {
-                    rec.t_headers_done = clock::now_ns();
-                    rec.is_reconnect = true;
-                    (rec, None)
-                }
-            }
-        }
-        Err(_) => {
-            rec.t_first_resp_byte = clock::now_ns();
-            rec.t_headers_done = clock::now_ns();
-            rec.is_reconnect = true;
-            (rec, None)
-        }
-    }
+    dispatch_request(pool, req, rec, rt)
 }
 
 #[cfg(test)]
@@ -453,6 +445,22 @@ mod tests {
     }
 
     #[test]
+    fn test_presigned_pool_dispatch_reuses_cached_body_bytes() {
+        let payloads = test_payloads(1);
+        let mut pool = PreSignedOrderPool::new(payloads).unwrap();
+        let creds = test_creds();
+        let original_ptr = pool.bodies[0].as_ptr();
+
+        let req = pool.dispatch(&creds).unwrap().unwrap();
+
+        assert_eq!(
+            req.body().as_ptr(),
+            original_ptr,
+            "dispatch should reuse immutable Bytes storage"
+        );
+    }
+
+    #[test]
     fn test_sign_and_dispatch_uses_trigger_price() {
         // Verify that sign_and_dispatch builds an order at the trigger's price,
         // not some hardcoded config price. We test this by building an order
@@ -470,7 +478,7 @@ mod tests {
         };
 
         let maker = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
-        let order = build_order_fn(&trigger, maker, maker, 0, SignatureType::Eoa);
+        let order = build_order_fn(&trigger, maker, maker, 0, SignatureType::Eoa).unwrap();
 
         // Buy 50 @ 0.63 → makerAmount = 0.63 * 50 * 1e6 = 31_500_000
         assert_eq!(order.makerAmount, U256::from(31_500_000u64));
@@ -512,7 +520,8 @@ mod tests {
             timestamp_ns: 1000,
         };
 
-        let order = crate::clob_signer::build_order(&trigger, maker, maker, 0, SignatureType::Eoa);
+        let order =
+            crate::clob_signer::build_order(&trigger, maker, maker, 0, SignatureType::Eoa).unwrap();
 
         let t_start = crate::clock::now_ns();
         let sig = sign_order_fn(&signer, &order, false).await.unwrap();
@@ -612,7 +621,8 @@ mod tests {
             signer_addr,
             fee_rate_bps,
             signature_type,
-        );
+        )
+        .unwrap();
         let sig = sign_order(&signer, &order, is_neg_risk).await.unwrap();
         println!("Signature:  {}...{}", &sig[..10], &sig[sig.len() - 6..]);
 
@@ -631,37 +641,41 @@ mod tests {
         let creds_clone = creds.clone();
         let trigger_clone = trigger.clone();
 
-        let (rec, resp_body) = tokio::task::spawn_blocking(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
+        let (rec, resp_body) = tokio::task::spawn_blocking(
+            move || -> (TimestampRecord, (http::StatusCode, bytes::Bytes)) {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
 
-            // Manually do what process_one_clob does, but capture the response body
-            let mut rec = TimestampRecord::default();
-            rec.t_trigger_rx = trigger_clone.timestamp_ns;
-            rec.t_dispatch_q = clock::now_ns();
-            rec.t_exec_start = clock::now_ns();
-            rec.t_buf_ready = clock::now_ns();
+                // Manually do what process_one_clob does, but capture the response body
+                let mut rec = TimestampRecord::default();
+                rec.t_trigger_rx = trigger_clone.timestamp_ns;
+                rec.t_dispatch_q = clock::now_ns();
+                rec.t_exec_start = clock::now_ns();
+                rec.t_buf_ready = clock::now_ns();
 
-            let req = presigned.dispatch(&creds_clone).unwrap().unwrap();
-            rec.t_write_begin = clock::now_ns();
+                let req = presigned.dispatch(&creds_clone).unwrap().unwrap();
+                rec.t_write_begin = clock::now_ns();
 
-            let handle = rt
-                .block_on(async { conn_pool_clone.send_start(req).await })
-                .unwrap();
-            rec.t_write_end = clock::now_ns();
-            rec.connection_index = handle.connection_index;
+                let handle = rt
+                    .block_on(async { conn_pool_clone.send_start(req).await })
+                    .unwrap();
+                rec.t_write_end = clock::now_ns();
+                rec.connection_index = handle.connection_index;
 
-            let resp = rt.block_on(async { handle.collect().await }).unwrap();
-            rec.t_first_resp_byte = clock::now_ns();
+                let resp = rt
+                    .block_on(async { conn_pool_clone.collect(handle).await })
+                    .unwrap();
+                rec.t_first_resp_byte = clock::now_ns();
 
-            let status = resp.status();
-            let resp_bytes = resp.into_body();
-            rec.t_headers_done = clock::now_ns();
+                let status = resp.status();
+                let resp_bytes = resp.into_body();
+                rec.t_headers_done = clock::now_ns();
 
-            (rec, (status, resp_bytes))
-        })
+                (rec, (status, resp_bytes))
+            },
+        )
         .await
         .unwrap();
 
