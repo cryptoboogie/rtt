@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::connection::{AddressFamily, ConnectionPool, extract_pop, get_cf_ray};
+use crate::connection::{extract_pop, get_cf_ray, AddressFamily, ConnectionPool};
 use crate::executor::{ExecutionThread, IngressThread, MaintenanceThread};
 use crate::metrics::{StatsAggregator, StatsReport, TimestampRecord};
 use crate::queue::TriggerQueue;
@@ -198,8 +198,10 @@ pub fn print_report(result: &BenchmarkResult) {
         r.sample_count, r.reconnect_count
     );
 
-    println!("\n{:<25} {:>10} {:>10} {:>10} {:>10} {:>10}",
-        "Metric", "p50", "p95", "p99", "p99.9", "max");
+    println!(
+        "\n{:<25} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "Metric", "p50", "p95", "p99", "p99.9", "max"
+    );
     println!("{}", "-".repeat(85));
 
     let print_row = |name: &str, ps: &crate::metrics::PercentileSet| {
@@ -284,198 +286,5 @@ mod tests {
         assert_eq!(cfg.mode, BenchmarkMode::SingleShot);
         assert_eq!(cfg.sample_count, 100);
         assert_eq!(cfg.pool_size, 2);
-    }
-
-    #[tokio::test]
-    async fn single_shot_benchmark() {
-        let config = BenchmarkConfig {
-            mode: BenchmarkMode::SingleShot,
-            sample_count: 3,
-            pool_size: 1,
-            ..Default::default()
-        };
-        let result = run_benchmark(&config).await.expect("benchmark failed");
-        assert_eq!(result.records.len(), 3);
-        assert_eq!(result.report.sample_count + result.report.reconnect_count, 3);
-    }
-
-    #[tokio::test]
-    async fn random_cadence_benchmark() {
-        let config = BenchmarkConfig {
-            mode: BenchmarkMode::RandomCadence,
-            sample_count: 3,
-            pool_size: 1,
-            min_interval_ms: 50,
-            max_interval_ms: 100,
-            ..Default::default()
-        };
-        let result = run_benchmark(&config).await.expect("benchmark failed");
-        assert_eq!(result.records.len(), 3);
-    }
-
-    #[tokio::test]
-    async fn burst_race_benchmark() {
-        let config = BenchmarkConfig {
-            mode: BenchmarkMode::BurstRace,
-            sample_count: 6,
-            pool_size: 1,
-            burst_size: 3,
-            ..Default::default()
-        };
-        let result = run_benchmark(&config).await.expect("benchmark failed");
-        assert_eq!(result.records.len(), 6);
-    }
-
-    #[tokio::test]
-    async fn benchmark_timestamps_populated() {
-        let config = BenchmarkConfig {
-            mode: BenchmarkMode::SingleShot,
-            sample_count: 1,
-            pool_size: 1,
-            ..Default::default()
-        };
-        let result = run_benchmark(&config).await.expect("benchmark failed");
-        let rec = &result.records[0];
-        assert!(rec.t_trigger_rx > 0);
-        assert!(rec.t_exec_start > 0);
-        assert!(rec.t_write_begin > 0);
-        assert!(rec.t_write_end > 0);
-        assert!(rec.t_first_resp_byte > 0);
-        assert!(rec.t_headers_done > 0);
-    }
-
-    #[tokio::test]
-    async fn benchmark_pop_extracted() {
-        let config = BenchmarkConfig {
-            mode: BenchmarkMode::SingleShot,
-            sample_count: 2,
-            pool_size: 1,
-            ..Default::default()
-        };
-        let result = run_benchmark(&config).await.expect("benchmark failed");
-        // At least one record should have POP
-        let has_pop = result.records.iter().any(|r| !r.cf_ray_pop.is_empty());
-        assert!(has_pop, "no POP extracted from any record");
-        assert!(!result.pop_distribution.is_empty());
-    }
-
-    #[tokio::test]
-    async fn benchmark_warm_cold_separation() {
-        let config = BenchmarkConfig {
-            mode: BenchmarkMode::SingleShot,
-            sample_count: 3,
-            pool_size: 1,
-            ..Default::default()
-        };
-        let result = run_benchmark(&config).await.expect("benchmark failed");
-        // All samples should be warm (no reconnect on single-shot with warmed pool)
-        assert_eq!(result.report.reconnect_count, 0);
-        assert_eq!(result.report.sample_count, 3);
-    }
-
-    // === Protocol experiment tests ===
-
-    #[tokio::test]
-    async fn ipv4_forced_path() {
-        let config = BenchmarkConfig {
-            mode: BenchmarkMode::SingleShot,
-            sample_count: 1,
-            pool_size: 1,
-            address_family: AddressFamily::V4,
-            ..Default::default()
-        };
-        let result = run_benchmark(&config).await.expect("IPv4 benchmark failed");
-        assert_eq!(result.records.len(), 1);
-        assert!(!result.records[0].cf_ray_pop.is_empty());
-    }
-
-    #[tokio::test]
-    async fn ipv6_forced_path() {
-        // IPv6 may not be available, so we allow failure
-        let config = BenchmarkConfig {
-            mode: BenchmarkMode::SingleShot,
-            sample_count: 1,
-            pool_size: 1,
-            address_family: AddressFamily::V6,
-            ..Default::default()
-        };
-        match run_benchmark(&config).await {
-            Ok(result) => {
-                assert_eq!(result.records.len(), 1);
-            }
-            Err(_) => {
-                // IPv6 not available, that's OK
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn dual_connection_comparison() {
-        // Single connection
-        let config_single = BenchmarkConfig {
-            mode: BenchmarkMode::SingleShot,
-            sample_count: 2,
-            pool_size: 1,
-            ..Default::default()
-        };
-        let result_single = run_benchmark(&config_single).await.expect("single conn failed");
-        assert_eq!(result_single.records.len(), 2);
-
-        // Dual connection
-        let config_dual = BenchmarkConfig {
-            mode: BenchmarkMode::SingleShot,
-            sample_count: 2,
-            pool_size: 2,
-            ..Default::default()
-        };
-        let result_dual = run_benchmark(&config_dual).await.expect("dual conn failed");
-        assert_eq!(result_dual.records.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn dual_connection_burst_contention() {
-        // First, run single-shot as a baseline for latency comparison
-        let baseline_config = BenchmarkConfig {
-            mode: BenchmarkMode::SingleShot,
-            sample_count: 2,
-            pool_size: 2,
-            ..Default::default()
-        };
-        let baseline = run_benchmark(&baseline_config).await.expect("baseline failed");
-
-        // Now run burst with pool_size=2
-        let config = BenchmarkConfig {
-            mode: BenchmarkMode::BurstRace,
-            sample_count: 4,
-            pool_size: 2,
-            burst_size: 2,
-            ..Default::default()
-        };
-        let result = run_benchmark(&config).await.expect("burst benchmark failed");
-        assert_eq!(result.records.len(), 4);
-
-        // Assert distribution: both connection indices (0 and 1) must appear
-        let indices: std::collections::HashSet<usize> =
-            result.records.iter().map(|r| r.connection_index).collect();
-        assert!(
-            indices.contains(&0) && indices.contains(&1),
-            "Expected both connections used, got indices: {:?}",
-            indices,
-        );
-
-        // Assert no contention degradation: burst warm_ttfb (write_begin →
-        // first_resp_byte, pure network time excluding queue delay) should not
-        // be dramatically worse than baseline. A 3x blowup would indicate
-        // connection-level contention or deadlock rather than normal queuing.
-        let baseline_ttfb = baseline.report.warm_ttfb.p50;
-        let burst_ttfb = result.report.warm_ttfb.p50;
-        if baseline_ttfb > 0 {
-            assert!(
-                burst_ttfb < baseline_ttfb * 3,
-                "Burst warm_ttfb p50 ({}) >= 3x baseline ({}) — connection contention detected",
-                burst_ttfb,
-                baseline_ttfb,
-            );
-        }
     }
 }

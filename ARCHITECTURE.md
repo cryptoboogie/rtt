@@ -134,10 +134,11 @@ Derived metrics (all in nanoseconds):
 - Round-robin via `AtomicUsize`, reconnect on failure
 - `extract_pop(cf_ray)` — Parse Cloudflare POP from cf-ray header
 
-#### `request.rs` — Zero-allocation request template
+#### `request.rs` — Fixed-capacity request template
 - Fixed `[u8; 4096]` body with named patch slots
-- `register_patch(offset, length)` / `patch(slot, value)` for in-place mutation
-- `build_request()` → `Request<Bytes>` with headers
+- `register_patch(offset, length)` / `patch(slot, value)` for in-place updates in benchmark and executor scaffolding
+- `build_request()` copies the active body into `Request<Bytes>`
+- Production CLOB order dispatch does not mutate signed payloads through this type
 
 #### `clob_order.rs` — Polymarket order types
 - `Order` defined via alloy `sol!` macro (automatic EIP-712 struct hash)
@@ -164,8 +165,8 @@ Derived metrics (all in nanoseconds):
 
 #### `clob_request.rs` — Request building
 - `build_order_request(payload, creds)` — Full POST /order with fresh HMAC
-- `build_order_template(payload)` — Pre-serialize body, register salt patch slot
-- `build_request_from_template(template, creds)` — Hot-path: recompute HMAC only
+- Signed-payload mutation helpers are intentionally not public API
+- Live integration coverage for request/auth/transport lives under `crates/rtt-core/tests/`
 
 #### `clob_executor.rs` — Order dispatch (pre-signed and dynamic)
 ```rust
@@ -198,6 +199,7 @@ struct PreSignedOrderPool {
 #### `h3_stub.rs` — HTTP/3 placeholder
 - `probe_alt_svc()` confirms Cloudflare advertises h3 (it does)
 - Full QUIC client not implemented
+- `cargo test -p rtt-core --lib` remains offline because live H2/H3 coverage is kept under `crates/rtt-core/tests/`
 
 ### pm-data
 
@@ -541,11 +543,20 @@ cargo test --workspace
 # Unit tests only (no network)
 cargo test --workspace --lib
 
+# rtt-core offline unit tests
+cargo test -p rtt-core --lib
+
+# rtt-core live integration tests (no orders placed)
+cargo test -p rtt-core --test '*'
+
 # Single crate
 cargo test -p rtt-core
 cargo test -p pm-data
 cargo test -p pm-strategy
 cargo test -p pm-executor
+
+# Validate Polymarket credentials without placing an order
+cargo run -p pm-executor -- --validate-creds
 
 # Run pipeline in dry-run mode
 cargo run -p pm-executor
@@ -559,9 +570,17 @@ cargo run -p pm-executor -- --config my_config.toml
 # Benchmark connection latency
 cargo run -p rtt-bench -- --benchmark --samples 100
 
+# Benchmark trigger path smoke test
+cargo run -p rtt-bench --release -- --trigger-test --af auto
+
+# Benchmark comparison command for Spec 09 (keep address family fixed)
+cargo run -p rtt-bench --release -- --benchmark --mode single-shot --samples 100 --connections 2 --af auto
+
 # End-to-end test with real credentials (costs money)
 cargo test -p rtt-core -- --ignored test_clob_end_to_end_pipeline
 ```
+
+For latency-sensitive changes, benchmark baselines, and manual order-path sign-off rules, use [specs/09-rtt-core-refactor.md](/Users/sam/Desktop/Projects/rtt/specs/09-rtt-core-refactor.md) as the source of truth.
 
 ## Current Limitations & Known Issues
 

@@ -27,7 +27,9 @@ impl BacktestRunner {
     }
 
     /// Load snapshots from a JSON file.
-    pub fn load_snapshots(path: &Path) -> Result<Vec<OrderBookSnapshot>, Box<dyn std::error::Error>> {
+    pub fn load_snapshots(
+        path: &Path,
+    ) -> Result<Vec<OrderBookSnapshot>, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
         let snapshots: Vec<OrderBookSnapshot> = serde_json::from_str(&content)?;
         Ok(snapshots)

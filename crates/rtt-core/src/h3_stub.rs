@@ -14,8 +14,8 @@ pub fn status() -> H3Status {
 pub async fn probe_alt_svc(
     host: &str,
 ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
-    use bytes::Bytes;
     use crate::connection::{connect_h2, send_request, AddressFamily};
+    use bytes::Bytes;
     use http::Request;
 
     let mut sender = connect_h2(host, 443, AddressFamily::Auto).await?;
@@ -43,21 +43,5 @@ mod tests {
     #[test]
     fn status_is_not_implemented() {
         assert_eq!(status(), H3Status::NotImplemented);
-    }
-
-    #[tokio::test]
-    async fn probe_detects_alt_svc() {
-        // clob.polymarket.com is behind Cloudflare which advertises h3
-        match probe_alt_svc("clob.polymarket.com").await {
-            Ok(Some(alt_svc)) => {
-                assert!(alt_svc.contains("h3"), "alt-svc should contain h3: {}", alt_svc);
-            }
-            Ok(None) => {
-                // h3 not advertised, that's fine
-            }
-            Err(e) => {
-                panic!("probe failed: {}", e);
-            }
-        }
     }
 }

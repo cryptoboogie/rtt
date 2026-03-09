@@ -1,5 +1,5 @@
-use pm_strategy::*;
 use pm_strategy::threshold::ThresholdStrategy;
+use pm_strategy::*;
 
 fn make_snapshot(bid: &str, ask: &str) -> OrderBookSnapshot {
     OrderBookSnapshot {
@@ -132,8 +132,14 @@ fn threshold_ignores_wrong_asset() {
 
     let snap = OrderBookSnapshot {
         asset_id: "token_xyz".to_string(),
-        best_bid: Some(PriceLevel { price: "0.30".to_string(), size: "100".to_string() }),
-        best_ask: Some(PriceLevel { price: "0.35".to_string(), size: "100".to_string() }),
+        best_bid: Some(PriceLevel {
+            price: "0.30".to_string(),
+            size: "100".to_string(),
+        }),
+        best_ask: Some(PriceLevel {
+            price: "0.35".to_string(),
+            size: "100".to_string(),
+        }),
         timestamp_ms: 1700000000000,
         hash: "h".to_string(),
     };

@@ -5,9 +5,8 @@ use alloy::sol_types::eip712_domain;
 use alloy::sol_types::SolStruct;
 
 use crate::clob_order::{
-    ClobSide, Order, SignatureType, SignedOrderPayload,
+    compute_amounts, generate_salt, ClobSide, Order, SignatureType, SignedOrderPayload,
     EXCHANGE_ADDRESS, NEG_RISK_EXCHANGE_ADDRESS,
-    compute_amounts, generate_salt,
 };
 use crate::trigger::TriggerMessage;
 
@@ -55,8 +54,8 @@ pub fn build_order(
 ) -> Order {
     let clob_side = ClobSide::from(trigger.side);
     let (maker_amount, taker_amount) = compute_amounts(&trigger.price, &trigger.size, clob_side);
-    let token_id = U256::from_str_radix(trigger.token_id.as_str(), 10)
-        .unwrap_or_else(|_| U256::from(0u64));
+    let token_id =
+        U256::from_str_radix(trigger.token_id.as_str(), 10).unwrap_or_else(|_| U256::from(0u64));
 
     Order {
         salt: U256::from(generate_salt()),
@@ -145,7 +144,11 @@ mod tests {
         assert!(sig.starts_with("0x"), "signature should start with 0x");
         // 0x + 130 hex chars (65 bytes = r[32] + s[32] + v[1])
         // 0x + 130 or 132 hex chars depending on v encoding
-        assert!(sig.len() >= 132 && sig.len() <= 134, "unexpected sig length {}", sig.len());
+        assert!(
+            sig.len() >= 132 && sig.len() <= 134,
+            "unexpected sig length {}",
+            sig.len()
+        );
     }
 
     #[tokio::test]
@@ -208,9 +211,19 @@ mod tests {
             order_type: OrderType::FOK,
             timestamp_ns: 0,
         };
-        let batch = presign_batch(&signer, &trigger, maker, maker, 0, false, SignatureType::Eoa, "owner-uuid", 10)
-            .await
-            .unwrap();
+        let batch = presign_batch(
+            &signer,
+            &trigger,
+            maker,
+            maker,
+            0,
+            false,
+            SignatureType::Eoa,
+            "owner-uuid",
+            10,
+        )
+        .await
+        .unwrap();
         assert_eq!(batch.len(), 10);
 
         // All should have different salts

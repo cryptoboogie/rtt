@@ -45,9 +45,7 @@ port = 9090
 
 Create `crates/pm-executor/src/health_server.rs`:
 
-Uses `axum` (lightweight, tokio-native) or raw `hyper` (already a dependency).
-
-**Recommended: raw hyper** — we already depend on it, no new dependency.
+Uses raw `hyper` (already a dependency).
 
 ```rust
 pub async fn run_health_server(
@@ -132,4 +130,4 @@ Both should coexist.
 - Do NOT add authentication to the health endpoint (internal network only)
 - Do NOT serve any other endpoints (no API, no dashboard)
 - Do NOT add WebSocket status if Spec 01 isn't done yet — degrade gracefully
-- Prefer `hyper` over `axum` to avoid new dependencies
+- Prefer raw `hyper`; do not add a framework layer for this endpoint

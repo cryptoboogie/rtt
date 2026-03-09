@@ -14,8 +14,8 @@
 //! best_bid and best_ask to decide whether to trade. If the order
 //! book is wrong, the strategy makes wrong decisions.
 
-use pm_data::OrderBookManager;
 use pm_data::types::{BookUpdate, PriceChangeBatchEntry, Side, WsOrderBookLevel};
+use pm_data::OrderBookManager;
 
 /// TEST: Full lifecycle of an order book through multiple updates.
 ///
@@ -41,25 +41,64 @@ fn orderbook_tracks_full_lifecycle_of_updates() {
         market: "0xmarket".to_string(),
         timestamp: "1700000000000".to_string(),
         bids: vec![
-            WsOrderBookLevel { price: "0.55".to_string(), size: "100".to_string() },
-            WsOrderBookLevel { price: "0.54".to_string(), size: "200".to_string() },
-            WsOrderBookLevel { price: "0.53".to_string(), size: "300".to_string() },
+            WsOrderBookLevel {
+                price: "0.55".to_string(),
+                size: "100".to_string(),
+            },
+            WsOrderBookLevel {
+                price: "0.54".to_string(),
+                size: "200".to_string(),
+            },
+            WsOrderBookLevel {
+                price: "0.53".to_string(),
+                size: "300".to_string(),
+            },
         ],
         asks: vec![
-            WsOrderBookLevel { price: "0.56".to_string(), size: "150".to_string() },
-            WsOrderBookLevel { price: "0.57".to_string(), size: "250".to_string() },
+            WsOrderBookLevel {
+                price: "0.56".to_string(),
+                size: "150".to_string(),
+            },
+            WsOrderBookLevel {
+                price: "0.57".to_string(),
+                size: "250".to_string(),
+            },
         ],
         hash: Some("hash_snap".to_string()),
     };
     mgr.apply_book_update(&initial);
 
     let snap = mgr.get_snapshot("asset1").unwrap();
-    assert_eq!(snap.best_bid.as_ref().unwrap().price, "0.55", "step 1: best bid");
-    assert_eq!(snap.best_bid.as_ref().unwrap().size, "100", "step 1: bid size");
-    assert_eq!(snap.best_ask.as_ref().unwrap().price, "0.56", "step 1: best ask");
-    assert_eq!(snap.best_ask.as_ref().unwrap().size, "150", "step 1: ask size");
-    assert_eq!(mgr.bid_count("asset1"), 3, "step 1: should have 3 bid levels");
-    assert_eq!(mgr.ask_count("asset1"), 2, "step 1: should have 2 ask levels");
+    assert_eq!(
+        snap.best_bid.as_ref().unwrap().price,
+        "0.55",
+        "step 1: best bid"
+    );
+    assert_eq!(
+        snap.best_bid.as_ref().unwrap().size,
+        "100",
+        "step 1: bid size"
+    );
+    assert_eq!(
+        snap.best_ask.as_ref().unwrap().price,
+        "0.56",
+        "step 1: best ask"
+    );
+    assert_eq!(
+        snap.best_ask.as_ref().unwrap().size,
+        "150",
+        "step 1: ask size"
+    );
+    assert_eq!(
+        mgr.bid_count("asset1"),
+        3,
+        "step 1: should have 3 bid levels"
+    );
+    assert_eq!(
+        mgr.ask_count("asset1"),
+        2,
+        "step 1: should have 2 ask levels"
+    );
 
     // --- Step 2: Price change — new tighter ask at 0.545 ---
     // Someone placed a lower ask, tightening the spread.
@@ -75,8 +114,16 @@ fn orderbook_tracks_full_lifecycle_of_updates() {
     mgr.apply_price_change(&tighter_ask, 1700000001000);
 
     let snap = mgr.get_snapshot("asset1").unwrap();
-    assert_eq!(snap.best_ask.as_ref().unwrap().price, "0.545", "step 2: ask tightened");
-    assert_eq!(snap.best_bid.as_ref().unwrap().price, "0.55", "step 2: bid unchanged");
+    assert_eq!(
+        snap.best_ask.as_ref().unwrap().price,
+        "0.545",
+        "step 2: ask tightened"
+    );
+    assert_eq!(
+        snap.best_bid.as_ref().unwrap().price,
+        "0.55",
+        "step 2: bid unchanged"
+    );
     assert_eq!(mgr.ask_count("asset1"), 3, "step 2: now 3 ask levels");
 
     // --- Step 3: Price change — bid size increases (liquidity added) ---
@@ -92,7 +139,11 @@ fn orderbook_tracks_full_lifecycle_of_updates() {
     mgr.apply_price_change(&more_bid, 1700000002000);
 
     let snap = mgr.get_snapshot("asset1").unwrap();
-    assert_eq!(snap.best_bid.as_ref().unwrap().size, "500", "step 3: bid size increased");
+    assert_eq!(
+        snap.best_bid.as_ref().unwrap().size,
+        "500",
+        "step 3: bid size increased"
+    );
     assert_eq!(snap.hash, "hash_pc2", "step 3: hash updated");
 
     // --- Step 4: Price change — top bid removed (size=0) ---
@@ -108,27 +159,45 @@ fn orderbook_tracks_full_lifecycle_of_updates() {
     mgr.apply_price_change(&remove_top_bid, 1700000003000);
 
     let snap = mgr.get_snapshot("asset1").unwrap();
-    assert_eq!(snap.best_bid.as_ref().unwrap().price, "0.54", "step 4: best bid dropped to 0.54");
-    assert_eq!(mgr.bid_count("asset1"), 2, "step 4: only 2 bid levels remain");
+    assert_eq!(
+        snap.best_bid.as_ref().unwrap().price,
+        "0.54",
+        "step 4: best bid dropped to 0.54"
+    );
+    assert_eq!(
+        mgr.bid_count("asset1"),
+        2,
+        "step 4: only 2 bid levels remain"
+    );
 
     // --- Step 5: Full snapshot replaces everything ---
     let new_snap = BookUpdate {
         asset_id: "asset1".to_string(),
         market: "0xmarket".to_string(),
         timestamp: "1700000010000".to_string(),
-        bids: vec![
-            WsOrderBookLevel { price: "0.60".to_string(), size: "1000".to_string() },
-        ],
-        asks: vec![
-            WsOrderBookLevel { price: "0.61".to_string(), size: "900".to_string() },
-        ],
+        bids: vec![WsOrderBookLevel {
+            price: "0.60".to_string(),
+            size: "1000".to_string(),
+        }],
+        asks: vec![WsOrderBookLevel {
+            price: "0.61".to_string(),
+            size: "900".to_string(),
+        }],
         hash: Some("hash_new".to_string()),
     };
     mgr.apply_book_update(&new_snap);
 
     let snap = mgr.get_snapshot("asset1").unwrap();
-    assert_eq!(snap.best_bid.as_ref().unwrap().price, "0.60", "step 5: full reset");
-    assert_eq!(snap.best_ask.as_ref().unwrap().price, "0.61", "step 5: full reset");
+    assert_eq!(
+        snap.best_bid.as_ref().unwrap().price,
+        "0.60",
+        "step 5: full reset"
+    );
+    assert_eq!(
+        snap.best_ask.as_ref().unwrap().price,
+        "0.61",
+        "step 5: full reset"
+    );
     assert_eq!(mgr.bid_count("asset1"), 1, "step 5: only 1 bid after reset");
     assert_eq!(mgr.ask_count("asset1"), 1, "step 5: only 1 ask after reset");
 }
@@ -151,16 +220,28 @@ fn multiple_assets_tracked_independently() {
         asset_id: "market_A".to_string(),
         market: "0xA".to_string(),
         timestamp: "1000".to_string(),
-        bids: vec![WsOrderBookLevel { price: "0.40".to_string(), size: "100".to_string() }],
-        asks: vec![WsOrderBookLevel { price: "0.45".to_string(), size: "200".to_string() }],
+        bids: vec![WsOrderBookLevel {
+            price: "0.40".to_string(),
+            size: "100".to_string(),
+        }],
+        asks: vec![WsOrderBookLevel {
+            price: "0.45".to_string(),
+            size: "200".to_string(),
+        }],
         hash: Some("hashA".to_string()),
     };
     let book_b = BookUpdate {
         asset_id: "market_B".to_string(),
         market: "0xB".to_string(),
         timestamp: "1000".to_string(),
-        bids: vec![WsOrderBookLevel { price: "0.70".to_string(), size: "500".to_string() }],
-        asks: vec![WsOrderBookLevel { price: "0.75".to_string(), size: "600".to_string() }],
+        bids: vec![WsOrderBookLevel {
+            price: "0.70".to_string(),
+            size: "500".to_string(),
+        }],
+        asks: vec![WsOrderBookLevel {
+            price: "0.75".to_string(),
+            size: "600".to_string(),
+        }],
         hash: Some("hashB".to_string()),
     };
 
@@ -187,12 +268,20 @@ fn multiple_assets_tracked_independently() {
 
     // market_A should be updated.
     let snap_a = mgr.get_snapshot("market_A").unwrap();
-    assert_eq!(mgr.bid_count("market_A"), 2, "market_A should have 2 bids now");
+    assert_eq!(
+        mgr.bid_count("market_A"),
+        2,
+        "market_A should have 2 bids now"
+    );
     assert_eq!(snap_a.hash, "hashA2");
 
     // market_B should be untouched.
     let snap_b = mgr.get_snapshot("market_B").unwrap();
-    assert_eq!(snap_b.best_bid.as_ref().unwrap().price, "0.70", "market_B should be unchanged");
+    assert_eq!(
+        snap_b.best_bid.as_ref().unwrap().price,
+        "0.70",
+        "market_B should be unchanged"
+    );
     assert_eq!(snap_b.hash, "hashB", "market_B hash should be unchanged");
 
     // Nonexistent market returns None.
@@ -220,8 +309,14 @@ fn concurrent_read_during_write_is_safe() {
         asset_id: "asset1".to_string(),
         market: "0xmarket".to_string(),
         timestamp: "1000".to_string(),
-        bids: vec![WsOrderBookLevel { price: "0.50".to_string(), size: "100".to_string() }],
-        asks: vec![WsOrderBookLevel { price: "0.55".to_string(), size: "100".to_string() }],
+        bids: vec![WsOrderBookLevel {
+            price: "0.50".to_string(),
+            size: "100".to_string(),
+        }],
+        asks: vec![WsOrderBookLevel {
+            price: "0.55".to_string(),
+            size: "100".to_string(),
+        }],
         hash: Some("h0".to_string()),
     };
     mgr.apply_book_update(&initial);

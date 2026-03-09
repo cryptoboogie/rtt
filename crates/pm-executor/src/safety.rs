@@ -1,6 +1,6 @@
+use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::fmt;
 
 // ---------------------------------------------------------------------------
 // CircuitBreaker
@@ -83,7 +83,9 @@ impl CircuitBreaker {
         }
 
         // Atomically increment USD committed
-        let prev_usd = self.usd_committed_cents.fetch_add(usd_cents, Ordering::AcqRel);
+        let prev_usd = self
+            .usd_committed_cents
+            .fetch_add(usd_cents, Ordering::AcqRel);
         if prev_usd + usd_cents > self.max_usd_cents {
             self.tripped.store(true, Ordering::Release);
             return Err(CircuitBreakerTripped {
@@ -234,7 +236,7 @@ mod tests {
 
         assert!(cb.check_and_record("0.50", "10").is_ok()); // $5 committed
         assert!(cb.check_and_record("0.50", "10").is_ok()); // $10 committed
-        // $15 would exceed $10 limit
+                                                            // $15 would exceed $10 limit
         assert!(cb.check_and_record("0.50", "10").is_err());
         assert!(cb.is_tripped());
     }
@@ -245,7 +247,7 @@ mod tests {
 
         assert!(cb.check_and_record("0.50", "10").is_ok());
         assert!(cb.check_and_record("0.50", "10").is_err()); // trips
-        // All subsequent
+                                                             // All subsequent
         assert!(cb.check_and_record("0.01", "1").is_err());
         assert!(cb.check_and_record("0.01", "1").is_err());
     }

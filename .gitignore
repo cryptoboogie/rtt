@@ -14,3 +14,4 @@ SESSION_*.md
 DEPLOY_*.md
 BTC_UPDOWN_*.md
 .test_binary_path
+.claude/

@@ -23,11 +23,19 @@ fn main() {
         .position(|a| a == "--config")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .or_else(|| args.iter().find(|a| !a.starts_with('-') && *a != &args[0]).map(PathBuf::from))
+        .or_else(|| {
+            args.iter()
+                .find(|a| !a.starts_with('-') && *a != &args[0])
+                .map(PathBuf::from)
+        })
         .unwrap_or_else(|| PathBuf::from("config.toml"));
 
     let config = ExecutorConfig::load(&config_path).unwrap_or_else(|e| {
-        eprintln!("Failed to load config from {}: {}", config_path.display(), e);
+        eprintln!(
+            "Failed to load config from {}: {}",
+            config_path.display(),
+            e
+        );
         std::process::exit(1);
     });
 
@@ -37,12 +45,11 @@ fn main() {
 
     if validate_creds_only {
         tracing::info!("Validating credentials...");
-        let (l2_creds, _) =
-            execution::build_credentials(&config.credentials, false)
-                .unwrap_or_else(|e| {
-                    tracing::error!("Credential error: {}", e);
-                    std::process::exit(1);
-                });
+        let (l2_creds, _) = execution::build_credentials(&config.credentials, false)
+            .unwrap_or_else(|e| {
+                tracing::error!("Credential error: {}", e);
+                std::process::exit(1);
+            });
         match rt.block_on(rtt_core::clob_auth::validate_credentials(&l2_creds)) {
             Ok(()) => {
                 tracing::info!("Credentials validated successfully");
@@ -70,11 +77,12 @@ async fn run(config: ExecutorConfig) {
 
     // Build credentials (validates for live mode)
     let (l2_creds, signer) =
-        execution::build_credentials(&config.credentials, config.execution.dry_run)
-            .unwrap_or_else(|e| {
+        execution::build_credentials(&config.credentials, config.execution.dry_run).unwrap_or_else(
+            |e| {
                 tracing::error!("Credential error: {}", e);
                 std::process::exit(1);
-            });
+            },
+        );
 
     // Build strategy
     let strategy = config.strategy.build_strategy().unwrap_or_else(|e| {
@@ -236,11 +244,8 @@ async fn run(config: ExecutorConfig) {
     ));
 
     // Start strategy runner
-    let mut runner = pm_strategy::runner::StrategyRunner::new(
-        strategy,
-        snapshot_mpsc_rx,
-        trigger_mpsc_tx,
-    );
+    let mut runner =
+        pm_strategy::runner::StrategyRunner::new(strategy, snapshot_mpsc_rx, trigger_mpsc_tx);
     let strategy_handle = tokio::spawn(async move {
         runner.run().await;
     });

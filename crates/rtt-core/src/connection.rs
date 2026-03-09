@@ -50,9 +50,8 @@ pub fn resolve(host: &str, port: u16, af: AddressFamily) -> std::io::Result<Vec<
 }
 
 fn make_tls_config() -> Arc<ClientConfig> {
-    let root_store = rustls::RootCertStore::from_iter(
-        webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
-    );
+    let root_store =
+        rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let config = ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth();
@@ -123,13 +122,16 @@ pub fn get_cf_ray(resp: &Response<Bytes>) -> Option<String> {
 /// Handle returned by `send_start`. The H2 frame has been dispatched;
 /// call `collect()` to await the response.
 pub struct SendHandle {
-    resp_future: Pin<Box<dyn Future<Output = hyper::Result<hyper::Response<hyper::body::Incoming>>> + Send>>,
+    resp_future:
+        Pin<Box<dyn Future<Output = hyper::Result<hyper::Response<hyper::body::Incoming>>> + Send>>,
     pub connection_index: usize,
 }
 
 impl SendHandle {
     /// Await the response and collect the body.
-    pub async fn collect(self) -> Result<Response<Bytes>, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn collect(
+        self,
+    ) -> Result<Response<Bytes>, Box<dyn std::error::Error + Send + Sync>> {
         let resp = self.resp_future.await?;
         let (parts, body) = resp.into_parts();
         let body_bytes = body.collect().await?.to_bytes();
@@ -272,137 +274,20 @@ mod tests {
     }
 
     #[test]
-    fn resolve_auto() {
-        let addrs = resolve("clob.polymarket.com", 443, AddressFamily::Auto).unwrap();
-        assert!(!addrs.is_empty());
+    fn resolve_ip_literal_v4() {
+        let addrs = resolve("127.0.0.1", 443, AddressFamily::Auto).unwrap();
+        assert_eq!(addrs.len(), 1);
+        assert!(addrs[0].is_ipv4());
     }
 
     #[test]
-    fn resolve_v4() {
-        let addrs = resolve("clob.polymarket.com", 443, AddressFamily::V4).unwrap();
+    fn resolve_filters_requested_family() {
+        let addrs = resolve("127.0.0.1", 443, AddressFamily::V4).unwrap();
         assert!(addrs.iter().all(|a| a.is_ipv4()));
-    }
+        assert!(resolve("127.0.0.1", 443, AddressFamily::V6).is_err());
 
-    #[test]
-    fn resolve_v6_may_fail() {
-        let _ = resolve("clob.polymarket.com", 443, AddressFamily::V6);
-    }
-
-    #[tokio::test]
-    async fn connect_and_send_request() {
-        let mut sender = connect_h2("clob.polymarket.com", 443, AddressFamily::Auto)
-            .await
-            .expect("failed to connect");
-
-        let req = Request::builder()
-            .method("GET")
-            .uri("/")
-            .header("host", "clob.polymarket.com")
-            .body(Bytes::new())
-            .unwrap();
-
-        let resp = send_request(&mut sender, req).await.expect("request failed");
-        assert!(resp.status().is_success() || resp.status().is_client_error());
-
-        let cf_ray = get_cf_ray(&resp);
-        assert!(cf_ray.is_some(), "cf-ray header missing");
-        let pop = extract_pop(&cf_ray.unwrap());
-        assert!(!pop.is_empty(), "POP code empty");
-    }
-
-    #[tokio::test]
-    async fn h2_session_reuse() {
-        let mut sender = connect_h2("clob.polymarket.com", 443, AddressFamily::Auto)
-            .await
-            .expect("failed to connect");
-
-        for _ in 0..2 {
-            let req = Request::builder()
-                .method("GET")
-                .uri("/")
-                .header("host", "clob.polymarket.com")
-                .body(Bytes::new())
-                .unwrap();
-            let resp = send_request(&mut sender, req).await.expect("request failed");
-            assert!(resp.status().is_success() || resp.status().is_client_error());
-        }
-    }
-
-    #[tokio::test]
-    async fn connection_pool_warmup_and_send() {
-        let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 2, AddressFamily::Auto);
-        let warmed = pool.warmup().await.expect("warmup failed");
-        assert_eq!(warmed, 2);
-        assert_eq!(pool.pool_size(), 2);
-
-        let req = Request::builder()
-            .method("GET")
-            .uri("/")
-            .header("host", "clob.polymarket.com")
-            .body(Bytes::new())
-            .unwrap();
-        let (resp, _idx) = pool.send(req).await.expect("send failed");
-        assert!(resp.status().is_success() || resp.status().is_client_error());
-    }
-
-    #[tokio::test]
-    async fn send_returns_connection_index() {
-        let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 2, AddressFamily::Auto);
-        pool.warmup().await.expect("warmup failed");
-
-        // First send should use index 0, second should use index 1 (round-robin)
-        let req0 = Request::builder()
-            .method("GET")
-            .uri("/")
-            .header("host", "clob.polymarket.com")
-            .body(Bytes::new())
-            .unwrap();
-        let (_resp, idx0) = pool.send(req0).await.expect("send failed");
-        assert_eq!(idx0, 0);
-
-        let req1 = Request::builder()
-            .method("GET")
-            .uri("/")
-            .header("host", "clob.polymarket.com")
-            .body(Bytes::new())
-            .unwrap();
-        let (_resp, idx1) = pool.send(req1).await.expect("send failed");
-        assert_eq!(idx1, 1);
-    }
-
-    #[tokio::test]
-    async fn send_start_submits_then_collect_returns_response() {
-        let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 2, AddressFamily::Auto);
-        pool.warmup().await.expect("warmup failed");
-
-        let req = Request::builder()
-            .method("GET")
-            .uri("/")
-            .header("host", "clob.polymarket.com")
-            .body(Bytes::new())
-            .unwrap();
-
-        // send_start should return almost immediately (frame dispatched, not waiting for response)
-        let t0 = std::time::Instant::now();
-        let handle = pool.send_start(req).await.expect("send_start failed");
-        let submit_time = t0.elapsed();
-
-        // Frame dispatch should be < 1ms (no network wait)
-        assert!(submit_time.as_millis() < 1, "send_start took {}ms, expected <1ms", submit_time.as_millis());
-        assert_eq!(handle.connection_index, 0);
-
-        // collect waits for the actual response
-        let resp = handle.collect().await.expect("collect failed");
-        assert!(resp.status().is_success() || resp.status().is_client_error());
-        let cf_ray = get_cf_ray(&resp);
-        assert!(cf_ray.is_some(), "cf-ray header missing");
-    }
-
-    #[tokio::test]
-    async fn connection_pool_health_check() {
-        let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 2, AddressFamily::Auto);
-        pool.warmup().await.expect("warmup failed");
-        let healthy = pool.health_check().await;
-        assert_eq!(healthy, 2);
+        let addrs = resolve("::1", 443, AddressFamily::V6).unwrap();
+        assert!(addrs.iter().all(|a| a.is_ipv6()));
+        assert!(resolve("::1", 443, AddressFamily::V4).is_err());
     }
 }

@@ -1,5 +1,5 @@
-use rtt_core::trigger::{OrderBookSnapshot, TriggerMessage};
 use rtt_core::clock;
+use rtt_core::trigger::{OrderBookSnapshot, TriggerMessage};
 use tokio::sync::{broadcast, mpsc, watch};
 
 /// Bridges a broadcast::Receiver<OrderBookSnapshot> to an mpsc::Sender<OrderBookSnapshot>.
@@ -117,9 +117,9 @@ mod tests {
         mpsc_tx.send(trigger).await.unwrap();
 
         // Use spawn_blocking since crossbeam recv is sync/blocking
-        let received = tokio::task::spawn_blocking(move || {
-            crossbeam_rx.recv().unwrap()
-        }).await.unwrap();
+        let received = tokio::task::spawn_blocking(move || crossbeam_rx.recv().unwrap())
+            .await
+            .unwrap();
         assert_eq!(received.trigger_id, 1);
         assert_eq!(received.token_id, "tok");
         // timestamp_ns was re-stamped by the bridge (original was 0)

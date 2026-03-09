@@ -83,7 +83,10 @@ fn buy_threshold_fires_when_ask_drops_to_target() {
     // ask=0.40: below threshold, SHOULD fire again.
     let snap4 = make_snapshot("token_ABC", "0.38", "0.40");
     let trigger = strategy.on_book_update(&snap4);
-    assert!(trigger.is_some(), "ask=0.40 is below threshold — should fire");
+    assert!(
+        trigger.is_some(),
+        "ask=0.40 is below threshold — should fire"
+    );
     assert_eq!(trigger.unwrap().price, "0.40");
 }
 

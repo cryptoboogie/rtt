@@ -1,5 +1,5 @@
-use pm_strategy::*;
 use pm_strategy::spread::SpreadStrategy;
+use pm_strategy::*;
 
 fn make_snapshot(bid: &str, ask: &str) -> OrderBookSnapshot {
     OrderBookSnapshot {
@@ -117,7 +117,10 @@ fn spread_no_fire_on_one_sided_book() {
 
     let snap = OrderBookSnapshot {
         asset_id: "token_abc".to_string(),
-        best_bid: Some(PriceLevel { price: "0.44".to_string(), size: "100".to_string() }),
+        best_bid: Some(PriceLevel {
+            price: "0.44".to_string(),
+            size: "100".to_string(),
+        }),
         best_ask: None,
         timestamp_ms: 0,
         hash: "".to_string(),
@@ -137,8 +140,14 @@ fn spread_ignores_wrong_asset() {
 
     let snap = OrderBookSnapshot {
         asset_id: "token_xyz".to_string(),
-        best_bid: Some(PriceLevel { price: "0.49".to_string(), size: "100".to_string() }),
-        best_ask: Some(PriceLevel { price: "0.50".to_string(), size: "100".to_string() }),
+        best_bid: Some(PriceLevel {
+            price: "0.49".to_string(),
+            size: "100".to_string(),
+        }),
+        best_ask: Some(PriceLevel {
+            price: "0.50".to_string(),
+            size: "100".to_string(),
+        }),
         timestamp_ms: 0,
         hash: "".to_string(),
     };

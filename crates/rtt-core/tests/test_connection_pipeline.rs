@@ -15,7 +15,9 @@
 
 use bytes::Bytes;
 use http::Request;
-use rtt_core::connection::{extract_pop, get_cf_ray, AddressFamily, ConnectionPool};
+use rtt_core::connection::{
+    connect_h2, extract_pop, get_cf_ray, resolve, send_request, AddressFamily, ConnectionPool,
+};
 
 /// TEST: We can connect to Polymarket's CLOB server over HTTP/2.
 ///
@@ -38,7 +40,10 @@ async fn warm_connection_reaches_polymarket_and_identifies_datacenter() {
     // Create a pool with 1 connection and warm it up.
     // "Warming" means: DNS resolve → TCP connect → TLS handshake → H2 SETTINGS exchange.
     let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 1, AddressFamily::Auto);
-    let warm_count = pool.warmup().await.expect("warmup failed — cannot reach server");
+    let warm_count = pool
+        .warmup()
+        .await
+        .expect("warmup failed — cannot reach server");
     println!("Warmed:  {} connection(s)", warm_count);
     assert_eq!(warm_count, 1, "should warm exactly 1 connection");
 
@@ -51,7 +56,10 @@ async fn warm_connection_reaches_polymarket_and_identifies_datacenter() {
         .unwrap();
 
     let start = std::time::Instant::now();
-    let (resp, idx) = pool.send(req).await.expect("request failed on warm connection");
+    let (resp, idx) = pool
+        .send(req)
+        .await
+        .expect("request failed on warm connection");
     let rtt = start.elapsed();
 
     // The server should return some HTTP status (200, 404, etc.) — any response
@@ -73,6 +81,58 @@ async fn warm_connection_reaches_polymarket_and_identifies_datacenter() {
     println!("Conn:    index {}", idx);
     println!("RTT:     {:.2}ms", rtt.as_secs_f64() * 1000.0);
     println!("=== PASS ===\n");
+}
+
+/// TEST: DNS resolution works for the supported address-family modes.
+///
+/// This preserves the explicit live DNS checks that used to live under
+/// `src/connection.rs`, while keeping `cargo test --lib` offline.
+#[test]
+fn live_dns_resolution_supports_auto_and_ipv4() {
+    let auto_addrs =
+        resolve("clob.polymarket.com", 443, AddressFamily::Auto).expect("auto resolve failed");
+    assert!(
+        !auto_addrs.is_empty(),
+        "auto resolve should return at least one address"
+    );
+
+    let v4_addrs =
+        resolve("clob.polymarket.com", 443, AddressFamily::V4).expect("v4 resolve failed");
+    assert!(
+        v4_addrs.iter().all(|addr| addr.is_ipv4()),
+        "forced IPv4 resolution should only return IPv4 addresses",
+    );
+}
+
+/// TEST: IPv6 resolution is environment-dependent but should remain callable.
+#[test]
+fn live_dns_resolution_allows_ipv6_probe() {
+    let _ = resolve("clob.polymarket.com", 443, AddressFamily::V6);
+}
+
+/// TEST: A single warmed H2 session can serve multiple requests.
+#[tokio::test]
+async fn single_h2_session_reuses_tls_and_h2_state() {
+    let mut sender = connect_h2("clob.polymarket.com", 443, AddressFamily::Auto)
+        .await
+        .expect("failed to connect");
+
+    for _ in 0..2 {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("host", "clob.polymarket.com")
+            .body(Bytes::new())
+            .unwrap();
+        let resp = send_request(&mut sender, req)
+            .await
+            .expect("request failed");
+        assert!(
+            resp.status().is_success() || resp.status().is_client_error(),
+            "unexpected status: {}",
+            resp.status()
+        );
+    }
 }
 
 /// TEST: A pool of 2 warm connections can handle requests round-robin.
@@ -156,10 +216,7 @@ async fn frame_submission_is_microseconds_network_roundtrip_is_milliseconds() {
     // Phase 1: Submit the H2 frame. This should return very fast because
     // it only writes to the kernel's TCP send buffer, not waiting for a reply.
     let t_submit_start = std::time::Instant::now();
-    let handle = pool
-        .send_start(req)
-        .await
-        .expect("send_start failed");
+    let handle = pool.send_start(req).await.expect("send_start failed");
     let submit_time = t_submit_start.elapsed();
 
     // Phase 2: Wait for the actual server response. This involves
@@ -174,8 +231,14 @@ async fn frame_submission_is_microseconds_network_roundtrip_is_milliseconds() {
         resp.status()
     );
 
-    println!("Submit (send_start): {:>8.1}us", submit_time.as_secs_f64() * 1_000_000.0);
-    println!("Collect (response):  {:>8.1}ms", collect_time.as_secs_f64() * 1000.0);
+    println!(
+        "Submit (send_start): {:>8.1}us",
+        submit_time.as_secs_f64() * 1_000_000.0
+    );
+    println!(
+        "Collect (response):  {:>8.1}ms",
+        collect_time.as_secs_f64() * 1000.0
+    );
 
     // The submit should be orders of magnitude faster than the network RTT.
     // Submit: typically <1ms. Collect: typically 30-200ms.
@@ -186,6 +249,22 @@ async fn frame_submission_is_microseconds_network_roundtrip_is_milliseconds() {
         collect_time
     );
 
-    println!("Ratio:               {:.0}x faster", collect_time.as_secs_f64() / submit_time.as_secs_f64());
+    println!(
+        "Ratio:               {:.0}x faster",
+        collect_time.as_secs_f64() / submit_time.as_secs_f64()
+    );
     println!("=== PASS ===\n");
+}
+
+/// TEST: Pool health checks verify each warmed connection.
+#[tokio::test]
+async fn connection_pool_health_check_confirms_warm_connections() {
+    let mut pool = ConnectionPool::new("clob.polymarket.com", 443, 2, AddressFamily::Auto);
+    pool.warmup().await.expect("warmup failed");
+
+    let healthy = pool.health_check().await;
+    assert_eq!(
+        healthy, 2,
+        "all warmed connections should pass health checks"
+    );
 }

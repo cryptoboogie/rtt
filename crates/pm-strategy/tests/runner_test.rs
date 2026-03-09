@@ -1,7 +1,7 @@
-use pm_strategy::*;
 use pm_strategy::runner::StrategyRunner;
-use pm_strategy::threshold::ThresholdStrategy;
 use pm_strategy::spread::SpreadStrategy;
+use pm_strategy::threshold::ThresholdStrategy;
+use pm_strategy::*;
 use tokio::sync::mpsc;
 
 fn make_snapshot(asset: &str, bid: &str, ask: &str, ts: u64) -> OrderBookSnapshot {
@@ -41,9 +41,15 @@ async fn runner_forwards_trigger_from_threshold() {
     });
 
     // Send a snapshot that should NOT trigger (ask=0.45 > 0.40)
-    snap_tx.send(make_snapshot("token_abc", "0.44", "0.45", 1)).await.unwrap();
+    snap_tx
+        .send(make_snapshot("token_abc", "0.44", "0.45", 1))
+        .await
+        .unwrap();
     // Send a snapshot that SHOULD trigger (ask=0.39 <= 0.40)
-    snap_tx.send(make_snapshot("token_abc", "0.38", "0.39", 2)).await.unwrap();
+    snap_tx
+        .send(make_snapshot("token_abc", "0.38", "0.39", 2))
+        .await
+        .unwrap();
 
     // Drop sender to signal runner to stop
     drop(snap_tx);
@@ -79,11 +85,20 @@ async fn runner_forwards_multiple_triggers_from_spread() {
     });
 
     // Spread=0.04, no fire
-    snap_tx.send(make_snapshot("token_abc", "0.46", "0.50", 1)).await.unwrap();
+    snap_tx
+        .send(make_snapshot("token_abc", "0.46", "0.50", 1))
+        .await
+        .unwrap();
     // Spread=0.01, fires
-    snap_tx.send(make_snapshot("token_abc", "0.495", "0.505", 2)).await.unwrap();
+    snap_tx
+        .send(make_snapshot("token_abc", "0.495", "0.505", 2))
+        .await
+        .unwrap();
     // Spread=0.02, fires
-    snap_tx.send(make_snapshot("token_abc", "0.49", "0.51", 3)).await.unwrap();
+    snap_tx
+        .send(make_snapshot("token_abc", "0.49", "0.51", 3))
+        .await
+        .unwrap();
 
     drop(snap_tx);
     handle.await.unwrap();

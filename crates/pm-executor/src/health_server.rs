@@ -74,15 +74,17 @@ async fn handle_request(
 ) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
     match req.uri().path() {
         "/health" => Ok(health_response(&cb, &last_message_at)),
-        "/status" => Ok(status_response(&cb, &last_message_at, &reconnect_count, start_time)),
+        "/status" => Ok(status_response(
+            &cb,
+            &last_message_at,
+            &reconnect_count,
+            start_time,
+        )),
         _ => Ok(not_found_response()),
     }
 }
 
-fn health_response(
-    cb: &CircuitBreaker,
-    last_message_at: &Arc<AtomicU64>,
-) -> Response<Full<Bytes>> {
+fn health_response(cb: &CircuitBreaker, last_message_at: &Arc<AtomicU64>) -> Response<Full<Bytes>> {
     let tripped = cb.is_tripped();
     let lma = last_message_at.load(Ordering::Relaxed);
     let now_ms = std::time::SystemTime::now()
@@ -92,9 +94,15 @@ fn health_response(
     let stale = lma > 0 && (now_ms.saturating_sub(lma)) > 60_000;
 
     if tripped {
-        json_response(StatusCode::SERVICE_UNAVAILABLE, r#"{"status":"unhealthy","reason":"circuit breaker tripped"}"#)
+        json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"status":"unhealthy","reason":"circuit breaker tripped"}"#,
+        )
     } else if stale {
-        json_response(StatusCode::SERVICE_UNAVAILABLE, r#"{"status":"unhealthy","reason":"websocket data stale"}"#)
+        json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"status":"unhealthy","reason":"websocket data stale"}"#,
+        )
     } else {
         json_response(StatusCode::OK, r#"{"status":"ok"}"#)
     }

@@ -79,7 +79,10 @@ async fn main() {
     let cli = Cli::parse();
 
     if cli.trigger_test {
-        eprintln!("Running single trigger test against {}:{}...", cli.host, cli.port);
+        eprintln!(
+            "Running single trigger test against {}:{}...",
+            cli.host, cli.port
+        );
         let config = BenchmarkConfig {
             host: cli.host,
             port: cli.port,
@@ -121,8 +124,12 @@ async fn main() {
 
         eprintln!(
             "Running {:?} benchmark: {} samples, {} connections, host={}:{}, af={:?}",
-            config.mode, config.sample_count, config.pool_size,
-            config.host, config.port, config.address_family
+            config.mode,
+            config.sample_count,
+            config.pool_size,
+            config.host,
+            config.port,
+            config.address_family
         );
 
         match benchmark::run_benchmark(&config).await {

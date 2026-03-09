@@ -1,42 +1,72 @@
-use pm_strategy::*;
 use pm_strategy::backtest::BacktestRunner;
-use pm_strategy::threshold::ThresholdStrategy;
 use pm_strategy::spread::SpreadStrategy;
+use pm_strategy::threshold::ThresholdStrategy;
+use pm_strategy::*;
 
 fn sample_snapshots() -> Vec<OrderBookSnapshot> {
     vec![
         OrderBookSnapshot {
             asset_id: "token_abc".to_string(),
-            best_bid: Some(PriceLevel { price: "0.50".to_string(), size: "100".to_string() }),
-            best_ask: Some(PriceLevel { price: "0.55".to_string(), size: "100".to_string() }),
+            best_bid: Some(PriceLevel {
+                price: "0.50".to_string(),
+                size: "100".to_string(),
+            }),
+            best_ask: Some(PriceLevel {
+                price: "0.55".to_string(),
+                size: "100".to_string(),
+            }),
             timestamp_ms: 1000,
             hash: "h1".to_string(),
         },
         OrderBookSnapshot {
             asset_id: "token_abc".to_string(),
-            best_bid: Some(PriceLevel { price: "0.48".to_string(), size: "100".to_string() }),
-            best_ask: Some(PriceLevel { price: "0.52".to_string(), size: "100".to_string() }),
+            best_bid: Some(PriceLevel {
+                price: "0.48".to_string(),
+                size: "100".to_string(),
+            }),
+            best_ask: Some(PriceLevel {
+                price: "0.52".to_string(),
+                size: "100".to_string(),
+            }),
             timestamp_ms: 2000,
             hash: "h2".to_string(),
         },
         OrderBookSnapshot {
             asset_id: "token_abc".to_string(),
-            best_bid: Some(PriceLevel { price: "0.42".to_string(), size: "100".to_string() }),
-            best_ask: Some(PriceLevel { price: "0.44".to_string(), size: "100".to_string() }),
+            best_bid: Some(PriceLevel {
+                price: "0.42".to_string(),
+                size: "100".to_string(),
+            }),
+            best_ask: Some(PriceLevel {
+                price: "0.44".to_string(),
+                size: "100".to_string(),
+            }),
             timestamp_ms: 3000,
             hash: "h3".to_string(),
         },
         OrderBookSnapshot {
             asset_id: "token_abc".to_string(),
-            best_bid: Some(PriceLevel { price: "0.38".to_string(), size: "100".to_string() }),
-            best_ask: Some(PriceLevel { price: "0.40".to_string(), size: "100".to_string() }),
+            best_bid: Some(PriceLevel {
+                price: "0.38".to_string(),
+                size: "100".to_string(),
+            }),
+            best_ask: Some(PriceLevel {
+                price: "0.40".to_string(),
+                size: "100".to_string(),
+            }),
             timestamp_ms: 4000,
             hash: "h4".to_string(),
         },
         OrderBookSnapshot {
             asset_id: "token_abc".to_string(),
-            best_bid: Some(PriceLevel { price: "0.35".to_string(), size: "100".to_string() }),
-            best_ask: Some(PriceLevel { price: "0.37".to_string(), size: "100".to_string() }),
+            best_bid: Some(PriceLevel {
+                price: "0.35".to_string(),
+                size: "100".to_string(),
+            }),
+            best_ask: Some(PriceLevel {
+                price: "0.37".to_string(),
+                size: "100".to_string(),
+            }),
             timestamp_ms: 5000,
             hash: "h5".to_string(),
         },
