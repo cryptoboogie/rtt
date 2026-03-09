@@ -1,5 +1,5 @@
 use crate::spread::SpreadStrategy;
-use crate::strategy::Strategy;
+use crate::strategy::{Strategy, TriggerStrategy};
 use crate::threshold::ThresholdStrategy;
 use crate::types::*;
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,39 @@ impl StrategyConfig {
 
     /// Build the concrete strategy from this config.
     pub fn build_strategy(&self) -> Result<Box<dyn Strategy>, String> {
+        match self.strategy.as_str() {
+            "threshold" => {
+                let threshold = self
+                    .params
+                    .threshold
+                    .ok_or("threshold strategy requires 'threshold' param")?;
+                Ok(Box::new(ThresholdStrategy::new(
+                    self.token_id.clone(),
+                    self.side,
+                    threshold,
+                    self.size.clone(),
+                    self.order_type,
+                )))
+            }
+            "spread" => {
+                let max_spread = self
+                    .params
+                    .max_spread
+                    .ok_or("spread strategy requires 'max_spread' param")?;
+                Ok(Box::new(SpreadStrategy::new(
+                    self.token_id.clone(),
+                    self.side,
+                    max_spread,
+                    self.size.clone(),
+                    self.order_type,
+                )))
+            }
+            other => Err(format!("unknown strategy: {}", other)),
+        }
+    }
+
+    /// Build the concrete trigger-strategy contract from this config.
+    pub fn build_trigger_strategy(&self) -> Result<Box<dyn TriggerStrategy>, String> {
         match self.strategy.as_str() {
             "threshold" => {
                 let threshold = self

@@ -1,4 +1,7 @@
-use crate::strategy::Strategy;
+use crate::strategy::{
+    IsolationPolicy, Strategy, StrategyDataRequirement, StrategyRequirements, StrategyRuntimeView,
+    TriggerStrategy,
+};
 use crate::types::*;
 use std::time::Instant;
 
@@ -80,6 +83,26 @@ impl Strategy for ThresholdStrategy {
 
     fn on_trade(&mut self, _trade: &TradeEvent) -> Option<TriggerMessage> {
         None
+    }
+
+    fn name(&self) -> &str {
+        "threshold"
+    }
+}
+
+impl TriggerStrategy for ThresholdStrategy {
+    fn requirements(&self) -> StrategyRequirements {
+        StrategyRequirements::trigger(
+            vec![StrategyDataRequirement::polymarket_bbo(
+                self.token_id.clone(),
+            )],
+            IsolationPolicy::SharedFeedAcceptable,
+        )
+    }
+
+    fn on_update(&mut self, view: &StrategyRuntimeView) -> Option<TriggerMessage> {
+        let snapshot = view.snapshot(&self.token_id)?;
+        self.on_book_update(&snapshot)
     }
 
     fn name(&self) -> &str {

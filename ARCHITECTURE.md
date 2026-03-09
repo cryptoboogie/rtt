@@ -300,7 +300,7 @@ Tagged by `event_type` field in JSON.
 
 Trading strategy framework.
 
-#### `strategy.rs` — Core trait
+#### `strategy.rs` — Split strategy contracts and requirements
 ```rust
 trait Strategy: Send + Sync {
     fn on_book_update(&mut self, snapshot: &OrderBookSnapshot) -> Option<TriggerMessage>;
@@ -308,14 +308,24 @@ trait Strategy: Send + Sync {
     fn name(&self) -> &str;
 }
 ```
+- The legacy `Strategy` trait remains the compatibility surface for the snapshot runner and the `12a` notice bridge
+- `TriggerStrategy` and `QuoteStrategy` add explicit behavior-specific contracts over a shared `StrategyRuntimeView`
+- `StrategyRequirements` declares `ExecutionMode`, `IsolationPolicy`, and the data requirements a strategy needs, such as `polymarket_bbo` or `external_reference_price`
+- `StrategyRuntimeView` exposes resolved hot book/reference state plus snapshot-projection helpers so trigger strategies can be upgraded without learning feed topology details
+
+#### `quote.rs` — Desired quote outputs
+- `DesiredQuote` and `DesiredQuotes` describe quote intent only
+- Quote reconciliation, order lifecycles, and exchange sync remain outside `12b`
 
 #### `threshold.rs` — ThresholdStrategy
 - Fires when best_ask <= threshold (buy) or best_bid >= threshold (sell)
 - Auto-incrementing trigger_id, timestamp from `Instant::elapsed()`
+- Also implements `TriggerStrategy` by declaring a shared-acceptable Polymarket BBO requirement and adapting the resolved runtime view back into the legacy snapshot logic
 
 #### `spread.rs` — SpreadStrategy
 - Fires when bid-ask spread < max_spread
 - Buy side uses ask price, sell side uses bid price
+- Also implements `TriggerStrategy` with the same explicit requirement declaration model as `ThresholdStrategy`
 
 #### `config.rs` — TOML-driven factory
 ```rust
@@ -323,19 +333,25 @@ struct StrategyConfig { strategy, token_id, side, size, order_type, params }
 struct StrategyParams { threshold: Option<f64>, max_spread: Option<f64> }
 ```
 - `build_strategy()` — Factory method: "threshold" or "spread" → `Box<dyn Strategy>`
+- `build_trigger_strategy()` — Compatibility factory for the new explicit trigger contract without changing the config file shape
 
 #### `runner.rs` — Async execution loop
 - Receives `OrderBookSnapshot` via mpsc, calls `strategy.on_book_update()`
 - Forwards `TriggerMessage` to mpsc sender
 - Exits when input channel closes
 
-#### `runtime.rs` — Notice-driven runtime bridge
+#### `runtime.rs` — Shared runtime scaffolding
 - `NoticeDrivenRuntime` consumes `rtt_core::UpdateNotice` values, resolves the current `OrderBookSnapshot` view from `HotStateStore`, and invokes the existing `Strategy` trait without widening strategy-facing contracts
 - This is the `12a` migration seam from feed-manager notices to strategy logic while the legacy snapshot runner remains available
+- `RuntimeTopologyPlan` and `ProvisionedInput` translate strategy requirements into shared vs dedicated source-instance ownership without exposing transport details to the strategy
+- `SharedRuntimeScaffold` resolves the current notice version exactly and only exposes companion source state after that source's notice stream has also been observed, preventing cross-feed strategies from seeing future state out of order
+- `TriggerRuntime` and `QuoteRuntime` both evaluate a uniform `StrategyRuntimeView`, so single-feed and cross-feed strategies share the same filtering, topology, and hot-state plumbing
 
 #### `backtest.rs` — Offline replay
 - `BacktestRunner::run(strategy, snapshots)` — Replay historical data through any strategy
 - `BacktestRunner::run_notice_replay(strategy, markets, updates)` — Replay normalized updates through `HotStateStore` and compare behavior against the legacy snapshot path
+- `BacktestRunner::run_trigger_notice_replay(strategy, markets, updates)` — Replay normalized updates through the explicit trigger contract and shared runtime scaffold
+- `BacktestRunner::run_quote_notice_replay(strategy, markets, updates)` — Replay normalized updates through the quote contract using the same topology-aware state resolution
 - `load_snapshots(path)` — Load from JSON file
 
 ### pm-executor

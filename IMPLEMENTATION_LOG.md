@@ -1475,3 +1475,29 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test --workspace`
 - **Commit**: `feat: add 12a notice-driven runtime replay`
 - **Deviation**: Left `pm-executor/src/main.rs` on the legacy snapshot runner for this branch; the new notice-driven runtime surface is available for Wave 1 integration without crossing the integration-owner boundary early.
+
+### 12b.1 — Add explicit trigger contracts, requirements, and compatibility factories
+- **Spec**: `specs/12b-strategy-contracts-and-runtime-scaffolding.md`
+- **Files changed**: `crates/pm-strategy/src/strategy.rs`, `crates/pm-strategy/src/threshold.rs`, `crates/pm-strategy/src/spread.rs`, `crates/pm-strategy/src/config.rs`, `crates/pm-strategy/tests/config_test.rs`, `crates/pm-strategy/tests/requirements_test.rs`, `crates/pm-strategy/tests/trigger_contract_test.rs`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added explicit `ExecutionMode`, `IsolationPolicy`, `StrategyDataRequirement`, and `StrategyRequirements` types so strategies can declare data and latency needs without embedding transport decisions
+  - Split out a new `TriggerStrategy` contract over `StrategyRuntimeView` while keeping the legacy `Strategy` trait intact for the snapshot runner
+  - Updated threshold and spread to implement the explicit trigger contract, and added `StrategyConfig::build_trigger_strategy()` so existing config continues to construct trigger strategies without a flag-day format change
+- **Tests**:
+  - `cargo test -p pm-strategy --test requirements_test --test trigger_contract_test --test config_test`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Kept the new requirement and contract types in `pm-strategy` instead of centralizing them in `rtt-core`; that keeps the `12b` write-scope narrow and avoids widening shared crate APIs before executor integration needs them.
+
+### 12b.2 — Add quote outputs plus shared topology-aware runtime and replay scaffolding
+- **Spec**: `specs/12b-strategy-contracts-and-runtime-scaffolding.md`
+- **Files changed**: `crates/pm-strategy/src/lib.rs`, `crates/pm-strategy/src/quote.rs`, `crates/pm-strategy/src/runtime.rs`, `crates/pm-strategy/src/backtest.rs`, `crates/pm-strategy/tests/runtime_contract_test.rs`, `crates/pm-strategy/tests/backtest_contract_test.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added explicit quote intent types (`DesiredQuote`, `DesiredQuotes`) plus a `QuoteStrategy` contract so trigger and quote behaviors are no longer forced through one output shape
+  - Added `RuntimeTopologyPlan`, `ProvisionedInput`, `TriggerRuntime`, `QuoteRuntime`, and `SharedRuntimeScaffold` so requirements are provisioned into shared or dedicated source instances and resolved into one uniform runtime view
+  - Reused the same scaffold for `BacktestRunner::run_trigger_notice_replay()` and `run_quote_notice_replay()`, giving both trigger and quote replay the same multi-source hot-state semantics
+  - Hardened the scaffold against stale-notice races by requiring the current notice to resolve exactly by version and only exposing companion source state after that source's notices have already been observed
+- **Tests**:
+  - `cargo test -p pm-strategy --test runtime_contract_test --test backtest_contract_test`
+  - `cargo test -p pm-strategy`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Left `NoticeDrivenRuntime`, `StrategyRunner`, and the executor wiring intact as the legacy/default path; `12b` adds the new shared runtime surface without redesigning the current hot order-dispatch loop.
