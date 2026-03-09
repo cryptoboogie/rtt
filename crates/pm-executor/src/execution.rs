@@ -16,6 +16,116 @@ use rtt_core::trigger::TriggerMessage;
 use crate::config::CredentialsConfig;
 use crate::safety::{CircuitBreaker, OrderGuard, RateLimiter};
 
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuoteCommandPolicy {
+    pub max_retries: u32,
+    pub initial_backoff_ms: u64,
+    pub max_backoff_ms: u64,
+    pub throttle_window_ms: u64,
+    pub max_commands_per_window: usize,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuoteCommandFailure {
+    Transient,
+    RateLimited,
+    Permanent,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuoteCommandRetry {
+    RetryAt { attempt: u32, at_ms: u64 },
+    GiveUp,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThrottleDecision {
+    pub allowed: bool,
+    pub retry_at_ms: Option<u64>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct QuoteCommandThrottle {
+    policy: QuoteCommandPolicy,
+    window_started_ms: Option<u64>,
+    commands_in_window: usize,
+}
+
+impl Default for QuoteCommandPolicy {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            initial_backoff_ms: 100,
+            max_backoff_ms: 1_000,
+            throttle_window_ms: 1_000,
+            max_commands_per_window: 5,
+        }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl QuoteCommandThrottle {
+    pub fn new(policy: QuoteCommandPolicy) -> Self {
+        Self {
+            policy,
+            window_started_ms: None,
+            commands_in_window: 0,
+        }
+    }
+
+    pub fn try_acquire(&mut self, now_ms: u64) -> ThrottleDecision {
+        let window_started_ms = self.window_started_ms.get_or_insert(now_ms);
+        if now_ms.saturating_sub(*window_started_ms) >= self.policy.throttle_window_ms {
+            *window_started_ms = now_ms;
+            self.commands_in_window = 0;
+        }
+
+        if self.commands_in_window >= self.policy.max_commands_per_window {
+            return ThrottleDecision {
+                allowed: false,
+                retry_at_ms: Some(window_started_ms.saturating_add(self.policy.throttle_window_ms)),
+            };
+        }
+
+        self.commands_in_window += 1;
+        ThrottleDecision {
+            allowed: true,
+            retry_at_ms: None,
+        }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn retry_decision(
+    policy: &QuoteCommandPolicy,
+    failure: QuoteCommandFailure,
+    attempt: u32,
+    now_ms: u64,
+) -> QuoteCommandRetry {
+    match failure {
+        QuoteCommandFailure::Permanent => QuoteCommandRetry::GiveUp,
+        QuoteCommandFailure::Transient | QuoteCommandFailure::RateLimited => {
+            if attempt >= policy.max_retries {
+                return QuoteCommandRetry::GiveUp;
+            }
+
+            let multiplier = 1u64 << attempt.min(16);
+            let delay_ms = policy
+                .initial_backoff_ms
+                .saturating_mul(multiplier)
+                .min(policy.max_backoff_ms);
+            QuoteCommandRetry::RetryAt {
+                attempt: attempt + 1,
+                at_ms: now_ms.saturating_add(delay_ms),
+            }
+        }
+    }
+}
+
 /// Build L2Credentials and PrivateKeySigner from executor config.
 ///
 /// If `dry_run` is false and credentials are empty/invalid, returns an error.
@@ -518,5 +628,80 @@ mod tests {
         // No orders should have been processed (guard was held)
         let (orders, _) = cb.stats();
         assert_eq!(orders, 0, "expected 0 orders (guard held), got {}", orders);
+    }
+
+    #[test]
+    fn quote_retry_backoff_is_bounded_and_stops_after_max_retries() {
+        let policy = QuoteCommandPolicy {
+            max_retries: 3,
+            initial_backoff_ms: 100,
+            max_backoff_ms: 250,
+            throttle_window_ms: 1_000,
+            max_commands_per_window: 2,
+        };
+
+        assert_eq!(
+            retry_decision(&policy, QuoteCommandFailure::Transient, 0, 1_000),
+            QuoteCommandRetry::RetryAt {
+                attempt: 1,
+                at_ms: 1_100,
+            }
+        );
+        assert_eq!(
+            retry_decision(&policy, QuoteCommandFailure::RateLimited, 2, 1_000),
+            QuoteCommandRetry::RetryAt {
+                attempt: 3,
+                at_ms: 1_250,
+            }
+        );
+        assert_eq!(
+            retry_decision(&policy, QuoteCommandFailure::Transient, 3, 1_000),
+            QuoteCommandRetry::GiveUp
+        );
+        assert_eq!(
+            retry_decision(&policy, QuoteCommandFailure::Permanent, 0, 1_000),
+            QuoteCommandRetry::GiveUp
+        );
+    }
+
+    #[test]
+    fn quote_command_throttle_prevents_unbounded_command_storms() {
+        let policy = QuoteCommandPolicy {
+            max_retries: 3,
+            initial_backoff_ms: 100,
+            max_backoff_ms: 500,
+            throttle_window_ms: 1_000,
+            max_commands_per_window: 2,
+        };
+        let mut throttle = QuoteCommandThrottle::new(policy);
+
+        assert_eq!(
+            throttle.try_acquire(1_000),
+            ThrottleDecision {
+                allowed: true,
+                retry_at_ms: None,
+            }
+        );
+        assert_eq!(
+            throttle.try_acquire(1_001),
+            ThrottleDecision {
+                allowed: true,
+                retry_at_ms: None,
+            }
+        );
+        assert_eq!(
+            throttle.try_acquire(1_002),
+            ThrottleDecision {
+                allowed: false,
+                retry_at_ms: Some(2_000),
+            }
+        );
+        assert_eq!(
+            throttle.try_acquire(2_000),
+            ThrottleDecision {
+                allowed: true,
+                retry_at_ms: None,
+            }
+        );
     }
 }

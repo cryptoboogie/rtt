@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::quote::DesiredQuotes;
-use crate::types::{OrderBookSnapshot, PriceLevel, TradeEvent, TriggerMessage};
+use crate::types::{OrderBookSnapshot, PriceLevel, Side, TradeEvent, TriggerMessage};
 use rtt_core::{HotBookLevel, HotBookState, HotReferenceState, UpdateNotice};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,11 +53,30 @@ pub struct StrategyRequirements {
     pub data: Vec<StrategyDataRequirement>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InventoryPosition {
+    pub asset_id: String,
+    pub side: Side,
+    pub filled_size: String,
+    pub net_notional: String,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InventoryDelta {
+    pub asset_id: String,
+    pub side: Side,
+    pub filled_size_delta: String,
+    pub notional_delta: String,
+    pub observed_at_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrategyRuntimeView {
     notice: UpdateNotice,
     books: Vec<HotBookState>,
     references: Vec<HotReferenceState>,
+    inventory: Vec<InventoryPosition>,
 }
 
 pub trait TriggerStrategy: Send + Sync {
@@ -123,11 +142,13 @@ impl StrategyRuntimeView {
         notice: UpdateNotice,
         books: Vec<HotBookState>,
         references: Vec<HotReferenceState>,
+        inventory: Vec<InventoryPosition>,
     ) -> Self {
         Self {
             notice,
             books,
             references,
+            inventory,
         }
     }
 
@@ -143,6 +164,10 @@ impl StrategyRuntimeView {
         &self.references
     }
 
+    pub fn inventory_positions(&self) -> &[InventoryPosition] {
+        &self.inventory
+    }
+
     pub fn book(&self, asset_id: &str) -> Option<&HotBookState> {
         self.books
             .iter()
@@ -153,6 +178,12 @@ impl StrategyRuntimeView {
         self.references
             .iter()
             .find(|reference| reference.notice.subject.instrument_id == instrument_id)
+    }
+
+    pub fn inventory(&self, asset_id: &str, side: Side) -> Option<&InventoryPosition> {
+        self.inventory
+            .iter()
+            .find(|position| position.asset_id == asset_id && position.side == side)
     }
 
     pub fn snapshot(&self, asset_id: &str) -> Option<OrderBookSnapshot> {
@@ -174,6 +205,24 @@ impl StrategyRuntimeView {
         self.books
             .first()
             .and_then(|book| self.snapshot(book.asset_id.as_str()))
+    }
+}
+
+impl InventoryDelta {
+    pub fn new(
+        asset_id: impl Into<String>,
+        side: Side,
+        filled_size_delta: impl Into<String>,
+        notional_delta: impl Into<String>,
+        observed_at_ms: u64,
+    ) -> Self {
+        Self {
+            asset_id: asset_id.into(),
+            side,
+            filled_size_delta: filled_size_delta.into(),
+            notional_delta: notional_delta.into(),
+            observed_at_ms,
+        }
     }
 }
 

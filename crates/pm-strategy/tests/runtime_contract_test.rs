@@ -1,8 +1,8 @@
 use pm_strategy::quote::{DesiredQuote, DesiredQuotes, QuoteId};
 use pm_strategy::runtime::{ProvisionedTopology, QuoteRuntime, TriggerRuntime};
 use pm_strategy::strategy::{
-    IsolationPolicy, QuoteStrategy, StrategyDataRequirement, StrategyRequirements,
-    StrategyRuntimeView,
+    InventoryDelta, IsolationPolicy, QuoteStrategy, RequirementSelector, StrategyDataRequirement,
+    StrategyDataRequirementKind, StrategyRequirements, StrategyRuntimeView,
 };
 use pm_strategy::threshold::ThresholdStrategy;
 use pm_strategy::*;
@@ -105,6 +105,41 @@ impl QuoteStrategy for CrossFeedQuoteStrategy {
     }
 }
 
+struct InventoryAwareQuoteStrategy;
+
+impl QuoteStrategy for InventoryAwareQuoteStrategy {
+    fn requirements(&self) -> StrategyRequirements {
+        StrategyRequirements::quote(
+            vec![
+                StrategyDataRequirement::polymarket_bbo("token_abc"),
+                StrategyDataRequirement {
+                    kind: StrategyDataRequirementKind::Inventory,
+                    selector: RequirementSelector::Asset("token_abc".to_string()),
+                },
+            ],
+            IsolationPolicy::SharedFeedAcceptable,
+        )
+    }
+
+    fn on_update(&mut self, view: &StrategyRuntimeView) -> Option<DesiredQuotes> {
+        let inventory = view.inventory("token_abc", Side::Buy)?;
+        let book = view.book("token_abc")?;
+
+        Some(DesiredQuotes::single(DesiredQuote::new(
+            QuoteId::new("inventory-quote"),
+            book.asset_id.as_str(),
+            Side::Sell,
+            book.best_bid.as_ref()?.price.exact.clone(),
+            inventory.filled_size.clone(),
+            OrderType::GTC,
+        )))
+    }
+
+    fn name(&self) -> &str {
+        "inventory-aware-quote"
+    }
+}
+
 #[tokio::test]
 async fn trigger_runtime_keeps_existing_threshold_strategy_working() {
     let store = HotStateStore::new();
@@ -188,4 +223,36 @@ async fn quote_runtime_merges_cross_feed_state_into_desired_quotes() {
     assert_eq!(desired.quotes[0].asset_id, "token_abc");
     assert_eq!(desired.quotes[0].price, "0.46");
     assert!(quote_rx.try_recv().is_err());
+}
+
+#[test]
+fn quote_runtime_surfaces_inventory_deltas_back_to_quote_strategies() {
+    let store = HotStateStore::new();
+    store.register_market(&sample_market_meta());
+
+    let (_notice_tx, notice_rx) = mpsc::channel(16);
+    let (quote_tx, _quote_rx) = mpsc::channel(16);
+    let mut runtime = QuoteRuntime::new(
+        Box::new(InventoryAwareQuoteStrategy),
+        store.clone(),
+        notice_rx,
+        quote_tx,
+    );
+
+    runtime.apply_inventory_delta(InventoryDelta::new(
+        "token_abc",
+        Side::Buy,
+        "7",
+        "3.08",
+        1_700_000_000_500,
+    ));
+
+    let book = snapshot_update(1, "0.47");
+    store.apply_update(&book);
+
+    let desired = runtime.handle_notice(&book.notice).expect("desired quote");
+    assert_eq!(desired.quotes.len(), 1);
+    assert_eq!(desired.quotes[0].quote_id, QuoteId::new("inventory-quote"));
+    assert_eq!(desired.quotes[0].size, "7");
+    assert_eq!(desired.quotes[0].price, "0.40");
 }
