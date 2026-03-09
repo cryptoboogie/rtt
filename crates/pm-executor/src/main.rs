@@ -5,6 +5,8 @@ mod execution;
 mod health;
 mod health_server;
 mod logging;
+mod order_manager;
+mod order_state;
 mod safety;
 mod state;
 

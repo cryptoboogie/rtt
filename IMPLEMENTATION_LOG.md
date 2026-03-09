@@ -921,7 +921,7 @@ Implemented all 8 engineering specs from `specs/` in a single session.
     - `connect_subscribe_receive_book_snapshot`
     - `pipeline_updates_orderbook_from_ws`
   - `cargo test -p pm-data --test test_integration` — failed again with the same two WebSocket snapshot timeouts
-- **Commit**: N/A (working tree only)
+- **Commit**: `feat: add 12c local order manager reconciliation`
 - **Deviation**: No code refactor was implemented in this session; the requested deliverable was the refactor spec itself. Full-workspace verification could not be recorded as green because the current `pm-data` live integration tests timed out twice waiting for book snapshots.
 
 ### 11.2 — Refine Spec 09 for Polymarket Wire Contract and Latency-Only Scope
@@ -933,7 +933,7 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - Reframed the decimal-math item as an internal base-unit conversion optimization only if benchmark-neutral or faster
   - Added an explicit requirement to preserve a live integration-test lane alongside offline unit tests
 - **Tests**: None run (spec-only refinement)
-- **Commit**: N/A (working tree only)
+- **Commit**: `feat: add 12c local order manager reconciliation`
 - **Deviation**: Used the Polymarket docs as the source of truth for order-field encoding and kept integration-test preservation explicit in the spec.
 
 ### 11.3 — Add Explicit Win Condition and Verification Commands to Spec 09
@@ -1501,3 +1501,29 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test -p pm-strategy`
 - **Commit**: N/A (working tree only)
 - **Deviation**: Left `NoticeDrivenRuntime`, `StrategyRunner`, and the executor wiring intact as the legacy/default path; `12b` adds the new shared runtime surface without redesigning the current hot order-dispatch loop.
+
+### 12c.1 — Add quote identity and explicit local working-quote state
+- **Spec**: `specs/12c-order-manager-local-reconciliation.md`
+- **Files changed**: `crates/pm-strategy/src/quote.rs`, `crates/pm-strategy/tests/runtime_contract_test.rs`, `crates/pm-strategy/tests/backtest_contract_test.rs`, `crates/pm-executor/src/main.rs`, `crates/pm-executor/src/order_state.rs`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added `QuoteId` and extended `DesiredQuote` so quote strategies now emit stable per-quote identities that the local order manager can track deterministically
+  - Added `WorkingQuoteState` and `WorkingQuote` in `pm-executor`, including explicit `UnknownOrStale` support from day one plus local timestamp/client-order bookkeeping
+  - Added state-machine tests for happy-path transitions and explicit uncertainty injection without wiring the new local core into the live executor path yet
+- **Tests**:
+  - `cargo test -p pm-executor order_ -- --nocapture`
+  - `cargo test -p pm-strategy`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Added only the minimal `mod order_manager; mod order_state;` declarations in `pm-executor/src/main.rs` so the new local core compiles in the binary crate without changing runtime behavior.
+
+### 12c.2 — Add deterministic local reconciliation with anti-thrash and uncertainty blocking
+- **Spec**: `specs/12c-order-manager-local-reconciliation.md`
+- **Files changed**: `crates/pm-executor/src/order_manager.rs`, `crates/pm-executor/src/order_state.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added `ExecutionCommand::{Place, Cancel, CancelAll}`, `ReconciliationPolicy`, and `LocalOrderManager::reconcile()` as the pure local planner for desired-vs-working quote convergence
+  - Implemented deterministic command ordering, `CancelAll` behavior for empty desired state, material-change detection on fixed-scale local units, and per-instance replace cooldowns to avoid runaway churn
+  - Enforced blocked reconciliation when any working quote is `UnknownOrStale`, so v1 never guesses through local uncertainty
+- **Tests**:
+  - `cargo test -p pm-executor`
+  - `cargo test -p pm-strategy`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Kept the planner and state machine local to `pm-executor` rather than moving quote commands into `rtt-core`; that keeps `12c` narrow and leaves exchange/private-state wiring for `12d`.
