@@ -314,6 +314,7 @@ trait Strategy: Send + Sync {
 - `StrategyRuntimeView` exposes resolved hot book/reference state plus snapshot-projection helpers so trigger strategies can be upgraded without learning feed topology details
 
 #### `quote.rs` — Desired quote outputs
+- `QuoteId` gives each quote lane a stable local identity for downstream reconciliation
 - `DesiredQuote` and `DesiredQuotes` describe quote intent only
 - Quote reconciliation, order lifecycles, and exchange sync remain outside `12b`
 
@@ -384,6 +385,18 @@ struct ExecutorConfig {
 }
 ```
 All credential fields support `POLY_*` env var overrides. `alert_webhook_url` supports `POLY_ALERT_WEBHOOK_URL`.
+
+#### `order_state.rs` — Local quote lifecycle state
+- `WorkingQuoteState` is explicit: `PendingSubmit`, `Working`, `PendingCancel`, `Canceled`, `Rejected`, `UnknownOrStale`
+- `WorkingQuote` is the local trusted-state record keyed by `QuoteId`, carrying the last desired order parameters plus local timestamps and optional `client_order_id`
+- `UnknownOrStale` is first-class from v1, so the local planner can halt instead of guessing when trust is lost
+
+#### `order_manager.rs` — Deterministic local reconciliation
+- `ExecutionCommand::{Place, Cancel, CancelAll}` is the local command plan emitted by the order manager
+- `LocalOrderManager` compares `DesiredQuotes` with local `WorkingQuote` state and emits a deterministic minimal command set when the local state is trustworthy
+- The first `12c` planner is intentionally local-only: it does not talk to the exchange, reconcile fills, or resync private state
+- Anti-thrash policy is per strategy-instance via `ReconciliationPolicy { min_price_change_units, min_size_change_units, replace_cooldown_ms }`
+- If any local quote is `UnknownOrStale`, reconciliation returns a blocked outcome with no speculative commands
 
 #### `bridge.rs` — Channel adapters
 - `broadcast_to_mpsc()` — Forwards OrderBookSnapshot, handles `Lagged` by logging warning

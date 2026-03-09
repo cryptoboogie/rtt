@@ -1,5 +1,5 @@
 use pm_strategy::backtest::BacktestRunner;
-use pm_strategy::quote::{DesiredQuote, DesiredQuotes};
+use pm_strategy::quote::{DesiredQuote, DesiredQuotes, QuoteId};
 use pm_strategy::strategy::{
     IsolationPolicy, QuoteStrategy, StrategyDataRequirement, StrategyRequirements,
     StrategyRuntimeView,
@@ -88,13 +88,14 @@ impl QuoteStrategy for CrossFeedQuoteStrategy {
     fn on_update(&mut self, view: &StrategyRuntimeView) -> Option<DesiredQuotes> {
         let book = view.book("token_abc")?;
         let reference = view.reference("BTC-USD")?;
-        Some(DesiredQuotes::single(DesiredQuote {
-            asset_id: book.asset_id.as_str().to_string(),
-            side: Side::Buy,
-            price: reference.reference_price.as_ref()?.exact.clone(),
-            size: "10".to_string(),
-            order_type: OrderType::GTC,
-        }))
+        Some(DesiredQuotes::single(DesiredQuote::new(
+            QuoteId::new("quote-1"),
+            book.asset_id.as_str(),
+            Side::Buy,
+            reference.reference_price.as_ref()?.exact.clone(),
+            "10",
+            OrderType::GTC,
+        )))
     }
 
     fn name(&self) -> &str {

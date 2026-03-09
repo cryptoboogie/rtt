@@ -1,4 +1,4 @@
-use pm_strategy::quote::{DesiredQuote, DesiredQuotes};
+use pm_strategy::quote::{DesiredQuote, DesiredQuotes, QuoteId};
 use pm_strategy::runtime::{ProvisionedTopology, QuoteRuntime, TriggerRuntime};
 use pm_strategy::strategy::{
     IsolationPolicy, QuoteStrategy, StrategyDataRequirement, StrategyRequirements,
@@ -90,13 +90,14 @@ impl QuoteStrategy for CrossFeedQuoteStrategy {
         let book = view.book("token_abc")?;
         let reference = view.reference("BTC-USD")?;
 
-        Some(DesiredQuotes::single(DesiredQuote {
-            asset_id: book.asset_id.as_str().to_string(),
-            side: Side::Buy,
-            price: reference.reference_price.as_ref()?.exact.clone(),
-            size: "25".to_string(),
-            order_type: OrderType::GTC,
-        }))
+        Some(DesiredQuotes::single(DesiredQuote::new(
+            QuoteId::new("quote-1"),
+            book.asset_id.as_str(),
+            Side::Buy,
+            reference.reference_price.as_ref()?.exact.clone(),
+            "25",
+            OrderType::GTC,
+        )))
     }
 
     fn name(&self) -> &str {
