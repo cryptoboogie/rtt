@@ -16,10 +16,9 @@ pool_size = 2
 address_family = "auto"  # "auto", "ipv4", or "ipv6"
 
 [websocket]
-# Legacy explicit Polymarket asset subscriptions. Still supported.
-asset_ids = [
-    "48825140812430902098404528620382945035793471220915259967486864813738884055220"
-]
+# Legacy explicit Polymarket asset subscriptions. The BTC 5m runtime resolves
+# and rotates the current/next market tokens dynamically, so this can stay empty.
+asset_ids = []
 ws_channel_capacity = 1024
 snapshot_channel_capacity = 256
 
@@ -51,25 +50,47 @@ snapshot_channel_capacity = 256
 # instrument_ids = ["BTC-USD"]
 
 [strategy]
-strategy = "threshold"
-token_id = "48825140812430902098404528620382945035793471220915259967486864813738884055220"
-side = "Buy"
-size = "5"
+strategy = "btc_5m"
 order_type = "FOK"
 
-[strategy.params]
-threshold = 0.45
+[strategy.params.btc_5m]
+market_slug_prefix = "btc-updown-5m"
+cadence_seconds = 300
+prefetch_markets = 1
+entry_window_start_seconds = 5
+probe_window_end_seconds = 9
+entry_window_end_seconds = 21
+probe_budget_usd = 3.0
+initial_burst_budget_usd = 5.0
+max_pair_budget_usd = 45.0
+max_single_side_budget_usd = 10.0
+max_gross_deployed_per_market = 50.0
+max_unpaired_exposure_usd = 12.0
+carry_pair_sum_max = 0.96
+attempt_cooldown_ms = 1000
+cleanup_grace_ms = 1500
+max_cleanup_loss_usd = 5.0
+binance_ws_url = "wss://stream.binance.com:9443/ws/btcusdt@aggTrade"
+binance_stale_after_ms = 1500
+binance_buffer_window_ms = 5000
+binance_continuation_window_ms = 3000
+binance_min_move_bps = 0.5
+binance_reversal_veto_bps = 0.5
+allow_one_sided_continuation = false
+one_sided_min_aligned_entry_bps = 2.0
+risk_mode = "small_account"
 
 [execution]
 presign_count = 100
 is_neg_risk = false
 fee_rate_bps = 0
 dry_run = true   # SAFETY: set to false only when ready for real orders
+journal_db_path = "logs/pm-executor.sqlite3"
 
 [safety]
-max_orders = 5           # Circuit breaker: max orders before stopping
-max_usd_exposure = 10.0  # Circuit breaker: max total USD committed
-max_triggers_per_second = 2  # Rate limit
+max_orders = 1000            # Coarse operational cap, not a realized-loss stop
+max_usd_exposure = 2000.0    # Coarse cumulative notional cap for long dry/live sessions
+max_triggers_per_second = 4  # Pair entry may need buy + buy + cleanup in one second
 require_confirmation = true  # Wait for order response before next
 
 [health]

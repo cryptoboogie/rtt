@@ -185,3 +185,63 @@ max_spread = 0.02
 
     std::fs::remove_file(&path).ok();
 }
+
+#[test]
+fn parse_btc5m_config_with_defaults() {
+    let toml_str = r#"
+strategy = "btc_5m"
+
+[params.btc_5m]
+"#;
+
+    let config: StrategyConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.strategy, "btc_5m");
+    assert!(config.token_id.is_empty());
+    assert_eq!(config.side, Side::Buy);
+    assert_eq!(config.size, "5");
+    assert_eq!(config.order_type, OrderType::FOK);
+
+    let params = config.btc_5m_params().unwrap();
+    assert_eq!(params.market_slug_prefix, "btc-updown-5m");
+    assert_eq!(params.cadence_seconds, 300);
+    assert_eq!(params.prefetch_markets, 1);
+    assert_eq!(params.entry_window_start_seconds, 5);
+    assert_eq!(params.entry_window_end_seconds, 21);
+    assert_eq!(params.probe_window_end_seconds, 9);
+    assert!((params.probe_budget_usd - 3.0).abs() < f64::EPSILON);
+    assert!((params.initial_burst_budget_usd - 5.0).abs() < f64::EPSILON);
+    assert!((params.max_pair_budget_usd - 45.0).abs() < f64::EPSILON);
+    assert!((params.max_single_side_budget_usd - 10.0).abs() < f64::EPSILON);
+    assert!((params.max_gross_deployed_per_market - 50.0).abs() < f64::EPSILON);
+    assert!((params.max_unpaired_exposure_usd - 12.0).abs() < f64::EPSILON);
+    assert!((params.max_cleanup_loss_usd - 5.0).abs() < f64::EPSILON);
+    assert!((params.carry_pair_sum_max - 0.96).abs() < f64::EPSILON);
+    assert_eq!(params.attempt_cooldown_ms, 1_000);
+    assert_eq!(params.cleanup_grace_ms, 1_500);
+    assert_eq!(
+        params.binance_ws_url,
+        "wss://stream.binance.com:9443/ws/btcusdt@aggTrade"
+    );
+    assert_eq!(params.binance_stale_after_ms, 1_500);
+    assert_eq!(params.binance_buffer_window_ms, 5_000);
+    assert_eq!(params.binance_continuation_window_ms, 3_000);
+    assert!((params.binance_min_move_bps - 0.5).abs() < f64::EPSILON);
+    assert!((params.binance_reversal_veto_bps - 0.5).abs() < f64::EPSILON);
+    assert!(!params.allow_one_sided_continuation);
+    assert!((params.one_sided_min_aligned_entry_bps - 2.0).abs() < f64::EPSILON);
+    assert_eq!(params.risk_mode, pm_strategy::config::Btc5mRiskMode::SmallAccount);
+}
+
+#[test]
+fn btc5m_strategy_is_marked_for_specialized_runtime() {
+    let toml_str = r#"
+strategy = "btc_5m"
+
+[params.btc_5m]
+"#;
+
+    let config: StrategyConfig = toml::from_str(toml_str).unwrap();
+    assert!(config.uses_specialized_runtime());
+    assert!(config.build_strategy().is_err());
+    assert!(config.build_trigger_strategy().is_err());
+}

@@ -1579,3 +1579,64 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test --workspace`
 - **Commit**: `feat: add 12d exchange sync and exposure seam`
 - **Deviation**: Left the legacy trigger execution loop as the runtime default; the new retry/throttle helpers and inventory seam are additive surfaces for later integration rather than a hot-path redesign in this spec.
+
+### 13.1 — Add the BTC 5m feed-control seam for rolling market subscriptions
+- **Spec**: `specs/13-btc_5m_strategy_spec.md`
+- **Files changed**: `crates/pm-data/src/feed.rs`, `crates/pm-data/src/pipeline.rs`, `crates/pm-data/src/ws.rs`, `crates/pm-data/tests/test_integration.rs`, `crates/pm-data/tests/test_live_data.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Changed the Polymarket feed manager and pipeline runtime surfaces to operate through shared references so one long-lived WS task can keep running while the desired asset set changes underneath it
+  - Reused the existing subscription diff machinery to rotate current/next BTC 5-minute market token subscriptions in place instead of rebuilding the pipeline every five minutes
+  - Hardened the public WS parser to ignore unknown event types such as `new_market`, which showed up during live dry-run smoke checks and would otherwise create noisy warnings
+- **Tests**:
+  - `cargo test -p pm-data pipeline::tests::pipeline_run_future_can_be_created_from_shared_reference --lib`
+  - `cargo test -p pm-data pipeline::tests::pipeline_reconfigure_resets_legacy_state_and_updates_asset_set --lib`
+  - `cargo test -p pm-data --test test_ws_parse --lib ws::tests::parse_and_send_ignores_unknown_event_types`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Kept the control plane intentionally narrow by resolving exact BTC 5-minute markets in the executor via Gamma slug lookups rather than introducing a second registry/discovery service just for this strategy.
+
+### 13.2 — Add the schedule-driven BTC 5m paired-carry runtime
+- **Spec**: `specs/13-btc_5m_strategy_spec.md`
+- **Files changed**: `crates/pm-strategy/src/config.rs`, `crates/pm-strategy/tests/config_test.rs`, `crates/pm-executor/src/main.rs`, `crates/pm-executor/src/btc5m.rs`, `crates/pm-executor/tests/test_integration.rs`, `crates/pm-executor/tests/test_full_pipeline.rs`, `config.toml`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added a dedicated `btc_5m` strategy config surface and executor-owned runtime instead of trying to force the schedule-driven paired-entry behavior through the legacy generic trigger factory
+  - Implemented exact market resolution from Gamma slugs, current-plus-prefetched rolling market tracking, first `5-21s` entry gating, pair-sum thresholding, budget/min-size sizing, direct `FOK` buy/buy attempts, and cleanup sells when the second leg fails
+  - Added a session cleanup-loss stop (`max_cleanup_loss_usd`) so realized loss from failed pair completions can halt the bot in line with the configured bankroll tolerance
+  - Switched the root `config.toml` to the BTC 5-minute dry-run configuration so the checked-in default path now matches the intended live bot
+- **Tests**:
+  - `cargo test -p pm-strategy --test config_test`
+  - `cargo test -p pm-executor btc5m`
+  - `cargo test -p pm-executor --test test_integration --test test_full_pipeline`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Implemented only the high-confidence paired carry branch for the default live runtime. The lower-confidence one-sided continuation branch and the more active paired-with-sells recycling mode remain intentionally disabled until we have stronger live quote evidence for their entry/exit rules.
+
+### 13.3 — Add Binance-informed staging and small-account risk controls to BTC 5m
+- **Spec**: `specs/13-btc_5m_strategy_spec.md`
+- **Files changed**: `crates/pm-strategy/src/config.rs`, `crates/pm-strategy/tests/config_test.rs`, `crates/pm-executor/Cargo.toml`, `crates/pm-executor/src/main.rs`, `crates/pm-executor/src/btc5m.rs`, `config.toml`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Replaced the old single-budget BTC 5m config with a staged/small-account surface: probe, burst, pair, gross-per-market, unpaired-exposure, cleanup-loss, Binance feed freshness, continuation, reversal veto, and an explicit `risk_mode`
+  - Rewrote the specialized BTC 5m runner as a market-state machine that consumes both Polymarket books and a live Binance `BTCUSDT` agg-trade websocket, captures a per-market opening reference, maintains a short rolling Binance trade buffer, and uses that tape to choose or veto the first side
+  - Swapped the old atomic pair-entry model for `probe -> verify -> pair -> cleanup`, with cleanup treated as a first-class transition when the second leg is unavailable, stale, too late, or contradicted by the fast reference tape
+  - Set the checked-in runtime defaults to the requested small-account profile and deliberately left one-sided continuation disabled by default so the first live deployment stays pair-first
+- **Tests**:
+  - `cargo test -p pm-strategy --test config_test`
+  - `cargo test -p pm-executor btc5m`
+  - `cargo test -p pm-executor --test test_integration --test test_full_pipeline`
+- **Commit**: N/A (working tree only)
+- **Deviation**: The runtime now matches the Binance-informed staged pair-first mechanics from the spec, but it still does not implement the active paired-with-sells recycling branch. The optional one-sided continuation branch remains deliberately disabled in the default config for the initial `$180` bankroll deployment.
+
+### 13.4 — Add CLI live-mode override and SQLite BTC 5m execution journal
+- **Spec**: `specs/13-btc_5m_strategy_spec.md`
+- **Files changed**: `crates/pm-executor/Cargo.toml`, `crates/pm-executor/src/config.rs`, `crates/pm-executor/src/main.rs`, `crates/pm-executor/src/journal.rs`, `crates/pm-executor/src/btc5m.rs`, `config.toml`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added CLI execution-mode overrides so live mode can be enabled without editing the checked-in config: `--live`, `--dry-run=false`, and `dry_run=false` now all override `execution.dry_run` at startup
+  - Added a dedicated SQLite journal worker for the BTC 5m runtime and made the specialized runner persist one row per first-leg, second-leg, and cleanup result, including market identifiers, trade sizing/pricing, cleanup reasons/loss, and exchange response fields such as `order_id`, `status`, `transaction_hashes`, and `trade_ids`
+  - Added a checked-in `journal_db_path` default so live/dry runs can accumulate reconstructable market histories in `logs/pm-executor.sqlite3` for later agent analysis
+- **Tests**:
+  - `cargo test -p pm-executor parse_cli_options_defaults_to_config_toml_without_override`
+  - `cargo test -p pm-executor journal_persists_rows_for_later_market_reconstruction`
+  - `cargo test -p pm-executor btc5m`
+  - `cargo test -p pm-executor --test test_integration --test test_full_pipeline`
+  - `cargo test -p pm-strategy --test config_test`
+- **Commit**: N/A (working tree only)
+- **Deviation**: The SQLite journal is currently BTC 5m-specific rather than a generic executor-wide audit trail. It focuses on reconstructing staged market actions instead of full account-level PnL accounting.

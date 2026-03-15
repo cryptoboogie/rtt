@@ -122,6 +122,8 @@ pub struct ExecutionConfig {
     pub dry_run: bool,
     #[serde(default = "default_state_file")]
     pub state_file: String,
+    #[serde(default = "default_journal_db_path")]
+    pub journal_db_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -189,6 +191,9 @@ fn default_dry_run() -> bool {
 }
 fn default_state_file() -> String {
     "state.json".to_string()
+}
+fn default_journal_db_path() -> String {
+    "logs/pm-executor.sqlite3".to_string()
 }
 fn default_log_level() -> String {
     "info".to_string()
@@ -306,6 +311,7 @@ level = "debug"
         assert_eq!(config.strategy.strategy, "threshold");
         assert_eq!(config.execution.presign_count, 50);
         assert!(config.execution.dry_run);
+        assert_eq!(config.execution.journal_db_path, "logs/pm-executor.sqlite3");
         assert_eq!(config.logging.level, "debug");
     }
 
@@ -338,6 +344,7 @@ threshold = 0.45
         assert_eq!(config.connection.address_family, "auto");
         assert_eq!(config.websocket.ws_channel_capacity, 1024);
         assert_eq!(config.execution.presign_count, 100);
+        assert_eq!(config.execution.journal_db_path, "logs/pm-executor.sqlite3");
         assert_eq!(config.logging.level, "info");
     }
 
@@ -411,6 +418,29 @@ dry_run = false
 "#;
         let config: ExecutorConfig = toml::from_str(toml_with_dry_run).unwrap();
         assert!(!config.execution.dry_run);
+    }
+
+    #[test]
+    fn journal_db_path_parses_custom_value() {
+        let toml_with_custom_path = r#"
+[credentials]
+[connection]
+[websocket]
+asset_ids = ["asset1"]
+[strategy]
+strategy = "threshold"
+token_id = "asset1"
+side = "Buy"
+size = "10"
+order_type = "FOK"
+[strategy.params]
+threshold = 0.45
+[execution]
+journal_db_path = "var/test-journal.sqlite3"
+[logging]
+"#;
+        let config: ExecutorConfig = toml::from_str(toml_with_custom_path).unwrap();
+        assert_eq!(config.execution.journal_db_path, "var/test-journal.sqlite3");
     }
 
     #[test]

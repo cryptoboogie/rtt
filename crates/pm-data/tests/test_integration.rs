@@ -59,7 +59,7 @@ async fn wait_for_activity(
 #[tokio::test]
 async fn connect_subscribe_receive_book_snapshot() {
     let test_asset_ids = test_asset_ids();
-    let mut client = WsClient::new(test_asset_ids.clone(), 100);
+    let client = WsClient::new(test_asset_ids.clone(), 100);
     let mut rx = client.subscribe();
 
     let handle = tokio::spawn(async move {
@@ -109,7 +109,7 @@ async fn connect_subscribe_receive_book_snapshot() {
 #[tokio::test]
 async fn pipeline_updates_orderbook_from_ws() {
     let test_asset_ids = test_asset_ids();
-    let mut client = WsClient::new(test_asset_ids.clone(), 100);
+    let client = WsClient::new(test_asset_ids.clone(), 100);
     let mut rx = client.subscribe();
     let order_books = OrderBookManager::new();
 
@@ -171,7 +171,7 @@ async fn pipeline_updates_orderbook_from_ws() {
 #[tokio::test]
 async fn keepalive_no_disconnect_over_20_seconds() {
     let test_asset_ids = test_asset_ids();
-    let mut client = WsClient::new(test_asset_ids, 100);
+    let client = WsClient::new(test_asset_ids, 100);
     let last_message_at = client.last_message_at_arc();
     let reconnect_count = client.reconnect_count_arc();
 

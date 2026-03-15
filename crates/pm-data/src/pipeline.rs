@@ -58,7 +58,7 @@ impl Pipeline {
     }
 
     /// Conservative full-asset-set reset/reconfigure path for later registry integration.
-    pub fn reconfigure_assets(&mut self, asset_ids: Vec<String>) -> bool {
+    pub fn reconfigure_assets(&self, asset_ids: Vec<String>) -> bool {
         self.feed_manager.reconfigure_assets(asset_ids)
     }
 
@@ -73,7 +73,7 @@ impl Pipeline {
     }
 
     /// Run the pipeline. This spawns the WS client and processes messages.
-    pub async fn run(&mut self) {
+    pub async fn run(&self) {
         self.feed_manager.run().await;
     }
 
@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn pipeline_reconfigure_resets_legacy_state_and_updates_asset_set() {
-        let mut pipeline = Pipeline::new(vec!["asset1".to_string()], 100, 50);
+        let pipeline = Pipeline::new(vec!["asset1".to_string()], 100, 50);
         let msg = WsMessage::Book(BookUpdate {
             asset_id: "asset1".to_string(),
             market: "0xmarket".to_string(),
@@ -280,5 +280,11 @@ mod tests {
 
         assert!(pipeline.reconfigure_assets(vec!["asset2".to_string()]));
         assert!(pipeline.order_books().get_snapshot("asset1").is_none());
+    }
+
+    #[test]
+    fn pipeline_run_future_can_be_created_from_shared_reference() {
+        let pipeline = Pipeline::new(vec!["asset1".to_string()], 100, 50);
+        let _future = pipeline.run();
     }
 }

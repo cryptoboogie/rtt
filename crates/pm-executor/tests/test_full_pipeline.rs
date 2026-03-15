@@ -188,10 +188,17 @@ fn config_loads_and_all_components_construct() {
     let strategy_section = toml::to_string(config.get("strategy").unwrap()).unwrap();
     let strategy_config: pm_strategy::config::StrategyConfig =
         toml::from_str(&strategy_section).expect("strategy config should parse");
-    let strategy = strategy_config
-        .build_strategy()
-        .expect("strategy should build from config");
-    assert_eq!(strategy.name(), "threshold");
+    if strategy_config.uses_specialized_runtime() {
+        let params = strategy_config
+            .btc_5m_params()
+            .expect("btc_5m params should build from config");
+        assert_eq!(params.market_slug_prefix, "btc-updown-5m");
+    } else {
+        let strategy = strategy_config
+            .build_strategy()
+            .expect("strategy should build from config");
+        assert_eq!(strategy.name(), "threshold");
+    }
 
     // Verify channel types are compatible by constructing them.
     // This is a compile-time check that the generic parameters match.
@@ -442,7 +449,7 @@ async fn full_pipeline_live_dry_run() {
     println!("Asset: {}...", &asset_id[..20]);
 
     // Create the data pipeline.
-    let mut pipeline = pm_data::Pipeline::new(vec![asset_id.clone()], 1024, 256);
+    let pipeline = pm_data::Pipeline::new(vec![asset_id.clone()], 1024, 256);
     let snapshot_rx = pipeline.subscribe_snapshots();
 
     // Start WebSocket pipeline in background.

@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::RwLock;
 
 use tokio::sync::broadcast;
 
@@ -51,7 +52,7 @@ pub struct ScopedPolymarketAdapter {
 
 pub struct PolymarketFeedManager {
     source_id: SourceId,
-    asset_ids: Vec<String>,
+    asset_ids: RwLock<Vec<String>>,
     subscription_planner: SubscriptionPlannerConfig,
     ws_client: WsClient,
     stores: FeedStores,
@@ -182,7 +183,7 @@ impl PolymarketFeedManager {
         let asset_ids = assigned_asset_ids_for_config(&desired_asset_ids, &subscription_planner);
         Self {
             source_id,
-            asset_ids,
+            asset_ids: RwLock::new(asset_ids),
             subscription_planner: subscription_planner.clone(),
             ws_client: WsClient::with_subscription_planner(
                 desired_asset_ids.into_iter().collect(),
@@ -256,8 +257,8 @@ impl PolymarketFeedManager {
         &self.source_id
     }
 
-    pub fn asset_ids(&self) -> &[String] {
-        &self.asset_ids
+    pub fn asset_ids(&self) -> Vec<String> {
+        self.asset_ids.read().unwrap().clone()
     }
 
     pub fn ws_client_last_message_at(&self) -> Arc<std::sync::atomic::AtomicU64> {
@@ -273,9 +274,15 @@ impl PolymarketFeedManager {
         process_adapter_message(&adapter, _message, &self.stores, &self.outputs)
     }
 
-    pub fn reconfigure_assets(&mut self, asset_ids: Vec<String>) -> bool {
+    pub fn reconfigure_assets(&self, asset_ids: Vec<String>) -> bool {
         let desired_asset_ids = asset_ids.into_iter().collect::<BTreeSet<_>>();
-        let current_asset_ids = self.asset_ids.iter().cloned().collect::<BTreeSet<_>>();
+        let current_asset_ids = self
+            .asset_ids
+            .read()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let next_asset_ids = assigned_asset_ids_for_config(&desired_asset_ids, &self.subscription_planner);
         let next_asset_set = next_asset_ids.iter().cloned().collect::<BTreeSet<_>>();
 
@@ -288,13 +295,13 @@ impl PolymarketFeedManager {
             self.stores.clear_asset(&self.source_id, asset_id);
         }
 
-        self.asset_ids = next_asset_ids;
+        *self.asset_ids.write().unwrap() = next_asset_ids;
         self.ws_client
             .reconfigure_assets(desired_asset_ids.into_iter().collect());
         true
     }
 
-    pub async fn run(&mut self) {
+    pub async fn run(&self) {
         let mut ws_rx = self.ws_client.subscribe();
         let stores = self.stores.clone();
         let outputs = self.outputs.clone();
@@ -614,7 +621,7 @@ mod tests {
 
     #[test]
     fn reconfigure_assets_clears_authoritative_state_before_swapping_subscription_set() {
-        let mut manager = PolymarketFeedManager::shared(vec!["asset-1".to_string()], 16, 16);
+        let manager = PolymarketFeedManager::shared(vec!["asset-1".to_string()], 16, 16);
         let book = WsMessage::Book(BookUpdate {
             asset_id: "asset-1".to_string(),
             market: "market-1".to_string(),
@@ -633,13 +640,13 @@ mod tests {
         assert!(manager.order_books().get_snapshot("asset-1").is_some());
 
         assert!(manager.reconfigure_assets(vec!["asset-2".to_string()]));
-        assert_eq!(manager.asset_ids(), &["asset-2".to_string()]);
+        assert_eq!(manager.asset_ids(), vec!["asset-2".to_string()]);
         assert!(manager.order_books().get_snapshot("asset-1").is_none());
     }
 
     #[test]
     fn reconfigure_assets_only_clears_removed_assets_and_stages_subscription_diff() {
-        let mut manager = PolymarketFeedManager::shared(
+        let manager = PolymarketFeedManager::shared(
             vec!["asset-1".to_string(), "asset-2".to_string()],
             16,
             16,
@@ -721,7 +728,7 @@ mod tests {
 
     #[test]
     fn reconfigure_assets_treats_reordered_equivalent_sets_as_noop() {
-        let mut manager = PolymarketFeedManager::shared(
+        let manager = PolymarketFeedManager::shared(
             vec!["asset-1".to_string(), "asset-2".to_string()],
             16,
             16,
@@ -751,7 +758,7 @@ mod tests {
 
     #[test]
     fn shared_with_subscription_planner_limits_manager_to_its_owned_shard() {
-        let mut manager = PolymarketFeedManager::shared_with_subscription_planner(
+        let manager = PolymarketFeedManager::shared_with_subscription_planner(
             vec![
                 "asset-1".to_string(),
                 "asset-2".to_string(),
@@ -770,7 +777,7 @@ mod tests {
 
         assert_eq!(
             manager.asset_ids(),
-            &["asset-2".to_string(), "asset-4".to_string()]
+            vec!["asset-2".to_string(), "asset-4".to_string()]
         );
 
         assert!(manager.reconfigure_assets(vec![
@@ -781,7 +788,7 @@ mod tests {
         ]));
         assert_eq!(
             manager.asset_ids(),
-            &["asset-3".to_string(), "asset-6".to_string()]
+            vec!["asset-3".to_string(), "asset-6".to_string()]
         );
         assert_eq!(
             manager.ws_client_pending_commands_for_test(),

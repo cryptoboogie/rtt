@@ -178,7 +178,7 @@ impl WsClient {
         commands
     }
 
-    pub async fn run(&mut self) {
+    pub async fn run(&self) {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         *self.shutdown_tx.lock().unwrap() = Some(shutdown_tx);
         let (control_tx, mut control_rx) = mpsc::unbounded_channel();
@@ -373,11 +373,10 @@ where
 fn parse_and_send(text: &str, tx: &broadcast::Sender<WsMessage>) {
     let trimmed = text.trim();
     if trimmed.starts_with('[') {
-        // Array of messages (initial dump)
-        match serde_json::from_str::<Vec<WsMessage>>(trimmed) {
-            Ok(msgs) => {
-                for msg in msgs {
-                    let _ = tx.send(msg);
+        match serde_json::from_str::<Vec<serde_json::Value>>(trimmed) {
+            Ok(values) => {
+                for value in values {
+                    parse_value_and_send(value, tx, "array");
                 }
             }
             Err(e) => {
@@ -388,20 +387,50 @@ fn parse_and_send(text: &str, tx: &broadcast::Sender<WsMessage>) {
             }
         }
     } else if trimmed.starts_with('{') {
-        // Single message
-        match serde_json::from_str::<WsMessage>(trimmed) {
-            Ok(ws_msg) => {
-                let _ = tx.send(ws_msg);
-            }
+        match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(value) => parse_value_and_send(value, tx, "single"),
             Err(e) => {
                 warn!(
-                    "Failed to parse WS message: {e}, raw: {}",
+                    "Failed to parse WS message envelope: {e}, raw: {}",
                     &trimmed[..trimmed.len().min(200)]
                 );
             }
         }
     }
     // Ignore other formats (e.g., empty strings, "[]")
+}
+
+fn parse_value_and_send(
+    value: serde_json::Value,
+    tx: &broadcast::Sender<WsMessage>,
+    context: &str,
+) {
+    if should_ignore_message(&value) {
+        return;
+    }
+
+    match serde_json::from_value::<WsMessage>(value.clone()) {
+        Ok(ws_msg) => {
+            let _ = tx.send(ws_msg);
+        }
+        Err(e) => {
+            warn!(
+                "Failed to parse WS {context} message: {e}, raw: {}",
+                value.to_string().chars().take(200).collect::<String>()
+            );
+        }
+    }
+}
+
+fn should_ignore_message(value: &serde_json::Value) -> bool {
+    let event_type = value
+        .get("event_type")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    !matches!(
+        event_type,
+        "book" | "price_change" | "last_trade_price" | "tick_size_change" | "best_bid_ask"
+    )
 }
 
 /// Build a subscription JSON string for testing/external use.
@@ -478,6 +507,17 @@ mod tests {
     fn test_market_subscription_semantics_match_documented_contract() {
         let semantics = market_subscription_semantics();
         assert!(semantics.supports_unsubscribe);
+    }
+
+    #[test]
+    fn parse_and_send_ignores_unknown_event_types() {
+        let (tx, mut rx) = broadcast::channel(4);
+        parse_and_send(
+            r#"{"event_type":"new_market","market":"0xabc","asset_id":"123","timestamp":"1700000000000"}"#,
+            &tx,
+        );
+
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

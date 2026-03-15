@@ -71,7 +71,7 @@ async fn connects_to_polymarket_and_receives_book_snapshot() {
     println!("Assets:    {} subscriptions", asset_ids.len());
 
     // Create a pipeline and subscribe to snapshots BEFORE starting it.
-    let mut pipeline = Pipeline::new(asset_ids, 256, 64);
+    let pipeline = Pipeline::new(asset_ids, 256, 64);
     let mut snapshot_rx = pipeline.subscribe_snapshots();
 
     // Start the pipeline in a background task.

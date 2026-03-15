@@ -8,7 +8,7 @@
 
 ## Purpose
 
-This system is a low-latency trading pipeline for Polymarket's CLOB (Central Limit Order Book) on Polygon. It connects to Polymarket's WebSocket feed, maintains a real-time local order book, runs configurable strategies that produce trade signals, and dispatches pre-signed EIP-712 orders over warm HTTP/2 connections. The entire pipeline is instrumented with nanosecond-precision timestamps at 8 checkpoints, enabling precise measurement of what the code controls (trigger-to-wire) vs. what physics controls (network RTT). The binary is `pm-executor`. It reads `config.toml`, connects to live markets, and either logs triggers (dry-run) or sends real orders.
+This system is a low-latency trading pipeline for Polymarket's CLOB (Central Limit Order Book) on Polygon. It connects to Polymarket's WebSocket feed, maintains a real-time local order book, runs configurable strategies that produce trade signals, and dispatches signed EIP-712 orders over warm HTTP/2 connections. The entire pipeline is instrumented with nanosecond-precision timestamps at 8 checkpoints, enabling precise measurement of what the code controls (trigger-to-wire) vs. what physics controls (network RTT). The binary is `pm-executor`. It reads `config.toml`, connects to live markets, and either logs triggers (dry-run) or sends real orders. The current default live path is a dedicated `btc_5m` runner that resolves the active BTC 5-minute market schedule from Gamma slugs, rotates the Polymarket WS subscription set in place, and uses the public Binance `BTCUSDT` agg-trade tape as the fast reference feed for early post-open gating.
 
 ## Architecture Overview
 
@@ -55,6 +55,26 @@ The system is a streaming pipeline with four stages, connected by typed channels
 │  dry_run=false: process_one_clob() →                 │
 │    PreSignedOrderPool.dispatch() → warm H2 → CLOB API│
 └──────────────────────────────────────────────────────┘
+```
+
+That four-stage snapshot -> strategy -> trigger pipeline remains the generic path for `threshold` and `spread`. The BTC 5-minute bot uses a specialized runtime on top of the same feed and execution primitives:
+
+```
+┌──────────────────┐      ┌──────────────────────────────┐
+│ Gamma exact slug │      │ Polymarket WS current/next   │
+│ lookup           │─────▶│ market token subscriptions   │
+└────────┬─────────┘      └──────────────┬───────────────┘
+         │                                │
+         ▼                                ▼
+┌────────────────────────────────────────────────────────┐
+│ pm-executor::btc5m::Btc5mRunner                        │
+│ - resolves current/prefetched 5m markets by open_ts    │
+│ - rotates Pipeline assets without restarting WS        │
+│ - watches paired Up/Down books in the 5-21s window     │
+│ - sends direct FOK buy/buy attempts and cleanup sells  │
+└───────────────────────────────┬────────────────────────┘
+                                ▼
+                   warm H2 ConnectionPool -> CLOB API
 ```
 
 ## Workspace Crates
@@ -239,6 +259,7 @@ Real-time market data from Polymarket WebSocket.
 - Sends market subscription commands with `{"type": "market", "operation": "subscribe" | "unsubscribe", "assets_ids": [...]}`
 - 10-second ping interval, auto-reconnect with exponential backoff (1s base, 2x factor, 60s cap, 500ms jitter)
 - Replays the full desired subscription set after reconnect and can accept live diff commands from the feed manager without rebuilding the socket client
+- Ignores unknown public event types so upstream schema additions such as `new_market` do not spam logs or break the data loop
 - Broadcasts `WsMessage` enum to subscribers (including `WsMessage::Reconnected(ReconnectEvent { sequence, timestamp_ms })` on reconnect)
 - `reconnect_count: Arc<AtomicU64>` — incremented on each reconnect
 - `last_message_at: Arc<AtomicU64>` — epoch millis of last received message
@@ -296,12 +317,14 @@ Tagged by `event_type` field in JSON.
 - `PolymarketFeedManager` is the explicit owner for one live Polymarket source instance: it owns the `WsClient`, authoritative stores, notice/update fan-out, reconnect/reset behavior, and diff-driven asset-set reconfiguration
 - `FeedStores` keeps full state in-process while `FeedOutputs` broadcasts small `UpdateNotice`s plus richer `NormalizedUpdate`s for consumers that need them
 - Reconfiguration now clears only removed asset state, stages unsubscribe/subscribe batches through the `WsClient`, and can be constructed with explicit shard ownership while keeping the default single-connection path intact
+- `run()` and `reconfigure_assets()` now operate through shared references, which lets long-lived runtimes keep one feed task alive while rotating the desired asset set underneath it
 - The manager preserves the legacy `OrderBookSnapshot` broadcast only for `BookSnapshot` / `BookDelta` payloads so the old runtime path continues to work during the `11c` → `12a` transition
 
 #### `pipeline.rs` — Compatibility wrapper
 - `Pipeline` is now a thin wrapper over the shared Polymarket `FeedManager`
 - Still exposes `subscribe_snapshots()` / `order_books()` / WS health counters for the legacy trigger/runtime path
 - Also exposes `subscribe_updates()`, `subscribe_notices()`, `reference_store()`, and `reconfigure_assets()` for the new notice-driven path and later runtime work
+- `run()` also works from `&self`, so runtimes like `btc_5m` can spawn the pipeline once and keep using it while market subscriptions roll forward every five minutes
 
 ### pm-strategy
 
@@ -338,10 +361,11 @@ trait Strategy: Send + Sync {
 #### `config.rs` — TOML-driven factory
 ```rust
 struct StrategyConfig { strategy, token_id, side, size, order_type, params }
-struct StrategyParams { threshold: Option<f64>, max_spread: Option<f64> }
+struct StrategyParams { threshold: Option<f64>, max_spread: Option<f64>, btc_5m: Option<Btc5mParams> }
 ```
 - `build_strategy()` — Factory method: "threshold" or "spread" → `Box<dyn Strategy>`
 - `build_trigger_strategy()` — Compatibility factory for the new explicit trigger contract without changing the config file shape
+- `btc_5m` is a specialized executor runtime, not a boxed `pm-strategy` implementation, so config parsing lives here while runtime ownership stays in `pm-executor`
 
 #### `runner.rs` — Async execution loop
 - Receives `OrderBookSnapshot` via mpsc, calls `strategy.on_book_update()`
@@ -373,11 +397,29 @@ Main binary. Wires all components together.
 3. Builds credentials (validates only in live mode)
 4. Live mode: validates credentials against API, warms HTTP/2 pool, builds `SignerParams` for dynamic pricing
 5. Loads persisted state from `state.json` (restores circuit breaker counters)
-6. Creates channel pipeline: broadcast → mpsc → mpsc → crossbeam
-7. Spawns execution loop on dedicated OS thread (with signer for dynamic pricing)
-8. Starts WebSocket pipeline, bridges, strategy runner, health monitor, HTTP health server
-9. Waits for Ctrl+C, graceful shutdown with 5-second timeout
-10. Persists state (orders fired, USD committed, tripped status) on shutdown
+6. If `strategy = "btc_5m"`, starts the specialized runner:
+   - resolves the exact current/future BTC 5-minute markets from Gamma by slug timestamp
+   - starts one `Pipeline`, rotates tracked asset IDs in place, and watches paired Up/Down books directly
+   - starts a parallel Binance `BTCUSDT` agg-trade websocket and captures a per-market open reference plus rolling short-horizon continuation state
+   - executes staged direct FOK probe/pair/cleanup actions, writes per-market execution rows into a SQLite journal, then runs health monitoring and the HTTP health server
+7. Otherwise, starts the legacy generic path: channel pipeline → strategy runner → trigger bridge → dedicated execution thread
+8. Waits for Ctrl+C or an early specialized-runner exit, then performs graceful shutdown
+9. Persists state (orders fired, USD committed, tripped status) on shutdown
+
+#### `btc5m.rs` — Specialized BTC 5-minute runner
+- `GammaBtc5mResolver` resolves the exact event via `https://gamma-api.polymarket.com/events?slug=btc-updown-5m-<open_ts>` and maps `outcomes` / `clobTokenIds` into explicit Up/Down token IDs
+- Market cadence is keyed off slug timestamps (`open_ts = now - now % 300`), not Polymarket `active` flags alone, because multiple future BTC 5-minute markets can be `active=true` simultaneously
+- `Btc5mRunner` tracks the current market plus a configurable prefetch window, refreshes that window once per second, and updates the live WS subscription set through `Pipeline::reconfigure_assets()`
+- The runner keeps explicit per-market execution state: Binance open/latest prices, recent Binance trade buffer, pending first leg, paired size, pair/single-side spend, gross deployed, cleanup flags, and completion/blocked status
+- `run_binance_feed()` connects to the public Binance `BTCUSDT` agg-trade websocket, treats the first trade at or after each 5-minute boundary as the opening reference, and continuously refreshes short-horizon continuation/reversal state during the early entry window
+- A dedicated SQLite journal worker persists one row per BTC 5-minute action result (`first_leg`, `second_leg`, `cleanup`) including market slug/open time, side/outcome, size/price, cleanup reason/loss, and the exchange response fields (`order_id`, `status`, `transaction_hashes`, `trade_ids`) so post-trade agents can reconstruct a market's sequence directly from the database
+- `plan_market_action()` implements a staged pair-first state machine:
+  - during the `5-9s` probe window, require fresh Binance data, a modest aligned move, and an attractive contemporaneous `up_ask + down_ask <= carry_pair_sum_max`
+  - buy the Binance-aligned side first with a small probe or burst clip sized by `probe_budget_usd`, `initial_burst_budget_usd`, `max_pair_budget_usd`, `max_gross_deployed_per_market`, and top-of-book/min-order constraints
+  - only complete the second leg while Binance is still fresh and the effective pair sum remains attractive
+  - if the fast tape goes stale/reverses, the second leg stays unavailable, or cleanup mode has already been entered, stop adding risk and try to flatten the pending first leg at the bid
+- Cleanup is a core transition, not an emergency path: failed pair completion, late entry, or Binance reversal can all move a market into cleanup; realized cleanup loss accumulates against `max_cleanup_loss_usd`, which can stop the session
+- The lower-confidence one-sided continuation branch and paired inventory recycling sells are still not enabled in the default small-account live profile; `allow_one_sided_continuation = false` keeps the runtime pair-first unless explicitly overridden
 
 #### `config.rs` — Configuration
 ```rust
@@ -594,7 +636,7 @@ pool_size = 2         # Number of warm H2 connections
 address_family = "auto"  # "auto", "ipv4", "ipv6"
 
 [websocket]
-asset_ids = ["48825..."]  # Legacy explicit Polymarket asset subscriptions; still supported
+asset_ids = []            # BTC 5m runtime resolves and rotates current/next market tokens dynamically
 ws_channel_capacity = 1024
 snapshot_channel_capacity = 256
 
@@ -617,26 +659,54 @@ snapshot_channel_capacity = 256
 # instrument_ids = ["BTC-USD"]
 
 [strategy]
-strategy = "threshold"    # "threshold" or "spread"
-token_id = "48825..."     # Execution asset; executor also merges explicit source bindings when resolving subscriptions
-side = "Buy"
-size = "5"                # USDC amount
-order_type = "FOK"        # FOK, FAK, GTC, GTD
+strategy = "btc_5m"       # "threshold", "spread", or "btc_5m"
+# token_id = "48825..."    # Legacy threshold/spread only
+# side = "Buy"             # Legacy threshold/spread only
+# size = "5"               # Legacy threshold/spread only
+order_type = "FOK"        # BTC 5m uses FOK for pair entry and cleanup
 
 [strategy.params]
-threshold = 0.45          # ThresholdStrategy: fire when ask <= 0.45 (buy)
+# threshold = 0.45        # ThresholdStrategy: fire when ask <= 0.45 (buy)
 # max_spread = 0.02       # SpreadStrategy: fire when spread < 0.02
+
+[strategy.params.btc_5m]
+market_slug_prefix = "btc-updown-5m"
+cadence_seconds = 300
+prefetch_markets = 1
+entry_window_start_seconds = 5
+probe_window_end_seconds = 9
+entry_window_end_seconds = 21
+probe_budget_usd = 3.0
+initial_burst_budget_usd = 5.0
+max_pair_budget_usd = 45.0
+max_single_side_budget_usd = 10.0
+max_gross_deployed_per_market = 50.0
+max_unpaired_exposure_usd = 12.0
+carry_pair_sum_max = 0.96
+attempt_cooldown_ms = 1000
+cleanup_grace_ms = 1500
+max_cleanup_loss_usd = 5.0   # Session stop on realized cleanup loss from failed pair completion
+binance_ws_url = "wss://stream.binance.com:9443/ws/btcusdt@aggTrade"
+binance_stale_after_ms = 1500
+binance_buffer_window_ms = 5000
+binance_continuation_window_ms = 3000
+binance_min_move_bps = 0.5
+binance_reversal_veto_bps = 0.5
+allow_one_sided_continuation = false
+one_sided_min_aligned_entry_bps = 2.0
+risk_mode = "small_account"
 
 [execution]
 presign_count = 100       # Orders pre-signed at startup
 is_neg_risk = false       # Use neg-risk exchange contract
 fee_rate_bps = 0          # Taker fee (some markets require >0, e.g. 1000)
 dry_run = true            # SAFETY: false = real orders
+journal_db_path = "logs/pm-executor.sqlite3"  # SQLite journal for per-market BTC 5m execution rows
 
 [safety]
-max_orders = 10           # Circuit breaker: total orders before halt
-max_usd_exposure = 50.0   # Circuit breaker: max USD committed
-max_triggers_per_second = 2  # Rate limiter
+max_orders = 1000         # Coarse operational cap
+max_usd_exposure = 2000.0 # Coarse cumulative notional cap (not realized-loss stop)
+max_triggers_per_second = 4  # Pair entry may need buy + buy + cleanup in one second
 require_confirmation = true  # Wait for response before next order
 
 [logging]
@@ -684,6 +754,13 @@ cargo run -p pm-executor -- --validate-creds
 # Run pipeline in dry-run mode
 cargo run -p pm-executor
 
+# Force live mode without editing config.toml
+cargo run -p pm-executor -- --live
+
+# Equivalent dry-run/live override spellings
+cargo run -p pm-executor -- --dry-run=false
+cargo run -p pm-executor -- dry_run=false
+
 # Run pipeline with custom config
 cargo run -p pm-executor -- --config my_config.toml
 
@@ -707,7 +784,7 @@ For latency-sensitive changes, benchmark baselines, and manual order-path sign-o
 
 ## Current Limitations & Known Issues
 
-1. **Pre-signed orders have fixed price** — Signed at startup using strategy threshold. Strategy must fire at the same price. No runtime price adaptation.
+1. **Legacy pre-signed path has fixed price** — The threshold/spread fallback path still signs around startup-configured price assumptions. The default `btc_5m` runner uses dynamic per-order signing instead.
 
 2. **Pre-signed pool uses cursor reset for refill** — When pool drops below 20%, cursor resets to 0 (reuses same bodies). Filled orders will be rejected by exchange on duplicate salt. Circuit breaker catches the failures.
 
@@ -724,6 +801,8 @@ For latency-sensitive changes, benchmark baselines, and manual order-path sign-o
 8. **No QUIC/HTTP3** — Cloudflare advertises h3 via alt-svc header. Stub exists but no implementation.
 
 9. **`require_confirmation = true` is serial** — OrderGuard blocks next order until previous response received. Throughput limited to 1/(network RTT) orders/second.
+
+10. **`btc_5m` still leaves two lower-confidence branches disabled by default** — The Binance-informed staged pair-first path is live, but the explicit one-sided continuation branch and the more active paired-with-sells recycling mode are still intentionally left out of the default small-account runtime until we have stronger live quote evidence for their rules.
 
 ## What's Next
 

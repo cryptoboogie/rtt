@@ -21,8 +21,13 @@ fn strategy_builds_from_example_config() {
     let strategy_section = toml::to_string(config.get("strategy").unwrap()).unwrap();
     let strategy_config: pm_strategy::config::StrategyConfig =
         toml::from_str(&strategy_section).unwrap();
-    let strategy = strategy_config.build_strategy().unwrap();
-    assert_eq!(strategy.name(), "threshold");
+    if strategy_config.uses_specialized_runtime() {
+        let params = strategy_config.btc_5m_params().unwrap();
+        assert_eq!(params.market_slug_prefix, "btc-updown-5m");
+    } else {
+        let strategy = strategy_config.build_strategy().unwrap();
+        assert_eq!(strategy.name(), "threshold");
+    }
 }
 
 /// Test the full mock data flow: snapshot → strategy → trigger.
