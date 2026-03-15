@@ -1655,3 +1655,18 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test --workspace`
 - **Commit**: N/A (working tree only)
 - **Deviation**: Accepted both naming schemes instead of forcing a breaking rename, because the legacy names are still used by the lower-level auth code and existing operator environments.
+
+### 13.6 — Fix credential validation to use signer/EOA auth without requiring live-only fields
+- **Spec**: operator credential-validation follow-up for `specs/13-btc_5m_strategy_spec.md`
+- **Files changed**: `crates/pm-executor/src/execution.rs`, `crates/pm-executor/src/main.rs`, `config.toml`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Split `--validate-creds` onto a dedicated validation-only credential builder so it now requires only the L2 API key, secret, passphrase, and signer/EOA address instead of incorrectly requiring the live private key and maker/proxy wallet fields
+  - Corrected executor auth-address construction so `L2Credentials.address` uses the signer/EOA address for HMAC validation, while live order signing still separately requires the maker/proxy address for the order struct
+  - Added regression coverage for both behaviors: validation without a private key and live auth using the signer/EOA address instead of the maker/proxy address
+- **Tests**:
+  - `cargo test -p pm-executor build_validation_credentials_does_not_require_private_key`
+  - `cargo test -p pm-executor build_credentials_live_uses_signer_address_for_auth`
+  - `cargo test -p pm-executor`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Kept `signer_address` optional for live execution by deriving it from the private key when absent, but still reject mismatches when it is explicitly configured so auth failures surface locally before an order path hits the API.

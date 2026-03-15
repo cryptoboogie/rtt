@@ -159,7 +159,7 @@ fn main() {
 
     if cli.validate_creds_only {
         tracing::info!("Validating credentials...");
-        let (l2_creds, _) = execution::build_credentials(&config.credentials, false)
+        let l2_creds = execution::build_validation_credentials(&config.credentials)
             .unwrap_or_else(|e| {
                 tracing::error!("Credential error: {}", e);
                 std::process::exit(1);

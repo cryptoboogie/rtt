@@ -130,19 +130,44 @@ pub fn retry_decision(
 ///
 /// If `dry_run` is false and credentials are empty/invalid, returns an error.
 /// If `dry_run` is true, empty credentials are allowed (we never send orders).
+pub fn build_validation_credentials(
+    creds: &CredentialsConfig,
+) -> Result<L2Credentials, Box<dyn std::error::Error>> {
+    if creds.api_key.is_empty() {
+        return Err("api_key is required for credential validation".into());
+    }
+    if creds.api_secret.is_empty() {
+        return Err("api_secret is required for credential validation".into());
+    }
+    if creds.passphrase.is_empty() {
+        return Err("passphrase is required for credential validation".into());
+    }
+    if creds.signer_address.is_empty() {
+        return Err("signer_address is required for credential validation".into());
+    }
+
+    Ok(L2Credentials {
+        api_key: creds.api_key.clone(),
+        secret: creds.api_secret.clone(),
+        passphrase: creds.passphrase.clone(),
+        address: creds.signer_address.clone(),
+    })
+}
+
 pub fn build_credentials(
     creds: &CredentialsConfig,
     dry_run: bool,
 ) -> Result<(L2Credentials, Option<PrivateKeySigner>), Box<dyn std::error::Error>> {
-    let l2 = L2Credentials {
-        api_key: creds.api_key.clone(),
-        secret: creds.api_secret.clone(),
-        passphrase: creds.passphrase.clone(),
-        address: creds.maker_address.clone(),
-    };
-
     if dry_run {
-        return Ok((l2, None));
+        return Ok((
+            L2Credentials {
+                api_key: creds.api_key.clone(),
+                secret: creds.api_secret.clone(),
+                passphrase: creds.passphrase.clone(),
+                address: creds.signer_address.clone(),
+            },
+            None,
+        ));
     }
 
     // Validate credentials for live mode
@@ -167,6 +192,24 @@ pub fn build_credentials(
         .strip_prefix("0x")
         .unwrap_or(&creds.private_key);
     let signer: PrivateKeySigner = pk_hex.parse()?;
+    let derived_signer_address = signer.address();
+
+    let auth_address = if creds.signer_address.is_empty() {
+        derived_signer_address.to_string()
+    } else {
+        let configured_signer: Address = creds.signer_address.parse()?;
+        if configured_signer != derived_signer_address {
+            return Err("signer_address does not match private_key".into());
+        }
+        creds.signer_address.clone()
+    };
+
+    let l2 = L2Credentials {
+        api_key: creds.api_key.clone(),
+        secret: creds.api_secret.clone(),
+        passphrase: creds.passphrase.clone(),
+        address: auth_address,
+    };
 
     Ok((l2, Some(signer)))
 }
@@ -433,6 +476,18 @@ mod tests {
         }
     }
 
+    fn valid_creds_with_distinct_signer_and_maker() -> CredentialsConfig {
+        CredentialsConfig {
+            api_key: "test-key".to_string(),
+            api_secret: "dGVzdC1zZWNyZXQ=".to_string(),
+            passphrase: "test-pass".to_string(),
+            private_key: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+                .to_string(),
+            maker_address: "0x1111111111111111111111111111111111111111".to_string(),
+            signer_address: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".to_string(),
+        }
+    }
+
     fn make_trigger(id: u64) -> TriggerMessage {
         TriggerMessage {
             trigger_id: id,
@@ -494,6 +549,27 @@ mod tests {
 
         let (l2, signer) = build_credentials(&valid_creds(), false).unwrap();
         assert!(signer.is_some());
+        assert_eq!(l2.api_key, "test-key");
+        assert_eq!(l2.secret, "dGVzdC1zZWNyZXQ=");
+        assert_eq!(l2.address, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    }
+
+    #[test]
+    fn build_credentials_live_uses_signer_address_for_auth() {
+        let (l2, signer) = build_credentials(&valid_creds_with_distinct_signer_and_maker(), false).unwrap();
+        assert!(signer.is_some());
+        assert_eq!(l2.address, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    }
+
+    #[test]
+    fn build_validation_credentials_does_not_require_private_key() {
+        let mut creds = empty_creds();
+        creds.api_key = "test-key".to_string();
+        creds.api_secret = "dGVzdC1zZWNyZXQ=".to_string();
+        creds.passphrase = "test-pass".to_string();
+        creds.signer_address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".to_string();
+
+        let l2 = build_validation_credentials(&creds).unwrap();
         assert_eq!(l2.api_key, "test-key");
         assert_eq!(l2.secret, "dGVzdC1zZWNyZXQ=");
         assert_eq!(l2.address, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");

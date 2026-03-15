@@ -3,6 +3,8 @@
 #   POLY_API_KEY, POLY_API_SECRET or POLY_SECRET, POLY_PASSPHRASE,
 #   POLY_PRIVATE_KEY, POLY_MAKER_ADDRESS or POLY_PROXY_ADDRESS,
 #   POLY_SIGNER_ADDRESS or POLY_ADDRESS
+# `--validate-creds` only needs the API key/secret/passphrase plus signer/EOA address.
+# Live trading also requires the private key and maker/proxy address.
 
 [credentials]
 api_key = ""

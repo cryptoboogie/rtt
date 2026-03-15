@@ -393,7 +393,7 @@ Main binary. Wires all components together.
 
 #### `main.rs` — Entry point
 1. Loads `config.toml` (or `--config <path>`)
-2. `--validate-creds` flag: validates credentials against live API and exits
+2. `--validate-creds` flag: validates L2 API credentials against the live API and exits; this path requires the API key/secret/passphrase plus the signer/EOA address, but does not require the private key or maker/proxy address
 3. Builds credentials (validates only in live mode)
 4. Live mode: validates credentials against API, warms HTTP/2 pool, builds `SignerParams` for dynamic pricing
 5. Loads persisted state from `state.json` (restores circuit breaker counters)
@@ -717,12 +717,12 @@ level = "info"            # Also controlled by RUST_LOG env var
 
 | Variable | Purpose | Required when |
 |---|---|---|
-| `POLY_API_KEY` | L2 API key | Live mode |
-| `POLY_API_SECRET` / `POLY_SECRET` | L2 API secret (base64url-encoded) | Live mode |
-| `POLY_PASSPHRASE` | L2 API passphrase | Live mode |
+| `POLY_API_KEY` | L2 API key | `--validate-creds`, live mode |
+| `POLY_API_SECRET` / `POLY_SECRET` | L2 API secret (base64url-encoded) | `--validate-creds`, live mode |
+| `POLY_PASSPHRASE` | L2 API passphrase | `--validate-creds`, live mode |
 | `POLY_PRIVATE_KEY` | EOA private key (hex, with or without 0x) | Live mode |
 | `POLY_MAKER_ADDRESS` / `POLY_PROXY_ADDRESS` | Proxy wallet address (order maker/funder) | Live mode |
-| `POLY_SIGNER_ADDRESS` / `POLY_ADDRESS` | EOA address (HMAC auth, lowercased in headers) | Live mode |
+| `POLY_SIGNER_ADDRESS` / `POLY_ADDRESS` | EOA address (HMAC auth, lowercased in headers) | `--validate-creds`, live mode |
 | `RUST_LOG` | Override tracing filter | Optional |
 
 Dry-run mode allows all credentials to be empty.
