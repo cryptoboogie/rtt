@@ -1640,3 +1640,18 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test -p pm-strategy --test config_test`
 - **Commit**: N/A (working tree only)
 - **Deviation**: The SQLite journal is currently BTC 5m-specific rather than a generic executor-wide audit trail. It focuses on reconstructing staged market actions instead of full account-level PnL accounting.
+
+### 13.5 — Restore legacy Polymarket env-var compatibility for pm-executor
+- **Spec**: operator compatibility follow-up for `specs/13-btc_5m_strategy_spec.md`
+- **Files changed**: `crates/pm-executor/src/config.rs`, `config.toml`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Updated `pm-executor` config env overrides to accept the long-used legacy Polymarket variable names alongside the newer aliases: `POLY_SECRET`, `POLY_ADDRESS`, and `POLY_PROXY_ADDRESS` now map to the executor's API secret, signer address, and maker address fields
+  - Kept deterministic precedence so if both names are set, the newer explicit aliases (`POLY_API_SECRET`, `POLY_SIGNER_ADDRESS`, `POLY_MAKER_ADDRESS`) win
+  - Updated operator-facing config/docs to advertise both naming schemes instead of implying that only the new alias set is supported
+- **Tests**:
+  - `cargo test -p pm-executor legacy_env_var_names_override_config`
+  - `cargo test -p pm-executor canonical_env_var_names_win_over_legacy_aliases`
+  - `cargo test -p pm-executor`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Accepted both naming schemes instead of forcing a breaking rename, because the legacy names are still used by the lower-level auth code and existing operator environments.

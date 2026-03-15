@@ -625,11 +625,11 @@ rtt-bench --trigger-test  # single trigger
 ```toml
 [credentials]
 api_key = ""          # POLY_API_KEY env override
-api_secret = ""       # POLY_API_SECRET env override
+api_secret = ""       # POLY_API_SECRET or POLY_SECRET env override
 passphrase = ""       # POLY_PASSPHRASE env override
 private_key = ""      # POLY_PRIVATE_KEY env override
-maker_address = ""    # POLY_MAKER_ADDRESS env override (proxy wallet)
-signer_address = ""   # POLY_SIGNER_ADDRESS env override (EOA)
+maker_address = ""    # POLY_MAKER_ADDRESS or POLY_PROXY_ADDRESS env override (proxy wallet)
+signer_address = ""   # POLY_SIGNER_ADDRESS or POLY_ADDRESS env override (EOA)
 
 [connection]
 pool_size = 2         # Number of warm H2 connections
@@ -718,11 +718,11 @@ level = "info"            # Also controlled by RUST_LOG env var
 | Variable | Purpose | Required when |
 |---|---|---|
 | `POLY_API_KEY` | L2 API key | Live mode |
-| `POLY_API_SECRET` | L2 API secret (base64url-encoded) | Live mode |
+| `POLY_API_SECRET` / `POLY_SECRET` | L2 API secret (base64url-encoded) | Live mode |
 | `POLY_PASSPHRASE` | L2 API passphrase | Live mode |
 | `POLY_PRIVATE_KEY` | EOA private key (hex, with or without 0x) | Live mode |
-| `POLY_MAKER_ADDRESS` | Proxy wallet address (order maker/funder) | Live mode |
-| `POLY_SIGNER_ADDRESS` | EOA address (HMAC auth, lowercased in headers) | Live mode |
+| `POLY_MAKER_ADDRESS` / `POLY_PROXY_ADDRESS` | Proxy wallet address (order maker/funder) | Live mode |
+| `POLY_SIGNER_ADDRESS` / `POLY_ADDRESS` | EOA address (HMAC auth, lowercased in headers) | Live mode |
 | `RUST_LOG` | Override tracing filter | Optional |
 
 Dry-run mode allows all credentials to be empty.

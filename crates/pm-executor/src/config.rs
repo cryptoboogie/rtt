@@ -211,7 +211,7 @@ impl ExecutorConfig {
         if let Ok(v) = std::env::var("POLY_API_KEY") {
             self.credentials.api_key = v;
         }
-        if let Ok(v) = std::env::var("POLY_API_SECRET") {
+        if let Some(v) = first_env_value(&["POLY_API_SECRET", "POLY_SECRET"]) {
             self.credentials.api_secret = v;
         }
         if let Ok(v) = std::env::var("POLY_PASSPHRASE") {
@@ -220,10 +220,10 @@ impl ExecutorConfig {
         if let Ok(v) = std::env::var("POLY_PRIVATE_KEY") {
             self.credentials.private_key = v;
         }
-        if let Ok(v) = std::env::var("POLY_MAKER_ADDRESS") {
+        if let Some(v) = first_env_value(&["POLY_MAKER_ADDRESS", "POLY_PROXY_ADDRESS"]) {
             self.credentials.maker_address = v;
         }
-        if let Ok(v) = std::env::var("POLY_SIGNER_ADDRESS") {
+        if let Some(v) = first_env_value(&["POLY_SIGNER_ADDRESS", "POLY_ADDRESS"]) {
             self.credentials.signer_address = v;
         }
         if let Ok(v) = std::env::var("POLY_ALERT_WEBHOOK_URL") {
@@ -251,6 +251,12 @@ impl ExecutorConfig {
             .map(|asset_id| asset_id.to_string())
             .collect()
     }
+}
+
+fn first_env_value(names: &[&str]) -> Option<String> {
+    names
+        .iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
 }
 
 fn push_unique_asset_id(asset_ids: &mut Vec<AssetId>, candidate: AssetId) {
@@ -373,6 +379,79 @@ threshold = 0.5
         config.apply_env_overrides();
         assert_eq!(config.credentials.api_key, "from_env");
         std::env::remove_var("POLY_API_KEY");
+    }
+
+    #[test]
+    fn legacy_env_var_names_override_config() {
+        let config_toml = r#"
+[credentials]
+api_secret = "from_file_secret"
+maker_address = "from_file_maker"
+signer_address = "from_file_signer"
+
+[connection]
+[websocket]
+asset_ids = ["a"]
+[strategy]
+strategy = "threshold"
+token_id = "a"
+side = "Buy"
+size = "1"
+order_type = "FOK"
+[strategy.params]
+threshold = 0.5
+[execution]
+[logging]
+"#;
+        std::env::set_var("POLY_SECRET", "legacy_secret");
+        std::env::set_var("POLY_PROXY_ADDRESS", "0xlegacyproxy");
+        std::env::set_var("POLY_ADDRESS", "0xlegacysigner");
+        let mut config: ExecutorConfig = toml::from_str(config_toml).unwrap();
+        config.apply_env_overrides();
+        assert_eq!(config.credentials.api_secret, "legacy_secret");
+        assert_eq!(config.credentials.maker_address, "0xlegacyproxy");
+        assert_eq!(config.credentials.signer_address, "0xlegacysigner");
+        std::env::remove_var("POLY_SECRET");
+        std::env::remove_var("POLY_PROXY_ADDRESS");
+        std::env::remove_var("POLY_ADDRESS");
+    }
+
+    #[test]
+    fn canonical_env_var_names_win_over_legacy_aliases() {
+        let config_toml = r#"
+[credentials]
+
+[connection]
+[websocket]
+asset_ids = ["a"]
+[strategy]
+strategy = "threshold"
+token_id = "a"
+side = "Buy"
+size = "1"
+order_type = "FOK"
+[strategy.params]
+threshold = 0.5
+[execution]
+[logging]
+"#;
+        std::env::set_var("POLY_SECRET", "legacy_secret");
+        std::env::set_var("POLY_API_SECRET", "canonical_secret");
+        std::env::set_var("POLY_PROXY_ADDRESS", "0xlegacyproxy");
+        std::env::set_var("POLY_MAKER_ADDRESS", "0xcanonicalmaker");
+        std::env::set_var("POLY_ADDRESS", "0xlegacysigner");
+        std::env::set_var("POLY_SIGNER_ADDRESS", "0xcanonicalsigner");
+        let mut config: ExecutorConfig = toml::from_str(config_toml).unwrap();
+        config.apply_env_overrides();
+        assert_eq!(config.credentials.api_secret, "canonical_secret");
+        assert_eq!(config.credentials.maker_address, "0xcanonicalmaker");
+        assert_eq!(config.credentials.signer_address, "0xcanonicalsigner");
+        std::env::remove_var("POLY_SECRET");
+        std::env::remove_var("POLY_API_SECRET");
+        std::env::remove_var("POLY_PROXY_ADDRESS");
+        std::env::remove_var("POLY_MAKER_ADDRESS");
+        std::env::remove_var("POLY_ADDRESS");
+        std::env::remove_var("POLY_SIGNER_ADDRESS");
     }
 
     #[test]

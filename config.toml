@@ -1,7 +1,8 @@
 # pm-executor configuration
 # Credentials can also be set via environment variables:
-#   POLY_API_KEY, POLY_API_SECRET, POLY_PASSPHRASE,
-#   POLY_PRIVATE_KEY, POLY_MAKER_ADDRESS, POLY_SIGNER_ADDRESS
+#   POLY_API_KEY, POLY_API_SECRET or POLY_SECRET, POLY_PASSPHRASE,
+#   POLY_PRIVATE_KEY, POLY_MAKER_ADDRESS or POLY_PROXY_ADDRESS,
+#   POLY_SIGNER_ADDRESS or POLY_ADDRESS
 
 [credentials]
 api_key = ""
