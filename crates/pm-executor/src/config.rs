@@ -268,6 +268,12 @@ fn push_unique_asset_id(asset_ids: &mut Vec<AssetId>, candidate: AssetId) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     const VALID_TOML: &str = r#"
 [credentials]
@@ -356,6 +362,7 @@ threshold = 0.45
 
     #[test]
     fn env_var_overrides_config() {
+        let _guard = env_lock().lock().unwrap();
         let config_toml = r#"
 [credentials]
 api_key = "from_file"
@@ -383,6 +390,7 @@ threshold = 0.5
 
     #[test]
     fn legacy_env_var_names_override_config() {
+        let _guard = env_lock().lock().unwrap();
         let config_toml = r#"
 [credentials]
 api_secret = "from_file_secret"
@@ -418,6 +426,7 @@ threshold = 0.5
 
     #[test]
     fn canonical_env_var_names_win_over_legacy_aliases() {
+        let _guard = env_lock().lock().unwrap();
         let config_toml = r#"
 [credentials]
 
