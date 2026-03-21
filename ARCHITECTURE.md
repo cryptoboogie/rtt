@@ -594,6 +594,8 @@ rtt-bench --trigger-test  # single trigger
 | Cloudflare CDN | Fronts CLOB API, provides cf-ray POP | TLS handshake fails, connections down |
 | Polygon RPC (via alloy) | Not used at runtime; only in `approve.js` setup script | No runtime impact |
 
+The Polymarket public WS parser is intentionally tolerant of newly-added informational `event_type` values. Unknown market events are ignored as no-ops unless they carry one of the supported book/trade/reference payloads used by the runtime.
+
 **Rust crate dependencies (key ones):**
 - `hyper` 1.x + `hyper-util` — HTTP/2 client
 - `tokio-rustls` 0.26 + `rustls` 0.23 — TLS

@@ -38,6 +38,9 @@ pub enum WsMessage {
     /// Not deserialized from JSON — only produced by WsClient.
     #[serde(skip)]
     Reconnected(ReconnectEvent),
+    /// Unknown or newly-added informational market event; ignored by current pipelines.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -259,6 +262,7 @@ impl WsMessage {
                     }),
                 }]
             }
+            WsMessage::Unknown => Vec::new(),
             WsMessage::Reconnected(event) => vec![NormalizedUpdate {
                 notice: UpdateNotice {
                     source_id: source_id.clone(),

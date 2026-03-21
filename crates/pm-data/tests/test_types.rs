@@ -194,6 +194,21 @@ fn deserialize_best_bid_ask_event() {
 }
 
 #[test]
+fn deserialize_unknown_market_event_without_failing_feed() {
+    let json = r#"{
+        "event_type": "new_market",
+        "id": "1671824",
+        "question": "Total Kills Over/Under 57.5 in Game 2?",
+        "market": "0x047c0700859b3ff8ba3d463d50c4bdcaa70f7d8d2f1e10e15414a80a11bd92a3",
+        "slug": "dota2-avl-re-2026-03-21-game2-kill-over-57p5"
+    }"#;
+
+    let msg: WsMessage = serde_json::from_str(json).unwrap();
+    assert!(matches!(msg, WsMessage::Unknown));
+    assert!(msg.to_normalized_updates().is_empty());
+}
+
+#[test]
 fn side_deserialize_aliases() {
     let buy: Side = serde_json::from_str(r#""BUY""#).unwrap();
     assert_eq!(buy, Side::Buy);

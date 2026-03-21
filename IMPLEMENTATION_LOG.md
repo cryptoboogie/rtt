@@ -1678,3 +1678,18 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test --workspace`
 - **Commit**: N/A (working tree only)
 - **Deviation**: Derived the authoritative live signer identity from the private key and treat the configured signer address as a consistency check, because auth failures at runtime are harder to diagnose than an early startup error.
+
+### 13.7 — Tolerate unknown Polymarket market-event types on the public WS feed
+- **Spec**: `specs/13-low-risk-liquidity-rewards.md`
+- **Files changed**: `crates/pm-data/src/types.rs`, `crates/pm-data/tests/test_types.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added an `Unknown` websocket-message variant so newly-added Polymarket `event_type` values such as `new_market` deserialize cleanly instead of generating parse warnings
+  - Treated unknown market events as no-op normalized updates so the book/trade pipeline remains focused on supported payloads while tolerating forward-compatible schema additions
+  - Documented the tolerant-parser behavior in the architecture notes
+- **Tests**:
+  - `cargo test -p pm-data deserialize_unknown_market_event_without_failing_feed -- --nocapture`
+  - `cargo test -p pm-data parse_book_with_extra_fields_ignored -- --nocapture`
+  - `cargo test -p pm-data`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Chose a conservative ignore-and-log-less stance for unknown informational events instead of surfacing them into the shared update model, because the runtime currently has no consumer for them and warning spam obscures actual feed problems.
