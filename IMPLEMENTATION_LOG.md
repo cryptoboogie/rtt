@@ -1727,3 +1727,18 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test --workspace`
 - **Commit**: N/A (working tree only)
 - **Deviation**: Kept the passive-price guard in the strategy rather than relying solely on exchange-side `postOnly` rejection, because it prevents unnecessary live rejects while still leaving `postOnly` as a backstop for race conditions between market-data observation and submit time.
+
+### 13.10 — Derive live signature type from maker/signer addresses
+- **Spec**: `specs/13-low-risk-liquidity-rewards.md`
+- **Files changed**: `crates/pm-executor/src/main.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Fixed `build_signer_params()` so live quote mode no longer hard-codes `SignatureType::Poly`
+  - Added a small runtime derivation rule: identical maker/signer addresses use `EOA (0)`, while proxy-maker accounts with a distinct signer use `GnosisSafe (2)`
+  - Added regression tests to pin both branches of that derivation, matching the architecture decision already documented for Magic Link / proxy-wallet accounts
+- **Tests**:
+  - `cargo test -p pm-executor derive_signature_type_uses_eoa_when_maker_and_signer_match -- --nocapture`
+  - `cargo test -p pm-executor derive_signature_type_uses_gnosis_safe_for_proxy_wallets -- --nocapture`
+  - `cargo test --workspace --lib`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Chose address-based derivation instead of introducing another prod config flag because the live maker/signer relationship is already explicit in config and the current deployment target only needs the EOA vs GnosisSafe split.

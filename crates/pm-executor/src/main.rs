@@ -146,6 +146,7 @@ fn build_signer_params(
         .maker_address
         .parse()
         .expect("invalid maker_address in config");
+    let sig_type = derive_signature_type(maker_addr, signer_addr);
 
     Some(execution::SignerParams {
         signer,
@@ -153,9 +154,20 @@ fn build_signer_params(
         signer_addr,
         fee_rate_bps: config.execution.fee_rate_bps,
         is_neg_risk: config.execution.is_neg_risk,
-        sig_type: rtt_core::clob_order::SignatureType::Poly,
+        sig_type,
         owner: config.credentials.api_key.clone(),
     })
+}
+
+fn derive_signature_type(
+    maker_addr: alloy::primitives::Address,
+    signer_addr: alloy::primitives::Address,
+) -> rtt_core::clob_order::SignatureType {
+    if maker_addr == signer_addr {
+        rtt_core::clob_order::SignatureType::Eoa
+    } else {
+        rtt_core::clob_order::SignatureType::GnosisSafe
+    }
 }
 
 async fn run_trigger_mode(
@@ -1219,6 +1231,32 @@ fn upsert_working_quote(
 ) {
     working.retain(|quote| quote.quote_id != desired.quote_id);
     working.push(WorkingQuote::pending_submit(desired, now_ms));
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy::primitives::address;
+
+    use super::derive_signature_type;
+
+    #[test]
+    fn derive_signature_type_uses_eoa_when_maker_and_signer_match() {
+        let addr = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+
+        let sig_type = derive_signature_type(addr, addr);
+
+        assert_eq!(sig_type, rtt_core::clob_order::SignatureType::Eoa);
+    }
+
+    #[test]
+    fn derive_signature_type_uses_gnosis_safe_for_proxy_wallets() {
+        let maker = address!("1111111111111111111111111111111111111111");
+        let signer = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+
+        let sig_type = derive_signature_type(maker, signer);
+
+        assert_eq!(sig_type, rtt_core::clob_order::SignatureType::GnosisSafe);
+    }
 }
 
 fn persist_final_state(state_path: &str, circuit_breaker: &safety::CircuitBreaker) {

@@ -590,6 +590,7 @@ rtt-bench --trigger-test  # single trigger
 - **REASON**: Polymarket's Magic Link wallets are Gnosis Safe proxy contracts. The EOA signs, but the proxy wallet is the maker/funder. signatureType=2 tells the exchange to verify the EOA signature against the proxy wallet's authorized signers.
 - **TRADEOFFS**: Requires knowing both the EOA address (for auth) and proxy address (for order maker). These are separate env vars: `POLY_ADDRESS` (EOA, used in HMAC headers) and `POLY_PROXY_ADDRESS` / `POLY_MAKER_ADDRESS` (proxy, used in order struct).
 - The executor validates this separation in live mode: HMAC/L2 auth uses the signer EOA, order structs use the maker/proxy wallet, and a configured signer address must match the supplied private key.
+- Runtime signer selection now derives the signature type from the live maker/signer pair: same address => `EOA (0)`, proxy maker with distinct signer => `GnosisSafe (2)`. This prevents live quote mode from hard-coding the wrong signature type for proxy-wallet accounts.
 
 ## External Dependencies
 
