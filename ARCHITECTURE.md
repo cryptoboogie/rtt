@@ -410,6 +410,7 @@ Runtime switching for deployments also supports `RTT_*` env var overrides, inclu
 #### `analysis_store.rs` — Append-only SQLite operation journal
 - Opens a dedicated SQLite database at startup and fails fast if it cannot be created
 - Appends one row per material operation with timestamps, quote/order identifiers, requested price/size, status, error text, and capital before/after
+- Quote mode now records per-order `quote_submit_result` rows so operators can distinguish request errors, rejected orders, non-resting statuses (`matched` / `delayed` / `unmatched`), and true resting `live` placements
 - Used only for offline research and operator diagnostics; it does not replace the JSON restart-state file
 
 #### `order_state.rs` — Local quote lifecycle state
@@ -442,8 +443,13 @@ Runtime switching for deployments also supports `RTT_*` env var overrides, inclu
   - Handles `DispatchOutcome` explicitly so build/request/pool failures do not masquerade as reconnect samples
   - Sends webhook alert on circuit breaker trip
 - `QuoteCommandPolicy`, `QuoteCommandThrottle`, and `retry_decision()` define the bounded retry/backoff/throttling seam for quote-maintenance commands without redesigning the current trigger hot path
-- `QuoteApiClient` signs `DesiredQuote` values directly (including GTD expirations), batches `POST /orders` and `DELETE /orders`, issues `DELETE /cancel-all`, sends `/heartbeats`, and samples `/rewards/user/percentages` plus `/rebates/current`
+- `QuoteApiClient` signs `DesiredQuote` values directly (including GTD expirations), submits quote batches as documented post-only maker orders, batches `POST /orders` and `DELETE /orders`, issues `DELETE /cancel-all`, sends chained heartbeats to `/v1/heartbeats`, and samples `/rewards/user/percentages` plus `/rebates/current`
+- Quote-mode submit handling treats only `status = live` as a resting working quote; successful-but-non-resting statuses such as `matched`, `delayed`, and `unmatched` are journaled and fed back into reconciliation instead of being assumed open on exchange
 - Quote-mode execution is correctness-first rather than latency-first: it uses authenticated REST requests and deterministic batching instead of the trigger branch's dedicated HTTP/2 thread
+
+For liquidity-rewards quote generation, passive maker behavior is enforced twice:
+- the strategy clamps depth-aware bid prices to remain at least one tick below the current best ask, so a size-cutoff-adjusted midpoint cannot accidentally turn a quote marketable
+- the executor submits quote orders with `postOnly = true`, so any remaining cross-book race is rejected by the exchange instead of executing as taker flow
 
 #### `safety.rs` — Lock-free safety rails
 - **CircuitBreaker**: Atomic counters for orders fired and USD committed (cents). Once tripped, stays tripped (restart required). Limits: `max_orders=5`, `max_usd_exposure=10.0` (conservative defaults).

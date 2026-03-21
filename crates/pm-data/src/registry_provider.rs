@@ -156,10 +156,7 @@ impl PolymarketRewardProvider {
         Self::with_client_and_base_url(reqwest::Client::new(), "https://clob.polymarket.com")
     }
 
-    pub fn with_client_and_base_url(
-        client: reqwest::Client,
-        base_url: impl Into<String>,
-    ) -> Self {
+    pub fn with_client_and_base_url(client: reqwest::Client, base_url: impl Into<String>) -> Self {
         Self {
             client,
             base_url: base_url.into(),
@@ -178,9 +175,7 @@ impl PolymarketRewardProvider {
             .send()
             .await
             .map_err(|err| {
-                RegistryProviderError::transient(format!(
-                    "current rewards request failed: {err}"
-                ))
+                RegistryProviderError::transient(format!("current rewards request failed: {err}"))
             })?;
         let status = response.status();
         let body = response.text().await.map_err(|err| {
@@ -349,7 +344,9 @@ impl RegistryProvider for GammaRegistryProvider {
             ])
             .send()
             .await
-            .map_err(|err| RegistryProviderError::transient(format!("gamma request failed: {err}")))?;
+            .map_err(|err| {
+                RegistryProviderError::transient(format!("gamma request failed: {err}"))
+            })?;
 
         let status = response.status();
         let body = response.text().await.map_err(|err| {
@@ -527,7 +524,8 @@ fn normalize_gamma_market(market: GammaMarket) -> Result<MarketMeta, QuarantineR
         .rewards_max_spread
         .map(ScalarField::into_string)
         .map(|value| {
-            cents_to_price_string(&value).map_err(|_| quarantine(&market.id, "invalid_rewards_max_spread"))
+            cents_to_price_string(&value)
+                .map_err(|_| quarantine(&market.id, "invalid_rewards_max_spread"))
         })
         .transpose()?
         .map(Price::new);
@@ -642,7 +640,10 @@ mod tests {
         let page = GammaRegistryProvider::parse_page(
             "gamma-primary",
             body,
-            &RegistryPageRequest { offset: 0, limit: 50 },
+            &RegistryPageRequest {
+                offset: 0,
+                limit: 50,
+            },
         )
         .unwrap();
 
@@ -658,18 +659,11 @@ mod tests {
         assert_eq!(market.no_asset.asset_id.as_str(), "token-no");
         assert_eq!(market.tick_size.as_str(), "0.01");
         assert_eq!(
-            market
-                .min_order_size
-                .as_ref()
-                .expect("min size")
-                .as_str(),
+            market.min_order_size.as_ref().expect("min size").as_str(),
             "5"
         );
         assert!(market.reward.is_some());
-        assert_eq!(
-            page.quarantined[0].record_id.as_deref(),
-            Some("market-bad")
-        );
+        assert_eq!(page.quarantined[0].record_id.as_deref(), Some("market-bad"));
     }
 
     #[test]
@@ -689,23 +683,19 @@ mod tests {
 }
 "#;
 
-        let parsed = PolymarketRewardProvider::parse_current_reward_configs(
-            body,
-            1_700_000_000_000,
-        )
-        .expect("reward configs");
+        let parsed =
+            PolymarketRewardProvider::parse_current_reward_configs(body, 1_700_000_000_000)
+                .expect("reward configs");
 
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].condition_id, "condition-1");
-        assert_eq!(parsed[0].reward.max_spread.as_ref().unwrap().as_str(), "0.045");
+        assert_eq!(
+            parsed[0].reward.max_spread.as_ref().unwrap().as_str(),
+            "0.045"
+        );
         assert_eq!(parsed[0].reward.min_size.as_ref().unwrap().as_str(), "50");
         assert_eq!(
-            parsed[0]
-                .reward
-                .total_daily_rate
-                .as_ref()
-                .unwrap()
-                .as_str(),
+            parsed[0].reward.total_daily_rate.as_ref().unwrap().as_str(),
             "5.5"
         );
         assert_eq!(parsed[0].reward.freshness, RewardFreshness::Fresh);

@@ -206,12 +206,18 @@ impl HotStateStore {
 
     pub fn book_state(&self, source_id: &SourceId, asset_id: &str) -> Option<HotBookState> {
         let inner = self.inner.read().unwrap();
-        inner.books.get(&HotStateKey::asset(source_id, asset_id)).cloned()
+        inner
+            .books
+            .get(&HotStateKey::asset(source_id, asset_id))
+            .cloned()
     }
 
     pub fn reference_state(&self, subject: &InstrumentRef) -> Option<HotReferenceState> {
         let inner = self.inner.read().unwrap();
-        inner.references.get(&HotStateKey::from_subject(subject)).cloned()
+        inner
+            .references
+            .get(&HotStateKey::from_subject(subject))
+            .cloned()
     }
 
     pub fn resolve_notice(&self, notice: &UpdateNotice) -> Option<HotStateView> {
@@ -219,7 +225,9 @@ impl HotStateStore {
             UpdateKind::BookSnapshot
             | UpdateKind::BookDelta
             | UpdateKind::BestBidAsk
-            | UpdateKind::TickSizeChange => self.resolve_book_notice(notice).map(HotStateView::Book),
+            | UpdateKind::TickSizeChange => {
+                self.resolve_book_notice(notice).map(HotStateView::Book)
+            }
             UpdateKind::TradeTick
             | UpdateKind::ReferencePrice
             | UpdateKind::Reconnect
@@ -231,17 +239,18 @@ impl HotStateStore {
     }
 
     pub fn project_snapshot(&self, notice: &UpdateNotice) -> Option<OrderBookSnapshot> {
-        self.resolve_book_notice(notice).map(|state| OrderBookSnapshot {
-            asset_id: state.asset_id.as_str().to_string(),
-            best_bid: state.best_bid.as_ref().map(book_level_to_snapshot_level),
-            best_ask: state.best_ask.as_ref().map(book_level_to_snapshot_level),
-            timestamp_ms: state.timestamp_ms,
-            hash: state
-                .source_hash
-                .clone()
-                .or_else(|| notice.source_hash.clone())
-                .unwrap_or_default(),
-        })
+        self.resolve_book_notice(notice)
+            .map(|state| OrderBookSnapshot {
+                asset_id: state.asset_id.as_str().to_string(),
+                best_bid: state.best_bid.as_ref().map(book_level_to_snapshot_level),
+                best_ask: state.best_ask.as_ref().map(book_level_to_snapshot_level),
+                timestamp_ms: state.timestamp_ms,
+                hash: state
+                    .source_hash
+                    .clone()
+                    .or_else(|| notice.source_hash.clone())
+                    .unwrap_or_default(),
+            })
     }
 
     fn resolve_book_notice(&self, notice: &UpdateNotice) -> Option<HotBookState> {
@@ -285,7 +294,10 @@ fn apply_book_snapshot_update(
     notice: &UpdateNotice,
     snapshot: &BookSnapshotUpdate,
 ) {
-    let registered = inner.markets_by_asset.get(snapshot.asset_id.as_str()).cloned();
+    let registered = inner
+        .markets_by_asset
+        .get(snapshot.asset_id.as_str())
+        .cloned();
     let bids = ordered_levels(&snapshot.bids, true, registered.as_ref());
     let asks = ordered_levels(&snapshot.asks, false, registered.as_ref());
 
@@ -304,7 +316,9 @@ fn apply_book_snapshot_update(
         midpoint: None,
         tick_size: registered.as_ref().map(|market| market.tick_size.clone()),
         tick_size_units: registered.as_ref().map(|market| market.tick_size_units),
-        lot_size: registered.as_ref().and_then(|market| market.lot_size.clone()),
+        lot_size: registered
+            .as_ref()
+            .and_then(|market| market.lot_size.clone()),
         lot_size_units: registered.as_ref().and_then(|market| market.lot_size_units),
         version: notice.version,
         timestamp_ms: snapshot.timestamp_ms,
@@ -318,9 +332,10 @@ fn apply_book_snapshot_update(
     }
     refresh_best_sides_from_depth(&mut state);
     state.midpoint = midpoint_for_levels(state.best_bid.as_ref(), state.best_ask.as_ref());
-    inner
-        .books
-        .insert(HotStateKey::asset(&notice.source_id, snapshot.asset_id.as_str()), state);
+    inner.books.insert(
+        HotStateKey::asset(&notice.source_id, snapshot.asset_id.as_str()),
+        state,
+    );
 }
 
 fn apply_book_delta_update(
@@ -330,27 +345,33 @@ fn apply_book_delta_update(
 ) {
     let key = HotStateKey::asset(&notice.source_id, delta.asset_id.as_str());
     let registered = inner.markets_by_asset.get(delta.asset_id.as_str()).cloned();
-    let mut state = inner.books.get(&key).cloned().unwrap_or_else(|| HotBookState {
-        notice: notice.clone(),
-        market_id: Some(delta.market_id.clone()),
-        condition_id: registered
-            .as_ref()
-            .and_then(|market| market.condition_id.clone()),
-        asset_id: delta.asset_id.clone(),
-        reward: registered.as_ref().and_then(|market| market.reward.clone()),
-        bids: Vec::new(),
-        asks: Vec::new(),
-        best_bid: None,
-        best_ask: None,
-        midpoint: None,
-        tick_size: registered.as_ref().map(|market| market.tick_size.clone()),
-        tick_size_units: registered.as_ref().map(|market| market.tick_size_units),
-        lot_size: registered.as_ref().and_then(|market| market.lot_size.clone()),
-        lot_size_units: registered.as_ref().and_then(|market| market.lot_size_units),
-        version: notice.version,
-        timestamp_ms: delta.timestamp_ms,
-        source_hash: delta.source_hash.clone(),
-    });
+    let mut state = inner
+        .books
+        .get(&key)
+        .cloned()
+        .unwrap_or_else(|| HotBookState {
+            notice: notice.clone(),
+            market_id: Some(delta.market_id.clone()),
+            condition_id: registered
+                .as_ref()
+                .and_then(|market| market.condition_id.clone()),
+            asset_id: delta.asset_id.clone(),
+            reward: registered.as_ref().and_then(|market| market.reward.clone()),
+            bids: Vec::new(),
+            asks: Vec::new(),
+            best_bid: None,
+            best_ask: None,
+            midpoint: None,
+            tick_size: registered.as_ref().map(|market| market.tick_size.clone()),
+            tick_size_units: registered.as_ref().map(|market| market.tick_size_units),
+            lot_size: registered
+                .as_ref()
+                .and_then(|market| market.lot_size.clone()),
+            lot_size_units: registered.as_ref().and_then(|market| market.lot_size_units),
+            version: notice.version,
+            timestamp_ms: delta.timestamp_ms,
+            source_hash: delta.source_hash.clone(),
+        });
 
     state.notice = notice.clone();
     state.market_id = Some(delta.market_id.clone());
@@ -362,7 +383,11 @@ fn apply_book_delta_update(
     state.timestamp_ms = delta.timestamp_ms;
     state.source_hash = delta.source_hash.clone();
 
-    let candidate = make_book_level(delta.price.as_str(), delta.size.as_str(), registered.as_ref());
+    let candidate = make_book_level(
+        delta.price.as_str(),
+        delta.size.as_str(),
+        registered.as_ref(),
+    );
     match delta.side {
         crate::trigger::Side::Buy => {
             apply_depth_delta(
@@ -406,9 +431,15 @@ fn apply_orderbook_snapshot_resolution(
     notice: &UpdateNotice,
     snapshot: &OrderBookSnapshot,
 ) {
-    let registered = inner.markets_by_asset.get(snapshot.asset_id.as_str()).cloned();
+    let registered = inner
+        .markets_by_asset
+        .get(snapshot.asset_id.as_str())
+        .cloned();
     let key = HotStateKey::asset(&notice.source_id, snapshot.asset_id.as_str());
-    let existing_market_id = inner.books.get(&key).and_then(|state| state.market_id.clone());
+    let existing_market_id = inner
+        .books
+        .get(&key)
+        .and_then(|state| state.market_id.clone());
     let best_bid = snapshot
         .best_bid
         .as_ref()
@@ -436,7 +467,9 @@ fn apply_orderbook_snapshot_resolution(
         midpoint: None,
         tick_size: registered.as_ref().map(|market| market.tick_size.clone()),
         tick_size_units: registered.as_ref().map(|market| market.tick_size_units),
-        lot_size: registered.as_ref().and_then(|market| market.lot_size.clone()),
+        lot_size: registered
+            .as_ref()
+            .and_then(|market| market.lot_size.clone()),
         lot_size_units: registered.as_ref().and_then(|market| market.lot_size_units),
         version: notice.version,
         timestamp_ms: snapshot.timestamp_ms,
@@ -459,28 +492,37 @@ fn apply_best_bid_ask_update(
     update: &BestBidAskUpdate,
 ) {
     let key = HotStateKey::asset(&notice.source_id, update.asset_id.as_str());
-    let registered = inner.markets_by_asset.get(update.asset_id.as_str()).cloned();
-    let mut state = inner.books.get(&key).cloned().unwrap_or_else(|| HotBookState {
-        notice: notice.clone(),
-        market_id: Some(update.market_id.clone()),
-        condition_id: registered
-            .as_ref()
-            .and_then(|market| market.condition_id.clone()),
-        asset_id: update.asset_id.clone(),
-        reward: registered.as_ref().and_then(|market| market.reward.clone()),
-        bids: Vec::new(),
-        asks: Vec::new(),
-        best_bid: None,
-        best_ask: None,
-        midpoint: None,
-        tick_size: registered.as_ref().map(|market| market.tick_size.clone()),
-        tick_size_units: registered.as_ref().map(|market| market.tick_size_units),
-        lot_size: registered.as_ref().and_then(|market| market.lot_size.clone()),
-        lot_size_units: registered.as_ref().and_then(|market| market.lot_size_units),
-        version: notice.version,
-        timestamp_ms: update.timestamp_ms,
-        source_hash: notice.source_hash.clone(),
-    });
+    let registered = inner
+        .markets_by_asset
+        .get(update.asset_id.as_str())
+        .cloned();
+    let mut state = inner
+        .books
+        .get(&key)
+        .cloned()
+        .unwrap_or_else(|| HotBookState {
+            notice: notice.clone(),
+            market_id: Some(update.market_id.clone()),
+            condition_id: registered
+                .as_ref()
+                .and_then(|market| market.condition_id.clone()),
+            asset_id: update.asset_id.clone(),
+            reward: registered.as_ref().and_then(|market| market.reward.clone()),
+            bids: Vec::new(),
+            asks: Vec::new(),
+            best_bid: None,
+            best_ask: None,
+            midpoint: None,
+            tick_size: registered.as_ref().map(|market| market.tick_size.clone()),
+            tick_size_units: registered.as_ref().map(|market| market.tick_size_units),
+            lot_size: registered
+                .as_ref()
+                .and_then(|market| market.lot_size.clone()),
+            lot_size_units: registered.as_ref().and_then(|market| market.lot_size_units),
+            version: notice.version,
+            timestamp_ms: update.timestamp_ms,
+            source_hash: notice.source_hash.clone(),
+        });
 
     state.notice = notice.clone();
     state.market_id = Some(update.market_id.clone());
@@ -507,12 +549,19 @@ fn apply_trade_tick_update(
     update: &TradeTickUpdate,
 ) {
     let key = HotStateKey::from_subject(&notice.subject);
-    let mut state = inner.references.get(&key).cloned().unwrap_or_else(|| empty_reference_state(notice));
+    let mut state = inner
+        .references
+        .get(&key)
+        .cloned()
+        .unwrap_or_else(|| empty_reference_state(notice));
     state.notice = notice.clone();
     state.version = notice.version;
     state.timestamp_ms = update.timestamp_ms;
     state.last_trade_price = hot_value(update.price.as_str());
-    state.last_trade_size = update.size.as_ref().and_then(|value| hot_value(value.as_str()));
+    state.last_trade_size = update
+        .size
+        .as_ref()
+        .and_then(|value| hot_value(value.as_str()));
     inner.references.insert(key, state);
 }
 
@@ -522,7 +571,11 @@ fn apply_reference_price_update(
     update: &ReferencePriceUpdate,
 ) {
     let key = HotStateKey::from_subject(&notice.subject);
-    let mut state = inner.references.get(&key).cloned().unwrap_or_else(|| empty_reference_state(notice));
+    let mut state = inner
+        .references
+        .get(&key)
+        .cloned()
+        .unwrap_or_else(|| empty_reference_state(notice));
     state.notice = notice.clone();
     state.version = notice.version;
     state.timestamp_ms = update.timestamp_ms;
@@ -536,28 +589,37 @@ fn apply_tick_size_change_update(
     update: &TickSizeChangeUpdate,
 ) {
     let key = HotStateKey::asset(&notice.source_id, update.asset_id.as_str());
-    let registered = inner.markets_by_asset.get(update.asset_id.as_str()).cloned();
-    let mut state = inner.books.get(&key).cloned().unwrap_or_else(|| HotBookState {
-        notice: notice.clone(),
-        market_id: Some(update.market_id.clone()),
-        condition_id: registered
-            .as_ref()
-            .and_then(|market| market.condition_id.clone()),
-        asset_id: update.asset_id.clone(),
-        reward: registered.as_ref().and_then(|market| market.reward.clone()),
-        bids: Vec::new(),
-        asks: Vec::new(),
-        best_bid: None,
-        best_ask: None,
-        midpoint: None,
-        tick_size: registered.as_ref().map(|market| market.tick_size.clone()),
-        tick_size_units: registered.as_ref().map(|market| market.tick_size_units),
-        lot_size: registered.as_ref().and_then(|market| market.lot_size.clone()),
-        lot_size_units: registered.as_ref().and_then(|market| market.lot_size_units),
-        version: notice.version,
-        timestamp_ms: update.timestamp_ms,
-        source_hash: notice.source_hash.clone(),
-    });
+    let registered = inner
+        .markets_by_asset
+        .get(update.asset_id.as_str())
+        .cloned();
+    let mut state = inner
+        .books
+        .get(&key)
+        .cloned()
+        .unwrap_or_else(|| HotBookState {
+            notice: notice.clone(),
+            market_id: Some(update.market_id.clone()),
+            condition_id: registered
+                .as_ref()
+                .and_then(|market| market.condition_id.clone()),
+            asset_id: update.asset_id.clone(),
+            reward: registered.as_ref().and_then(|market| market.reward.clone()),
+            bids: Vec::new(),
+            asks: Vec::new(),
+            best_bid: None,
+            best_ask: None,
+            midpoint: None,
+            tick_size: registered.as_ref().map(|market| market.tick_size.clone()),
+            tick_size_units: registered.as_ref().map(|market| market.tick_size_units),
+            lot_size: registered
+                .as_ref()
+                .and_then(|market| market.lot_size.clone()),
+            lot_size_units: registered.as_ref().and_then(|market| market.lot_size_units),
+            version: notice.version,
+            timestamp_ms: update.timestamp_ms,
+            source_hash: notice.source_hash.clone(),
+        });
 
     state.notice = notice.clone();
     state.market_id = Some(update.market_id.clone());
@@ -565,8 +627,16 @@ fn apply_tick_size_change_update(
     state.timestamp_ms = update.timestamp_ms;
     state.tick_size = Some(update.new_tick_size.clone());
     state.tick_size_units = parse_scaled(update.new_tick_size.as_str());
-    refresh_book_level_units(&mut state.best_bid, state.tick_size_units, state.lot_size_units);
-    refresh_book_level_units(&mut state.best_ask, state.tick_size_units, state.lot_size_units);
+    refresh_book_level_units(
+        &mut state.best_bid,
+        state.tick_size_units,
+        state.lot_size_units,
+    );
+    refresh_book_level_units(
+        &mut state.best_ask,
+        state.tick_size_units,
+        state.lot_size_units,
+    );
     state.midpoint = midpoint_for_levels(state.best_bid.as_ref(), state.best_ask.as_ref());
     inner.books.insert(key, state);
 }
@@ -577,7 +647,11 @@ fn apply_source_status_update(
     update: &SourceStatusUpdate,
 ) {
     let key = HotStateKey::from_subject(&notice.subject);
-    let mut state = inner.references.get(&key).cloned().unwrap_or_else(|| empty_reference_state(notice));
+    let mut state = inner
+        .references
+        .get(&key)
+        .cloned()
+        .unwrap_or_else(|| empty_reference_state(notice));
     state.notice = notice.clone();
     state.version = notice.version;
     state.timestamp_ms = update.observed_at_ms;
@@ -593,12 +667,8 @@ fn apply_reconnect_update(
     update: &ReconnectUpdate,
 ) {
     let source_id = notice.source_id.as_str().to_string();
-    inner
-        .books
-        .retain(|key, _| key.source_id != source_id);
-    inner
-        .references
-        .retain(|key, _| key.source_id != source_id);
+    inner.books.retain(|key, _| key.source_id != source_id);
+    inner.references.retain(|key, _| key.source_id != source_id);
 
     let key = HotStateKey::from_subject(&notice.subject);
     let mut state = empty_reference_state(notice);
@@ -696,8 +766,10 @@ fn make_book_level(
     Some(HotBookLevel {
         price: hot_value(price)?,
         size: hot_value(size)?,
-        price_ticks: registered.and_then(|market| ticks_for(parse_scaled(price)?, Some(market.tick_size_units))),
-        size_lots: registered.and_then(|market| ticks_for(parse_scaled(size)?, market.lot_size_units)),
+        price_ticks: registered
+            .and_then(|market| ticks_for(parse_scaled(price)?, Some(market.tick_size_units))),
+        size_lots: registered
+            .and_then(|market| ticks_for(parse_scaled(size)?, market.lot_size_units)),
     })
 }
 
@@ -954,7 +1026,11 @@ mod tests {
         let state = store
             .book_state(&SourceId::new("polymarket-public"), "asset-yes")
             .expect("book state");
-        let bid_prices: Vec<&str> = state.bids.iter().map(|level| level.price.exact.as_str()).collect();
+        let bid_prices: Vec<&str> = state
+            .bids
+            .iter()
+            .map(|level| level.price.exact.as_str())
+            .collect();
         assert_eq!(bid_prices, vec!["0.55", "0.545", "0.54"]);
     }
 

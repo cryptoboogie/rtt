@@ -1708,3 +1708,22 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test --workspace`
 - **Commit**: N/A (working tree only)
 - **Deviation**: Kept the user-feed transport contract narrowly aligned to the published heartbeat format without broadening the parser to silently swallow arbitrary malformed text payloads; unknown heartbeat/control text is still ignored only where documented.
+
+### 13.9 — Make live quote submissions truly passive and observable
+- **Spec**: `specs/13-low-risk-liquidity-rewards.md`
+- **Files changed**: `crates/rtt-core/src/clob_order.rs`, `crates/pm-strategy/src/liquidity_rewards.rs`, `crates/pm-executor/src/execution.rs`, `crates/pm-executor/src/main.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added `postOnly` support to signed order payloads and made quote-mode batch submissions send post-only GTD orders so the exchange rejects cross-book races instead of silently turning the bot into taker flow
+  - Fixed the executor heartbeat client to use the documented `/v1/heartbeats` path and chain the returned `heartbeat_id` values instead of repeatedly POSTing an empty body to `/heartbeats`
+  - Tightened `LiquidityRewardsStrategy` so depth-aware midpoint math is still used for rewards, but final bid prices are clamped to at least one tick below the live best ask to preserve passive-maker semantics
+  - Stopped treating every successful `/orders` response as a resting quote: only `status = live` is now promoted to working state, while `matched`, `delayed`, and `unmatched` are journaled as non-resting outcomes and allowed to reconcile again
+  - Added per-order `quote_submit_result` SQLite rows so live runs expose request errors, missing batch responses, and exchange-returned statuses directly instead of only showing coarse `quote_command_batch` markers
+- **Tests**:
+  - `cargo test -p rtt-core test_signed_order_json_includes_post_only_when_requested -- --nocapture`
+  - `cargo test -p pm-strategy balanced_inventory_clamps_bids_below_best_ask_to_keep_quotes_passive -- --nocapture`
+  - `cargo test -p pm-executor heartbeat_requests_use_documented_v1_path_and_chained_id_body -- --nocapture`
+  - `cargo test -p pm-executor quote_responses_only_treat_live_orders_as_resting -- --nocapture`
+  - `cargo test --workspace --lib`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Kept the passive-price guard in the strategy rather than relying solely on exchange-side `postOnly` rejection, because it prevents unnecessary live rejects while still leaving `postOnly` as a backstop for race conditions between market-data observation and submit time.

@@ -1,4 +1,6 @@
-use pm_strategy::liquidity_rewards::{LiquidityRewardsMarket, LiquidityRewardsParams, LiquidityRewardsStrategy};
+use pm_strategy::liquidity_rewards::{
+    LiquidityRewardsMarket, LiquidityRewardsParams, LiquidityRewardsStrategy,
+};
 use pm_strategy::quote::{DesiredQuote, DesiredQuotes, QuoteId};
 use pm_strategy::runtime::{ProvisionedTopology, QuoteRuntime, TriggerRuntime};
 use pm_strategy::strategy::{
@@ -39,7 +41,14 @@ fn sample_market_meta() -> MarketMeta {
     }
 }
 
-fn snapshot_update_for_asset(version: u64, asset_id: &str, bid_1: &str, bid_2: &str, ask_1: &str, ask_2: &str) -> NormalizedUpdate {
+fn snapshot_update_for_asset(
+    version: u64,
+    asset_id: &str,
+    bid_1: &str,
+    bid_2: &str,
+    ask_1: &str,
+    ask_2: &str,
+) -> NormalizedUpdate {
     let source_id = SourceId::new("polymarket-public");
     NormalizedUpdate {
         notice: UpdateNotice {
@@ -53,20 +62,26 @@ fn snapshot_update_for_asset(version: u64, asset_id: &str, bid_1: &str, bid_2: &
         payload: NormalizedUpdatePayload::BookSnapshot(BookSnapshotUpdate {
             market_id: MarketId::new("market-1"),
             asset_id: AssetId::new(asset_id),
-            bids: vec![BookLevel {
-                price: Price::new(bid_1),
-                size: rtt_core::Size::new("20"),
-            }, BookLevel {
-                price: Price::new(bid_2),
-                size: rtt_core::Size::new("100"),
-            }],
-            asks: vec![BookLevel {
-                price: Price::new(ask_1),
-                size: rtt_core::Size::new("20"),
-            }, BookLevel {
-                price: Price::new(ask_2),
-                size: rtt_core::Size::new("100"),
-            }],
+            bids: vec![
+                BookLevel {
+                    price: Price::new(bid_1),
+                    size: rtt_core::Size::new("20"),
+                },
+                BookLevel {
+                    price: Price::new(bid_2),
+                    size: rtt_core::Size::new("100"),
+                },
+            ],
+            asks: vec![
+                BookLevel {
+                    price: Price::new(ask_1),
+                    size: rtt_core::Size::new("20"),
+                },
+                BookLevel {
+                    price: Price::new(ask_2),
+                    size: rtt_core::Size::new("100"),
+                },
+            ],
             timestamp_ms: 1_700_000_000_000 + version,
             source_hash: Some(format!("hash-{version}")),
         }),
@@ -328,6 +343,12 @@ fn liquidity_rewards_quote_runtime_resolves_selected_yes_no_books_into_desired_q
     let desired = runtime.handle_notice(&no.notice).expect("desired quotes");
 
     assert_eq!(desired.quotes.len(), 2);
-    assert_eq!(desired.quotes[0].quote_id, QuoteId::new("condition-1:yes:entry"));
-    assert_eq!(desired.quotes[1].quote_id, QuoteId::new("condition-1:no:entry"));
+    assert_eq!(
+        desired.quotes[0].quote_id,
+        QuoteId::new("condition-1:yes:entry")
+    );
+    assert_eq!(
+        desired.quotes[1].quote_id,
+        QuoteId::new("condition-1:no:entry")
+    );
 }

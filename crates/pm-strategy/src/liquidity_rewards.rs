@@ -4,8 +4,9 @@ use crate::reward_math::{
     size_cutoff_adjusted_midpoint,
 };
 use crate::strategy::{
-    InventoryPosition, IsolationPolicy, QuoteStrategy, RequirementSelector, StrategyDataRequirement,
-    StrategyDataRequirementKind, StrategyRequirements, StrategyRuntimeView,
+    InventoryPosition, IsolationPolicy, QuoteStrategy, RequirementSelector,
+    StrategyDataRequirement, StrategyDataRequirementKind, StrategyRequirements,
+    StrategyRuntimeView,
 };
 use crate::types::{OrderType, Side};
 
@@ -159,6 +160,8 @@ impl LiquidityRewardsStrategy {
             size_cutoff_adjusted_midpoint(&yes_book.bids, &yes_book.asks, min_size_units)?;
         let no_midpoint =
             size_cutoff_adjusted_midpoint(&no_book.bids, &no_book.asks, min_size_units)?;
+        let yes_best_ask_units = yes_book.asks.first()?.price.units;
+        let no_best_ask_units = no_book.asks.first()?.price.units;
 
         let yes_inventory = inventory_for(view.inventory_positions(), &market.yes_asset_id);
         let no_inventory = inventory_for(view.inventory_positions(), &market.no_asset_id);
@@ -166,8 +169,9 @@ impl LiquidityRewardsStrategy {
             return None;
         }
 
-        let ttl_expiration =
-            (now_ms / 1_000).saturating_add(60).saturating_add(self.params.quote_ttl_secs);
+        let ttl_expiration = (now_ms / 1_000)
+            .saturating_add(60)
+            .saturating_add(self.params.quote_ttl_secs);
         let target_offset_units =
             (f64_to_units(self.params.target_spread_cents / 100.0)? / 2).max(tick_size_units);
         let edge_buffer_units = f64_to_units(self.params.edge_buffer)?;
@@ -190,6 +194,9 @@ impl LiquidityRewardsStrategy {
                 tick_size_units,
                 max_pair_total_units,
             )?;
+            let yes_bid_units =
+                clamp_passive_bid(yes_bid_units, tick_size_units, yes_best_ask_units)?;
+            let no_bid_units = clamp_passive_bid(no_bid_units, tick_size_units, no_best_ask_units)?;
             if qualifying_spread(yes_midpoint.units, yes_bid_units) > max_spread_units
                 || qualifying_spread(no_midpoint.units, no_bid_units) > max_spread_units
             {
@@ -229,14 +236,16 @@ impl LiquidityRewardsStrategy {
 
         if yes_filled_size > no_filled_size {
             let completion_size_units = yes_filled_size.saturating_sub(no_filled_size);
-            let max_completion_price_units = completion_price_cap(yes_inventory.as_ref(), edge_buffer_units)?;
-            let completion_units = round_down_to_tick(
-                no_midpoint.units.saturating_sub(target_offset_units).min(max_completion_price_units),
+            let max_completion_price_units =
+                completion_price_cap(yes_inventory.as_ref(), edge_buffer_units)?;
+            let completion_units = clamp_passive_bid(
+                no_midpoint
+                    .units
+                    .saturating_sub(target_offset_units)
+                    .min(max_completion_price_units),
                 tick_size_units,
-            );
-            if completion_units == 0 {
-                return None;
-            }
+                no_best_ask_units,
+            )?;
             let reserved_usd = quote_notional_usd(completion_units, completion_size_units);
             if reserved_usd > remaining_budget_usd {
                 return None;
@@ -257,17 +266,16 @@ impl LiquidityRewardsStrategy {
         }
 
         let completion_size_units = no_filled_size.saturating_sub(yes_filled_size);
-        let max_completion_price_units = completion_price_cap(no_inventory.as_ref(), edge_buffer_units)?;
-        let completion_units = round_down_to_tick(
+        let max_completion_price_units =
+            completion_price_cap(no_inventory.as_ref(), edge_buffer_units)?;
+        let completion_units = clamp_passive_bid(
             yes_midpoint
                 .units
                 .saturating_sub(target_offset_units)
                 .min(max_completion_price_units),
             tick_size_units,
-        );
-        if completion_units == 0 {
-            return None;
-        }
+            yes_best_ask_units,
+        )?;
         let reserved_usd = quote_notional_usd(completion_units, completion_size_units);
         if reserved_usd > remaining_budget_usd {
             return None;
@@ -295,23 +303,36 @@ fn paired_bid_prices(
     tick_size_units: u64,
     max_pair_total_units: u64,
 ) -> Option<(u64, u64)> {
-    let mut yes_bid_units =
-        round_down_to_tick(yes_midpoint_units.saturating_sub(target_offset_units), tick_size_units);
-    let mut no_bid_units =
-        round_down_to_tick(no_midpoint_units.saturating_sub(target_offset_units), tick_size_units);
+    let mut yes_bid_units = round_down_to_tick(
+        yes_midpoint_units.saturating_sub(target_offset_units),
+        tick_size_units,
+    );
+    let mut no_bid_units = round_down_to_tick(
+        no_midpoint_units.saturating_sub(target_offset_units),
+        tick_size_units,
+    );
     let total = yes_bid_units.saturating_add(no_bid_units);
     if total > max_pair_total_units {
         let excess = total - max_pair_total_units;
         let yes_cut = excess / 2;
         let no_cut = excess - yes_cut;
-        yes_bid_units =
-            round_down_to_tick(yes_bid_units.saturating_sub(yes_cut), tick_size_units);
+        yes_bid_units = round_down_to_tick(yes_bid_units.saturating_sub(yes_cut), tick_size_units);
         no_bid_units = round_down_to_tick(no_bid_units.saturating_sub(no_cut), tick_size_units);
     }
     if yes_bid_units == 0 || no_bid_units == 0 {
         return None;
     }
     Some((yes_bid_units, no_bid_units))
+}
+
+fn clamp_passive_bid(bid_units: u64, tick_size_units: u64, best_ask_units: u64) -> Option<u64> {
+    let max_passive_units = best_ask_units.checked_sub(tick_size_units)?;
+    let clamped = bid_units.min(max_passive_units);
+    if clamped == 0 {
+        None
+    } else {
+        Some(clamped)
+    }
 }
 
 fn inventory_for(inventory: &[InventoryPosition], asset_id: &str) -> Option<InventoryPosition> {
@@ -358,7 +379,11 @@ fn completion_price_cap(
     }
     let notional_units = parse_decimal_to_units(&inventory.net_notional)?;
     let avg_price_units = notional_units.saturating_mul(1_000_000) / size_units;
-    Some(1_000_000u64.saturating_sub(edge_buffer_units).saturating_sub(avg_price_units))
+    Some(
+        1_000_000u64
+            .saturating_sub(edge_buffer_units)
+            .saturating_sub(avg_price_units),
+    )
 }
 
 fn quote_notional_usd(price_units: u64, size_units: u64) -> f64 {
@@ -444,8 +469,14 @@ mod tests {
             version: 1,
             source_hash: Some("hash-1".to_string()),
         };
-        let bids: Vec<_> = bids.iter().map(|(price, size)| book_level(price, size)).collect();
-        let asks: Vec<_> = asks.iter().map(|(price, size)| book_level(price, size)).collect();
+        let bids: Vec<_> = bids
+            .iter()
+            .map(|(price, size)| book_level(price, size))
+            .collect();
+        let asks: Vec<_> = asks
+            .iter()
+            .map(|(price, size)| book_level(price, size))
+            .collect();
         HotBookState {
             notice,
             market_id: Some(MarketId::new("market-1")),
@@ -490,8 +521,16 @@ mod tests {
                 source_hash: None,
             },
             vec![
-                book_state("yes-asset", &[("0.49", "20"), ("0.47", "40")], &[("0.51", "20"), ("0.55", "40")]),
-                book_state("no-asset", &[("0.48", "20"), ("0.46", "40")], &[("0.52", "20"), ("0.56", "40")]),
+                book_state(
+                    "yes-asset",
+                    &[("0.49", "20"), ("0.47", "40")],
+                    &[("0.51", "20"), ("0.55", "40")],
+                ),
+                book_state(
+                    "no-asset",
+                    &[("0.48", "20"), ("0.46", "40")],
+                    &[("0.52", "20"), ("0.56", "40")],
+                ),
             ],
             Vec::new(),
             inventory,
@@ -505,10 +544,22 @@ mod tests {
         let quotes = strategy.on_update(&view(Vec::new())).expect("quotes");
 
         assert_eq!(quotes.quotes.len(), 2);
-        assert_eq!(quotes.quotes[0].quote_id, QuoteId::new("condition-1:yes:entry"));
-        assert_eq!(quotes.quotes[1].quote_id, QuoteId::new("condition-1:no:entry"));
-        assert!(quotes.quotes.iter().all(|quote| quote.order_type == OrderType::GTD));
-        assert!(quotes.quotes.iter().all(|quote| quote.expiration_unix_secs.is_some()));
+        assert_eq!(
+            quotes.quotes[0].quote_id,
+            QuoteId::new("condition-1:yes:entry")
+        );
+        assert_eq!(
+            quotes.quotes[1].quote_id,
+            QuoteId::new("condition-1:no:entry")
+        );
+        assert!(quotes
+            .quotes
+            .iter()
+            .all(|quote| quote.order_type == OrderType::GTD));
+        assert!(quotes
+            .quotes
+            .iter()
+            .all(|quote| quote.expiration_unix_secs.is_some()));
 
         let total_price: f64 = quotes
             .quotes
@@ -551,5 +602,36 @@ mod tests {
         }];
 
         assert!(strategy.on_update(&view(inventory)).is_none());
+    }
+
+    #[test]
+    fn balanced_inventory_clamps_bids_below_best_ask_to_keep_quotes_passive() {
+        let mut strategy = LiquidityRewardsStrategy::new(vec![market()], params());
+        let passive_view = StrategyRuntimeView::new(
+            UpdateNotice {
+                source_id: SourceId::new("polymarket-public"),
+                source_kind: SourceKind::PolymarketWs,
+                subject: InstrumentRef::asset(SourceId::new("polymarket-public"), "yes-asset"),
+                kind: UpdateKind::BookSnapshot,
+                version: 1,
+                source_hash: None,
+            },
+            vec![
+                book_state(
+                    "yes-asset",
+                    &[("0.50", "60")],
+                    &[("0.51", "20"), ("0.55", "40")],
+                ),
+                book_state("no-asset", &[("0.45", "60")], &[("0.49", "60")]),
+            ],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let quotes = strategy.on_update(&passive_view).expect("quotes");
+
+        assert_eq!(quotes.quotes.len(), 2);
+        assert_eq!(quotes.quotes[0].price, "0.5");
+        assert_eq!(quotes.quotes[1].price, "0.46");
     }
 }

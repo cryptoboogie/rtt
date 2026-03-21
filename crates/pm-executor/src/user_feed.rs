@@ -223,13 +223,11 @@ pub async fn run_user_feed(
         },
         "type": "user"
     });
-    if stream
-        .send(Message::Text(auth.to_string()))
-        .await
-        .is_err()
-    {
+    if stream.send(Message::Text(auth.to_string())).await.is_err() {
         let _ = event_tx
-            .send(UserFeedRuntimeEvent::Degraded("user_feed_auth_send_failed".to_string()))
+            .send(UserFeedRuntimeEvent::Degraded(
+                "user_feed_auth_send_failed".to_string(),
+            ))
             .await;
         return;
     }
@@ -253,7 +251,11 @@ pub async fn run_user_feed(
         }
     }
 
-    if event_tx.send(UserFeedRuntimeEvent::Connected).await.is_err() {
+    if event_tx
+        .send(UserFeedRuntimeEvent::Connected)
+        .await
+        .is_err()
+    {
         return;
     }
 
@@ -335,7 +337,10 @@ fn map_order_state(status: &str) -> Option<ExchangeObservedQuoteState> {
 }
 
 fn parse_secs_to_ms(value: &str) -> u64 {
-    value.parse::<u64>().unwrap_or_default().saturating_mul(1_000)
+    value
+        .parse::<u64>()
+        .unwrap_or_default()
+        .saturating_mul(1_000)
 }
 
 #[derive(Debug, Deserialize)]
@@ -432,9 +437,7 @@ mod tests {
 
     #[test]
     fn parses_plaintext_user_feed_heartbeats() {
-        let pong = parse_user_feed_event("PONG")
-            .unwrap()
-            .expect("pong event");
+        let pong = parse_user_feed_event("PONG").unwrap().expect("pong event");
         let ping = parse_user_feed_event("PING").unwrap();
 
         assert!(matches!(pong, UserFeedEvent::Pong));
@@ -490,7 +493,10 @@ mod tests {
         assert!(!snapshot.authoritative);
         assert!(!snapshot.resync_pending);
         assert_eq!(snapshot.quotes.len(), 1);
-        assert_eq!(snapshot.quotes[0].quote_id, QuoteId::new("condition-1:yes:entry"));
+        assert_eq!(
+            snapshot.quotes[0].quote_id,
+            QuoteId::new("condition-1:yes:entry")
+        );
         assert_eq!(snapshot.fills.len(), 1);
         assert_eq!(snapshot.fills[0].fill_id, "trade-1:order-1");
         assert_eq!(snapshot.fills[0].filled_size, "10");

@@ -141,7 +141,7 @@ pub struct QuoteActionPlan {
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct BatchOrderResponse {
     pub success: bool,
     #[serde(rename = "orderID")]
@@ -170,6 +170,29 @@ pub struct RebateSample {
     pub rebated_fees_usdc: String,
 }
 
+const HEARTBEAT_PATH: &str = "/v1/heartbeats";
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct HeartbeatResponse {
+    pub heartbeat_id: String,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuotePlacementDisposition {
+    Resting {
+        client_order_id: String,
+        status: String,
+    },
+    NonResting {
+        status: String,
+    },
+    Rejected {
+        reason: String,
+    },
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone)]
 pub struct QuoteApiClient {
@@ -181,16 +204,10 @@ pub struct QuoteApiClient {
 impl QuoteApiClient {
     #[allow(dead_code)]
     pub fn new() -> Self {
-        Self::with_client_and_base_url(
-            reqwest::Client::new(),
-            rtt_core::polymarket::CLOB_BASE_URL,
-        )
+        Self::with_client_and_base_url(reqwest::Client::new(), rtt_core::polymarket::CLOB_BASE_URL)
     }
 
-    pub fn with_client_and_base_url(
-        client: reqwest::Client,
-        base_url: impl Into<String>,
-    ) -> Self {
+    pub fn with_client_and_base_url(client: reqwest::Client, base_url: impl Into<String>) -> Self {
         Self {
             client,
             base_url: base_url.into(),
@@ -215,12 +232,10 @@ impl QuoteApiClient {
             let signature = sign_order(&signer_params.signer, &order, signer_params.is_neg_risk)
                 .await
                 .map_err(|err| format!("quote signing failed: {err}"))?;
-            payloads.push(SignedOrderPayload::new(
-                &order,
-                &signature,
-                quote.order_type,
-                &signer_params.owner,
-            ));
+            payloads.push(
+                SignedOrderPayload::new(&order, &signature, quote.order_type, &signer_params.owner)
+                    .with_post_only(true),
+            );
         }
 
         let body = serde_json::to_string(&payloads)
@@ -256,22 +271,26 @@ impl QuoteApiClient {
 
     pub async fn cancel_all_orders(&self, creds: &L2Credentials) -> Result<(), String> {
         let url = format!("{}/cancel-all", self.base_url.trim_end_matches('/'));
-        self.authed_request(
-            reqwest::Method::DELETE,
-            "/cancel-all",
-            &url,
-            creds,
-            "",
-        )
-        .await
-        .map(|_| ())
-    }
-
-    pub async fn send_heartbeat(&self, creds: &L2Credentials) -> Result<(), String> {
-        let url = format!("{}/heartbeats", self.base_url.trim_end_matches('/'));
-        self.authed_request(reqwest::Method::POST, "/heartbeats", &url, creds, "")
+        self.authed_request(reqwest::Method::DELETE, "/cancel-all", &url, creds, "")
             .await
             .map(|_| ())
+    }
+
+    pub async fn send_heartbeat(
+        &self,
+        creds: &L2Credentials,
+        heartbeat_id: Option<&str>,
+    ) -> Result<String, String> {
+        let body = build_heartbeat_body(heartbeat_id);
+        let url = format!("{}{}", self.base_url.trim_end_matches('/'), HEARTBEAT_PATH);
+        let response = self
+            .authed_request(reqwest::Method::POST, HEARTBEAT_PATH, &url, creds, &body)
+            .await?;
+        response
+            .json::<HeartbeatResponse>()
+            .await
+            .map(|response| response.heartbeat_id)
+            .map_err(|err| format!("heartbeat response parse failed: {err}"))
     }
 
     pub async fn fetch_reward_percentages(
@@ -333,14 +352,9 @@ impl QuoteApiClient {
             .map_err(|err| format!("clock error: {err}"))?
             .as_secs()
             .to_string();
-        let headers = rtt_core::clob_auth::build_l2_headers(
-            creds,
-            &timestamp,
-            method.as_str(),
-            path,
-            body,
-        )
-        .map_err(|err| format!("auth header build failed: {err}"))?;
+        let headers =
+            rtt_core::clob_auth::build_l2_headers(creds, &timestamp, method.as_str(), path, body)
+                .map_err(|err| format!("auth header build failed: {err}"))?;
 
         let mut request = self.client.request(method, url);
         for (name, value) in headers {
@@ -405,6 +419,45 @@ pub fn parse_rebates(body: &str) -> Result<Vec<RebateSample>, String> {
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
+pub fn build_heartbeat_body(heartbeat_id: Option<&str>) -> String {
+    serde_json::json!({ "heartbeat_id": heartbeat_id }).to_string()
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn classify_quote_response(response: &BatchOrderResponse) -> QuotePlacementDisposition {
+    let status = normalized_order_status(&response.status);
+    if !response.success {
+        let reason = if response.error_msg.trim().is_empty() {
+            format!("submit_failed:{status}")
+        } else {
+            response.error_msg.clone()
+        };
+        return QuotePlacementDisposition::Rejected { reason };
+    }
+
+    match status.as_str() {
+        "live" => QuotePlacementDisposition::Resting {
+            client_order_id: response.order_id.clone(),
+            status,
+        },
+        "matched" | "delayed" | "unmatched" => QuotePlacementDisposition::NonResting { status },
+        _ => QuotePlacementDisposition::Rejected {
+            reason: format!("unknown_submit_status:{status}"),
+        },
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn normalized_order_status(status: &str) -> String {
+    let normalized = status.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        "unknown".to_string()
+    } else {
+        normalized
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 fn build_quote_order(
     quote: &DesiredQuote,
     maker: Address,
@@ -415,8 +468,12 @@ fn build_quote_order(
     let side = ClobSide::from(quote.side);
     let (maker_amount, taker_amount) = compute_amounts(&quote.price, &quote.size, side)
         .map_err(|err| format!("quote amount build failed: {err}"))?;
-    let token_id = U256::from_str_radix(quote.asset_id.as_str(), 10)
-        .map_err(|_| format!("token_id is not a valid decimal integer: {}", quote.asset_id))?;
+    let token_id = U256::from_str_radix(quote.asset_id.as_str(), 10).map_err(|_| {
+        format!(
+            "token_id is not a valid decimal integer: {}",
+            quote.asset_id
+        )
+    })?;
 
     Ok(Order {
         salt: U256::from(rtt_core::clob_order::generate_salt()),
@@ -795,7 +852,14 @@ mod tests {
 
     fn working_quote(id: &str, order_id: &str) -> WorkingQuote {
         let mut quote = WorkingQuote::pending_submit(
-            DesiredQuote::new(QuoteId::new(id), "1234", Side::Buy, "0.45", "10", OrderType::GTD),
+            DesiredQuote::new(
+                QuoteId::new(id),
+                "1234",
+                Side::Buy,
+                "0.45",
+                "10",
+                OrderType::GTD,
+            ),
             1_000,
         );
         quote.mark_working(order_id, 1_100);
@@ -858,7 +922,9 @@ mod tests {
 
         let err = build_credentials(&creds, false).unwrap_err();
 
-        assert!(err.to_string().contains("signer_address does not match private_key"));
+        assert!(err
+            .to_string()
+            .contains("signer_address does not match private_key"));
     }
 
     #[test]
@@ -955,6 +1021,54 @@ mod tests {
         assert_eq!(rewards.get("0xcondition-1"), Some(&12.5));
         assert_eq!(rebates.len(), 1);
         assert_eq!(rebates[0].rebated_fees_usdc, "0.237519");
+    }
+
+    #[test]
+    fn heartbeat_requests_use_documented_v1_path_and_chained_id_body() {
+        assert_eq!(HEARTBEAT_PATH, "/v1/heartbeats");
+        assert_eq!(build_heartbeat_body(None), r#"{"heartbeat_id":null}"#);
+        assert_eq!(
+            build_heartbeat_body(Some("hb-123")),
+            r#"{"heartbeat_id":"hb-123"}"#
+        );
+    }
+
+    #[test]
+    fn quote_responses_only_treat_live_orders_as_resting() {
+        let live = classify_quote_response(&BatchOrderResponse {
+            success: true,
+            order_id: "order-live".to_string(),
+            status: "live".to_string(),
+            error_msg: String::new(),
+        });
+        let matched = classify_quote_response(&BatchOrderResponse {
+            success: true,
+            order_id: "order-matched".to_string(),
+            status: "matched".to_string(),
+            error_msg: String::new(),
+        });
+        let delayed = classify_quote_response(&BatchOrderResponse {
+            success: true,
+            order_id: "order-delayed".to_string(),
+            status: "delayed".to_string(),
+            error_msg: String::new(),
+        });
+
+        assert!(matches!(
+            live,
+            QuotePlacementDisposition::Resting {
+                ref client_order_id,
+                ref status
+            } if client_order_id == "order-live" && status == "live"
+        ));
+        assert!(matches!(
+            matched,
+            QuotePlacementDisposition::NonResting { ref status } if status == "matched"
+        ));
+        assert!(matches!(
+            delayed,
+            QuotePlacementDisposition::NonResting { ref status } if status == "delayed"
+        ));
     }
 
     #[test]

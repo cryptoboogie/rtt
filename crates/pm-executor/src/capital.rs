@@ -94,7 +94,11 @@ fn working_orders_usd(working_quotes: &[WorkingQuote]) -> f64 {
 fn unresolved_inventory_usd(inventory: &[InventoryPosition]) -> f64 {
     inventory
         .iter()
-        .map(|position| parse_decimal(&position.net_notional).unwrap_or_default().abs())
+        .map(|position| {
+            parse_decimal(&position.net_notional)
+                .unwrap_or_default()
+                .abs()
+        })
         .sum()
 }
 
@@ -115,7 +119,14 @@ mod tests {
 
     fn working_quote(id: &str, price: &str, size: &str) -> WorkingQuote {
         WorkingQuote::pending_submit(
-            DesiredQuote::new(QuoteId::new(id), "asset-1", Side::Buy, price, size, OrderType::GTD),
+            DesiredQuote::new(
+                QuoteId::new(id),
+                "asset-1",
+                Side::Buy,
+                price,
+                size,
+                OrderType::GTD,
+            ),
             1_000,
         )
     }

@@ -107,7 +107,9 @@ impl AnalysisStore {
 
     pub fn operation_count(&self) -> Result<u64, rusqlite::Error> {
         self.conn
-            .query_row("SELECT COUNT(*) FROM operations", [], |row| row.get::<_, u64>(0))
+            .query_row("SELECT COUNT(*) FROM operations", [], |row| {
+                row.get::<_, u64>(0)
+            })
     }
 
     pub fn load_operations(&self) -> Result<Vec<AnalysisOperation>, rusqlite::Error> {
@@ -205,7 +207,10 @@ mod tests {
         let operations = store.load_operations().unwrap();
         assert_eq!(operations.len(), 1);
         assert_eq!(operations[0].operation_type, "quote_set_emitted");
-        assert_eq!(operations[0].quote_id.as_deref(), Some("condition-1:yes:entry"));
+        assert_eq!(
+            operations[0].quote_id.as_deref(),
+            Some("condition-1:yes:entry")
+        );
         assert_eq!(operations[0].capital_after_usd, Some(32.5));
 
         let _ = std::fs::remove_file(path);

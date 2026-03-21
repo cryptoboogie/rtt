@@ -277,7 +277,10 @@ impl ExecutorConfig {
         override_string("RTT_STRATEGY", &mut self.strategy.strategy);
         override_string("RTT_TOKEN_ID", &mut self.strategy.token_id);
         override_bool("RTT_DRY_RUN", &mut self.execution.dry_run);
-        override_string("RTT_ANALYSIS_DB_PATH", &mut self.quote_mode.analysis_db_path);
+        override_string(
+            "RTT_ANALYSIS_DB_PATH",
+            &mut self.quote_mode.analysis_db_path,
+        );
         override_string("RTT_CLOB_BASE_URL", &mut self.quote_mode.clob_base_url);
         override_string("RTT_USER_WS_URL", &mut self.quote_mode.user_ws_url);
         override_u64(
@@ -641,7 +644,10 @@ dry_run = true
         assert!(!config.execution.dry_run);
         assert_eq!(config.strategy.params.max_total_deployed_usd, Some(100.0));
         assert_eq!(config.strategy.params.base_quote_size, Some(50.0));
-        assert_eq!(config.quote_mode.analysis_db_path, "/var/lib/rtt/analysis.sqlite");
+        assert_eq!(
+            config.quote_mode.analysis_db_path,
+            "/var/lib/rtt/analysis.sqlite"
+        );
         assert_eq!(config.logging.level, "debug");
 
         std::env::remove_var("RTT_STRATEGY");
@@ -812,7 +818,10 @@ rebate_poll_interval_secs = 600
 
         let config: ExecutorConfig = toml::from_str(config_toml).unwrap();
         assert_eq!(config.quote_mode.analysis_db_path, "tmp/liquidity.sqlite");
-        assert_eq!(config.quote_mode.clob_base_url, "https://clob-staging.polymarket.com");
+        assert_eq!(
+            config.quote_mode.clob_base_url,
+            "https://clob-staging.polymarket.com"
+        );
         assert_eq!(config.quote_mode.user_ws_url, "wss://staging/ws/user");
         assert_eq!(config.quote_mode.heartbeat_interval_secs, 7);
     }

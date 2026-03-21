@@ -157,7 +157,9 @@ pub fn select_reward_markets(
         } else if reward.freshness != rtt_core::RewardFreshness::Fresh
             || reward
                 .updated_at_ms
-                .map(|updated_at_ms| now_ms.saturating_sub(updated_at_ms) > policy.max_reward_age_ms)
+                .map(|updated_at_ms| {
+                    now_ms.saturating_sub(updated_at_ms) > policy.max_reward_age_ms
+                })
                 .unwrap_or(true)
         {
             Some(RewardSelectionReason::RewardStale)
@@ -476,9 +478,7 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
-    use crate::registry_provider::{
-        RegistryPage, RegistryPageRequest, RegistryProviderError,
-    };
+    use crate::registry_provider::{RegistryPage, RegistryPageRequest, RegistryProviderError};
     use crate::snapshot::{QuarantinedMarketRecord, UniverseSelectionPolicy};
     use rtt_core::{
         AssetId, MarketId, MarketMeta, MarketStatus, MinOrderSize, Notional, OutcomeSide,
@@ -541,10 +541,7 @@ mod tests {
                 AssetId::new(format!("{market_id}-yes")),
                 OutcomeSide::Yes,
             ),
-            no_asset: OutcomeToken::new(
-                AssetId::new(format!("{market_id}-no")),
-                OutcomeSide::No,
-            ),
+            no_asset: OutcomeToken::new(AssetId::new(format!("{market_id}-no")), OutcomeSide::No),
             condition_id: Some(format!("condition-{market_id}")),
             tick_size: TickSize::new("0.01"),
             min_order_size: Some(MinOrderSize::new("5")),
@@ -664,7 +661,10 @@ mod tests {
         assert_eq!(provider.requests()[0].offset, 0);
         assert_eq!(provider.requests()[0].limit, 2);
         assert_eq!(provider.requests()[1].offset, 2);
-        assert_eq!(json["snapshot"]["provider"], serde_json::json!("fixture-registry"));
+        assert_eq!(
+            json["snapshot"]["provider"],
+            serde_json::json!("fixture-registry")
+        );
         assert_eq!(json["snapshot"]["markets"].as_object().unwrap().len(), 3);
         assert_eq!(json["snapshot"]["quarantined"].as_array().unwrap().len(), 1);
         assert_eq!(
@@ -678,7 +678,11 @@ mod tests {
         let provider = SequenceProvider::new(vec![
             Err(RegistryProviderError::transient("429 too many requests")),
             Err(RegistryProviderError::transient("502 bad gateway")),
-            Ok(page(vec![market("market-1", MarketStatus::Active)], Vec::new(), None)),
+            Ok(page(
+                vec![market("market-1", MarketStatus::Active)],
+                Vec::new(),
+                None,
+            )),
         ]);
         let registry = MarketRegistry::new(
             provider.clone(),
@@ -716,7 +720,11 @@ mod tests {
     #[tokio::test]
     async fn refresh_failure_keeps_last_known_good_snapshot_and_universe() {
         let provider = SequenceProvider::new(vec![
-            Ok(page(vec![market("market-1", MarketStatus::Active)], Vec::new(), None)),
+            Ok(page(
+                vec![market("market-1", MarketStatus::Active)],
+                Vec::new(),
+                None,
+            )),
             Err(RegistryProviderError::transient("upstream timeout")),
             Err(RegistryProviderError::transient("upstream timeout")),
             Err(RegistryProviderError::transient("upstream timeout")),
@@ -856,9 +864,6 @@ mod tests {
 
         let reward = enriched[0].market.reward.as_ref().expect("reward");
         assert_eq!(reward.total_daily_rate.as_ref().unwrap().as_str(), "5.5");
-        assert_eq!(
-            reward.market_competitiveness.as_deref(),
-            Some("13.40604")
-        );
+        assert_eq!(reward.market_competitiveness.as_deref(), Some("13.40604"));
     }
 }

@@ -154,8 +154,11 @@ impl WsClient {
             .into_iter()
             .collect::<BTreeSet<_>>();
         let desired_asset_ids = asset_ids.into_iter().collect::<BTreeSet<_>>();
-        let commands =
-            plan_subscription_commands(&current_asset_ids, &desired_asset_ids, &self.planner_config);
+        let commands = plan_subscription_commands(
+            &current_asset_ids,
+            &desired_asset_ids,
+            &self.planner_config,
+        );
 
         {
             let mut desired = self.desired_asset_ids.write().unwrap();

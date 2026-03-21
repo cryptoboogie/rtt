@@ -1,4 +1,6 @@
-use crate::liquidity_rewards::{LiquidityRewardsMarket, LiquidityRewardsParams, LiquidityRewardsStrategy};
+use crate::liquidity_rewards::{
+    LiquidityRewardsMarket, LiquidityRewardsParams, LiquidityRewardsStrategy,
+};
 use crate::spread::SpreadStrategy;
 use crate::strategy::{QuoteStrategy, Strategy, TriggerStrategy};
 use crate::threshold::ThresholdStrategy;

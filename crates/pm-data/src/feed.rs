@@ -276,7 +276,8 @@ impl PolymarketFeedManager {
     pub fn reconfigure_assets(&mut self, asset_ids: Vec<String>) -> bool {
         let desired_asset_ids = asset_ids.into_iter().collect::<BTreeSet<_>>();
         let current_asset_ids = self.asset_ids.iter().cloned().collect::<BTreeSet<_>>();
-        let next_asset_ids = assigned_asset_ids_for_config(&desired_asset_ids, &self.subscription_planner);
+        let next_asset_ids =
+            assigned_asset_ids_for_config(&desired_asset_ids, &self.subscription_planner);
         let next_asset_set = next_asset_ids.iter().cloned().collect::<BTreeSet<_>>();
 
         if current_asset_ids == next_asset_set {
@@ -436,11 +437,11 @@ fn book_level_to_ws_level(level: &BookLevel) -> WsOrderBookLevel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::subscription_plan::{SubscriptionCommand, SubscriptionOperation};
     use crate::types::{
         BestBidAskEvent, BookUpdate, LastTradePriceEvent, PriceChangeBatchEntry, PriceChangeEvent,
         ReconnectEvent, Side, WsOrderBookLevel,
     };
-    use crate::subscription_plan::{SubscriptionCommand, SubscriptionOperation};
     use rtt_core::{
         feed_source::{InstrumentKind, InstrumentRef},
         market::Price,
@@ -683,10 +684,7 @@ mod tests {
             timestamp: "1700000000001".to_string(),
         }));
 
-        assert!(manager.reconfigure_assets(vec![
-            "asset-2".to_string(),
-            "asset-3".to_string(),
-        ]));
+        assert!(manager.reconfigure_assets(vec!["asset-2".to_string(), "asset-3".to_string(),]));
 
         assert_eq!(
             manager.asset_ids(),
@@ -699,7 +697,10 @@ mod tests {
             kind: InstrumentKind::Asset,
             instrument_id: "asset-2".to_string(),
         };
-        assert!(manager.reference_store().resolve_subject(&subject).is_some());
+        assert!(manager
+            .reference_store()
+            .resolve_subject(&subject)
+            .is_some());
         assert_eq!(
             manager.ws_client_pending_commands_for_test(),
             vec![
@@ -741,10 +742,7 @@ mod tests {
             hash: Some("hash-1".to_string()),
         }));
 
-        assert!(!manager.reconfigure_assets(vec![
-            "asset-2".to_string(),
-            "asset-1".to_string(),
-        ]));
+        assert!(!manager.reconfigure_assets(vec!["asset-2".to_string(), "asset-1".to_string(),]));
         assert!(manager.order_books().get_snapshot("asset-1").is_some());
         assert!(manager.ws_client_pending_commands_for_test().is_empty());
     }

@@ -267,6 +267,8 @@ pub struct SignedOrderPayload {
     #[serde(rename = "orderType")]
     pub order_type: String,
     pub owner: String,
+    #[serde(rename = "postOnly", skip_serializing_if = "is_false")]
+    pub post_only: bool,
 }
 
 /// Convenience: create the full payload.
@@ -282,8 +284,18 @@ impl SignedOrderPayload {
             order: OrderJson::from_order(order, signature),
             order_type: ot.to_string(),
             owner: owner.to_string(),
+            post_only: false,
         }
     }
+
+    pub fn with_post_only(mut self, post_only: bool) -> Self {
+        self.post_only = post_only;
+        self
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 // Re-export the alloy address! macro usage
@@ -430,6 +442,30 @@ mod tests {
         // order contains signature
         assert_eq!(v["order"]["signature"].as_str().unwrap(), "0xsig");
         assert_eq!(v["order"]["side"].as_str().unwrap(), "BUY");
+    }
+
+    #[test]
+    fn test_signed_order_json_includes_post_only_when_requested() {
+        let order = Order {
+            salt: U256::from(12345u64),
+            maker: Address::ZERO,
+            signer: Address::ZERO,
+            taker: Address::ZERO,
+            tokenId: U256::from(1234u64),
+            makerAmount: U256::from(100_000_000u64),
+            takerAmount: U256::from(50_000_000u64),
+            expiration: U256::ZERO,
+            nonce: U256::ZERO,
+            feeRateBps: U256::ZERO,
+            side: 0,
+            signatureType: 0,
+        };
+        let payload = SignedOrderPayload::new(&order, "0xsig", OrderType::GTD, "owner-uuid")
+            .with_post_only(true);
+        let s = serde_json::to_string(&payload).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+
+        assert_eq!(v["postOnly"].as_bool(), Some(true));
     }
 
     #[test]

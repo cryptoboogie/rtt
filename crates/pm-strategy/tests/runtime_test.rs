@@ -63,7 +63,8 @@ async fn notice_runtime_projects_hot_state_into_strategy_triggers() {
         "50".to_string(),
         OrderType::FOK,
     );
-    let mut runtime = NoticeDrivenRuntime::new(Box::new(strategy), store.clone(), notice_rx, trigger_tx);
+    let mut runtime =
+        NoticeDrivenRuntime::new(Box::new(strategy), store.clone(), notice_rx, trigger_tx);
 
     let handle = tokio::spawn(async move {
         runtime.run().await;

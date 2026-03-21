@@ -2,10 +2,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use rtt_core::{
-    feed_source::InstrumentKind,
-    BestBidAskUpdate, InstrumentRef, NormalizedUpdate, NormalizedUpdatePayload, ReconnectUpdate,
-    ReferencePriceUpdate, SourceId, SourceStatusUpdate, TickSizeChangeUpdate, TradeTickUpdate,
-    UpdateNotice,
+    feed_source::InstrumentKind, BestBidAskUpdate, InstrumentRef, NormalizedUpdate,
+    NormalizedUpdatePayload, ReconnectUpdate, ReferencePriceUpdate, SourceId, SourceStatusUpdate,
+    TickSizeChangeUpdate, TradeTickUpdate, UpdateNotice,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -163,24 +162,9 @@ mod tests {
         let other_source_id = SourceId::new("reference-alt");
 
         let updates = [
-            (
-                source_id.clone(),
-                "BTC-USD",
-                "62000.00",
-                11_u64,
-            ),
-            (
-                source_id.clone(),
-                "ETH-USD",
-                "3200.00",
-                12_u64,
-            ),
-            (
-                other_source_id.clone(),
-                "BTC-USD",
-                "62100.00",
-                13_u64,
-            ),
+            (source_id.clone(), "BTC-USD", "62000.00", 11_u64),
+            (source_id.clone(), "ETH-USD", "3200.00", 12_u64),
+            (other_source_id.clone(), "BTC-USD", "62100.00", 13_u64),
         ];
 
         for (source_id, instrument_id, price, version) in updates {

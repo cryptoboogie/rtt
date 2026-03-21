@@ -1,7 +1,7 @@
 mod alert;
 mod analysis_store;
-mod capital;
 mod bridge;
+mod capital;
 mod config;
 mod execution;
 mod health;
@@ -353,6 +353,7 @@ struct QuoteModeController {
     working: Vec<WorkingQuote>,
     last_desired: DesiredQuotes,
     last_notice: Option<UpdateNotice>,
+    last_heartbeat_id: Option<String>,
 }
 
 impl QuoteModeController {
@@ -408,11 +409,17 @@ impl QuoteModeController {
 
     async fn heartbeat(&mut self) {
         if self.dry_run || !self.has_live_quotes() {
+            self.last_heartbeat_id = None;
             return;
         }
 
-        if let Err(err) = self.quote_client.send_heartbeat(&self.creds).await {
-            self.fail_closed(&format!("heartbeat_failed:{err}")).await;
+        match self
+            .quote_client
+            .send_heartbeat(&self.creds, self.last_heartbeat_id.as_deref())
+            .await
+        {
+            Ok(heartbeat_id) => self.last_heartbeat_id = Some(heartbeat_id),
+            Err(err) => self.fail_closed(&format!("heartbeat_failed:{err}")).await,
         }
     }
 
@@ -427,11 +434,7 @@ impl QuoteModeController {
 
         let Ok(samples) = self
             .quote_client
-            .fetch_reward_percentages(
-                &self.creds,
-                signer_params.sig_type,
-                &self.maker_address,
-            )
+            .fetch_reward_percentages(&self.creds, signer_params.sig_type, &self.maker_address)
             .await
         else {
             return;
@@ -498,7 +501,9 @@ impl QuoteModeController {
 
     async fn reconcile_and_execute(&mut self) {
         let now_ms = now_ms();
-        let snapshot = self.user_feed_state.exchange_snapshot(&self.working, now_ms);
+        let snapshot = self
+            .user_feed_state
+            .exchange_snapshot(&self.working, now_ms);
         let outcome = if self.dry_run {
             self.order_manager
                 .reconcile(&self.last_desired, &self.working, now_ms)
@@ -562,6 +567,7 @@ impl QuoteModeController {
     async fn execute_commands(&mut self, commands: Vec<ExecutionCommand>) {
         let capital_before = self.capital_snapshot();
         let plan = execution::build_quote_action_plan(&commands, &self.working);
+        let mut batch_errors = Vec::new();
 
         if plan.cancel_all {
             if self.dry_run {
@@ -570,11 +576,16 @@ impl QuoteModeController {
                         quote.mark_canceled(now_ms());
                     }
                 }
-            } else if self.quote_client.cancel_all_orders(&self.creds).await.is_ok() {
-                for quote in &mut self.working {
-                    if quote.is_cancelable() {
-                        quote.mark_pending_cancel(now_ms());
+            } else {
+                match self.quote_client.cancel_all_orders(&self.creds).await {
+                    Ok(()) => {
+                        for quote in &mut self.working {
+                            if quote.is_cancelable() {
+                                quote.mark_pending_cancel(now_ms());
+                            }
+                        }
                     }
+                    Err(err) => batch_errors.push(format!("cancel_all:{err}")),
                 }
             }
         }
@@ -590,20 +601,22 @@ impl QuoteModeController {
                         quote.mark_canceled(now_ms());
                     }
                 }
-            } else if self
-                .quote_client
-                .cancel_orders(&plan.cancel_order_ids, &self.creds)
-                .await
-                .is_ok()
-            {
-                for order_id in &plan.cancel_order_ids {
-                    if let Some(quote) = self
-                        .working
-                        .iter_mut()
-                        .find(|quote| quote.client_order_id.as_deref() == Some(order_id.as_str()))
-                    {
-                        quote.mark_pending_cancel(now_ms());
+            } else {
+                match self
+                    .quote_client
+                    .cancel_orders(&plan.cancel_order_ids, &self.creds)
+                    .await
+                {
+                    Ok(_) => {
+                        for order_id in &plan.cancel_order_ids {
+                            if let Some(quote) = self.working.iter_mut().find(|quote| {
+                                quote.client_order_id.as_deref() == Some(order_id.as_str())
+                            }) {
+                                quote.mark_pending_cancel(now_ms());
+                            }
+                        }
                     }
+                    Err(err) => batch_errors.push(format!("cancel_orders:{err}")),
                 }
             }
         }
@@ -621,23 +634,145 @@ impl QuoteModeController {
                     }
                 }
             } else if let Some(signer_params) = self.signer_params.as_ref() {
-                if let Ok(responses) = self
+                match self
                     .quote_client
                     .place_quotes(&plan.place_quotes, &self.creds, signer_params)
                     .await
                 {
-                    for (desired, response) in plan.place_quotes.iter().zip(responses.iter()) {
-                        upsert_working_quote(&mut self.working, desired.clone(), now_ms());
-                        if let Some(quote) = self
-                            .working
-                            .iter_mut()
-                            .find(|quote| quote.quote_id == desired.quote_id)
-                        {
-                            if response.success {
-                                quote.mark_working(response.order_id.clone(), now_ms());
-                            } else {
-                                quote.mark_rejected(response.error_msg.clone(), now_ms());
+                    Ok(responses) => {
+                        if responses.len() != plan.place_quotes.len() {
+                            batch_errors.push(format!(
+                                "place_quotes:response_count_mismatch:{}!={}",
+                                responses.len(),
+                                plan.place_quotes.len()
+                            ));
+                        }
+
+                        for (desired, response) in plan.place_quotes.iter().zip(responses.iter()) {
+                            upsert_working_quote(&mut self.working, desired.clone(), now_ms());
+                            if let Some(quote) = self
+                                .working
+                                .iter_mut()
+                                .find(|quote| quote.quote_id == desired.quote_id)
+                            {
+                                match execution::classify_quote_response(response) {
+                                    execution::QuotePlacementDisposition::Resting {
+                                        client_order_id,
+                                        ..
+                                    } => quote.mark_working(client_order_id, now_ms()),
+                                    execution::QuotePlacementDisposition::NonResting { status } => {
+                                        quote.mark_rejected(
+                                            format!("non_resting_status:{status}"),
+                                            now_ms(),
+                                        )
+                                    }
+                                    execution::QuotePlacementDisposition::Rejected { reason } => {
+                                        quote.mark_rejected(reason, now_ms())
+                                    }
+                                }
                             }
+
+                            let capital = self.capital_snapshot();
+                            let status = execution::normalized_order_status(&response.status);
+                            let error_text = if response.error_msg.trim().is_empty() {
+                                None
+                            } else {
+                                Some(response.error_msg.clone())
+                            };
+                            let _ = self.analysis_store.append(&AnalysisOperation {
+                                timestamp_ms: now_ms(),
+                                operation_type: "quote_submit_result".to_string(),
+                                condition_id: Some(
+                                    desired
+                                        .quote_id
+                                        .as_str()
+                                        .split(':')
+                                        .next()
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                ),
+                                asset_id: Some(desired.asset_id.clone()),
+                                quote_id: Some(desired.quote_id.to_string()),
+                                client_order_id: if response.order_id.is_empty() {
+                                    None
+                                } else {
+                                    Some(response.order_id.clone())
+                                },
+                                exchange_order_id: None,
+                                side: Some(format!("{:?}", desired.side)),
+                                requested_price: Some(desired.price.clone()),
+                                requested_size: Some(desired.size.clone()),
+                                result_status: if response.success {
+                                    status
+                                } else {
+                                    "rejected".to_string()
+                                },
+                                error_text,
+                                capital_before_usd: Some(capital.active_deployed_usd),
+                                capital_after_usd: Some(capital.active_deployed_usd),
+                                reward_share: None,
+                                payload_json: serde_json::to_string(response).ok(),
+                            });
+                        }
+
+                        for desired in plan.place_quotes.iter().skip(responses.len()) {
+                            let _ = self.analysis_store.append(&AnalysisOperation {
+                                timestamp_ms: now_ms(),
+                                operation_type: "quote_submit_result".to_string(),
+                                condition_id: Some(
+                                    desired
+                                        .quote_id
+                                        .as_str()
+                                        .split(':')
+                                        .next()
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                ),
+                                asset_id: Some(desired.asset_id.clone()),
+                                quote_id: Some(desired.quote_id.to_string()),
+                                client_order_id: None,
+                                exchange_order_id: None,
+                                side: Some(format!("{:?}", desired.side)),
+                                requested_price: Some(desired.price.clone()),
+                                requested_size: Some(desired.size.clone()),
+                                result_status: "missing_response".to_string(),
+                                error_text: Some("place_quotes missing batch response".to_string()),
+                                capital_before_usd: Some(capital_before.active_deployed_usd),
+                                capital_after_usd: Some(capital_before.active_deployed_usd),
+                                reward_share: None,
+                                payload_json: None,
+                            });
+                        }
+                    }
+                    Err(err) => {
+                        batch_errors.push(format!("place_quotes:{err}"));
+                        for desired in &plan.place_quotes {
+                            let _ = self.analysis_store.append(&AnalysisOperation {
+                                timestamp_ms: now_ms(),
+                                operation_type: "quote_submit_result".to_string(),
+                                condition_id: Some(
+                                    desired
+                                        .quote_id
+                                        .as_str()
+                                        .split(':')
+                                        .next()
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                ),
+                                asset_id: Some(desired.asset_id.clone()),
+                                quote_id: Some(desired.quote_id.to_string()),
+                                client_order_id: None,
+                                exchange_order_id: None,
+                                side: Some(format!("{:?}", desired.side)),
+                                requested_price: Some(desired.price.clone()),
+                                requested_size: Some(desired.size.clone()),
+                                result_status: "request_error".to_string(),
+                                error_text: Some(err.clone()),
+                                capital_before_usd: Some(capital_before.active_deployed_usd),
+                                capital_after_usd: Some(capital_before.active_deployed_usd),
+                                reward_share: None,
+                                payload_json: None,
+                            });
                         }
                     }
                 }
@@ -657,7 +792,7 @@ impl QuoteModeController {
             requested_price: None,
             requested_size: None,
             result_status: format!("commands={}", commands.len()),
-            error_text: None,
+            error_text: (!batch_errors.is_empty()).then(|| batch_errors.join("; ")),
             capital_before_usd: Some(capital_before.active_deployed_usd),
             capital_after_usd: Some(capital_after.active_deployed_usd),
             reward_share: None,
@@ -676,6 +811,7 @@ impl QuoteModeController {
         if !self.dry_run {
             let _ = self.quote_client.cancel_all_orders(&self.creds).await;
         }
+        self.last_heartbeat_id = None;
         self.last_desired = DesiredQuotes::default();
         let _ = self.analysis_store.append(&AnalysisOperation {
             timestamp_ms: now_ms(),
@@ -715,15 +851,18 @@ async fn run_quote_mode(
     l2_creds: rtt_core::clob_auth::L2Credentials,
     signer_params: Option<execution::SignerParams>,
 ) {
-    let portfolio = discover_quote_portfolio(&config).await.unwrap_or_else(|err| {
-        tracing::error!("Failed to discover reward portfolio: {}", err);
-        std::process::exit(1);
-    });
+    let portfolio = discover_quote_portfolio(&config)
+        .await
+        .unwrap_or_else(|err| {
+            tracing::error!("Failed to discover reward portfolio: {}", err);
+            std::process::exit(1);
+        });
 
-    let analysis_store = AnalysisStore::open(&config.quote_mode.analysis_db_path).unwrap_or_else(|e| {
-        tracing::error!("Failed to open analysis store: {}", e);
-        std::process::exit(1);
-    });
+    let analysis_store =
+        AnalysisStore::open(&config.quote_mode.analysis_db_path).unwrap_or_else(|e| {
+            tracing::error!("Failed to open analysis store: {}", e);
+            std::process::exit(1);
+        });
     for decision in &portfolio.selected_markets {
         let _ = analysis_store.append(&AnalysisOperation {
             timestamp_ms: now_ms(),
@@ -759,12 +898,7 @@ async fn run_quote_mode(
         });
     let (_notice_tx, notice_rx) = tokio::sync::mpsc::channel::<UpdateNotice>(1);
     let (quote_tx, _quote_rx) = tokio::sync::mpsc::channel::<DesiredQuotes>(1);
-    let runtime = QuoteRuntime::new(
-        quote_strategy,
-        hot_store.clone(),
-        notice_rx,
-        quote_tx,
-    );
+    let runtime = QuoteRuntime::new(quote_strategy, hot_store.clone(), notice_rx, quote_tx);
 
     let params = config.strategy.liquidity_rewards_params();
     let mut controller = QuoteModeController {
@@ -785,6 +919,7 @@ async fn run_quote_mode(
         working: Vec::new(),
         last_desired: DesiredQuotes::default(),
         last_notice: None,
+        last_heartbeat_id: None,
     };
 
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
@@ -887,12 +1022,15 @@ async fn run_quote_mode(
         None
     };
 
-    let mut heartbeat_interval =
-        tokio::time::interval(std::time::Duration::from_secs(config.quote_mode.heartbeat_interval_secs));
-    let mut reward_interval =
-        tokio::time::interval(std::time::Duration::from_secs(config.quote_mode.reward_poll_interval_secs));
-    let mut rebate_interval =
-        tokio::time::interval(std::time::Duration::from_secs(config.quote_mode.rebate_poll_interval_secs));
+    let mut heartbeat_interval = tokio::time::interval(std::time::Duration::from_secs(
+        config.quote_mode.heartbeat_interval_secs,
+    ));
+    let mut reward_interval = tokio::time::interval(std::time::Duration::from_secs(
+        config.quote_mode.reward_poll_interval_secs,
+    ));
+    let mut rebate_interval = tokio::time::interval(std::time::Duration::from_secs(
+        config.quote_mode.rebate_poll_interval_secs,
+    ));
 
     tracing::info!(
         selected_markets = portfolio.selected_markets.len(),
@@ -938,7 +1076,9 @@ async fn run_quote_mode(
     persist_final_state(&config.execution.state_file, &circuit_breaker);
 }
 
-async fn discover_quote_portfolio(config: &ExecutorConfig) -> Result<SelectedQuotePortfolio, String> {
+async fn discover_quote_portfolio(
+    config: &ExecutorConfig,
+) -> Result<SelectedQuotePortfolio, String> {
     let registry = pm_data::market_registry::MarketRegistry::new(
         pm_data::registry_provider::GammaRegistryProvider::new("gamma-primary"),
         pm_data::market_registry::RegistryRefreshPolicy {
@@ -955,15 +1095,13 @@ async fn discover_quote_portfolio(config: &ExecutorConfig) -> Result<SelectedQuo
             ..Default::default()
         },
     );
-    let refresh = registry
-        .refresh_once()
-        .await
-        .map_err(|err| err.message)?;
+    let refresh = registry.refresh_once().await.map_err(|err| err.message)?;
 
-    let reward_provider = pm_data::registry_provider::PolymarketRewardProvider::with_client_and_base_url(
-        reqwest::Client::new(),
-        config.quote_mode.clob_base_url.clone(),
-    );
+    let reward_provider =
+        pm_data::registry_provider::PolymarketRewardProvider::with_client_and_base_url(
+            reqwest::Client::new(),
+            config.quote_mode.clob_base_url.clone(),
+        );
     let current_configs = reward_provider
         .fetch_current_reward_configs()
         .await
@@ -1021,10 +1159,12 @@ async fn discover_quote_portfolio(config: &ExecutorConfig) -> Result<SelectedQuo
     let mut condition_ids = Vec::new();
     for selected in &selection.selected {
         let market = &selected.market;
-        let reward = market
-            .reward
-            .as_ref()
-            .ok_or_else(|| format!("selected market {} missing reward metadata", market.market_id))?;
+        let reward = market.reward.as_ref().ok_or_else(|| {
+            format!(
+                "selected market {} missing reward metadata",
+                market.market_id
+            )
+        })?;
         let condition_id = market
             .condition_id
             .clone()
@@ -1038,12 +1178,22 @@ async fn discover_quote_portfolio(config: &ExecutorConfig) -> Result<SelectedQuo
             reward_max_spread: reward
                 .max_spread
                 .as_ref()
-                .ok_or_else(|| format!("selected market {} missing reward max spread", market.market_id))?
+                .ok_or_else(|| {
+                    format!(
+                        "selected market {} missing reward max spread",
+                        market.market_id
+                    )
+                })?
                 .to_string(),
             reward_min_size: reward
                 .min_size
                 .as_ref()
-                .ok_or_else(|| format!("selected market {} missing reward min size", market.market_id))?
+                .ok_or_else(|| {
+                    format!(
+                        "selected market {} missing reward min size",
+                        market.market_id
+                    )
+                })?
                 .to_string(),
             end_time_ms: selected.end_time_ms,
         });
@@ -1062,7 +1212,11 @@ async fn discover_quote_portfolio(config: &ExecutorConfig) -> Result<SelectedQuo
     })
 }
 
-fn upsert_working_quote(working: &mut Vec<WorkingQuote>, desired: pm_strategy::quote::DesiredQuote, now_ms: u64) {
+fn upsert_working_quote(
+    working: &mut Vec<WorkingQuote>,
+    desired: pm_strategy::quote::DesiredQuote,
+    now_ms: u64,
+) {
     working.retain(|quote| quote.quote_id != desired.quote_id);
     working.push(WorkingQuote::pending_submit(desired, now_ms));
 }

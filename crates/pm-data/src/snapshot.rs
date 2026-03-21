@@ -89,10 +89,7 @@ pub enum UniverseBypassReason {
 }
 
 impl SelectedUniverse {
-    pub fn resolve(
-        snapshot: Option<&RegistrySnapshot>,
-        policy: &UniverseSelectionPolicy,
-    ) -> Self {
+    pub fn resolve(snapshot: Option<&RegistrySnapshot>, policy: &UniverseSelectionPolicy) -> Self {
         if policy.bypass_registry {
             return Self {
                 selected_market_ids: Vec::new(),
@@ -115,15 +112,30 @@ impl SelectedUniverse {
         let mut decisions = Vec::with_capacity(snapshot.markets.len());
         for (market_id, market) in &snapshot.markets {
             let (decision, reason) = if policy.exclude_markets.contains(market_id) {
-                (UniverseDecisionKind::Excluded, UniverseSelectionReason::ExplicitExclude)
+                (
+                    UniverseDecisionKind::Excluded,
+                    UniverseSelectionReason::ExplicitExclude,
+                )
             } else if policy.include_markets.contains(market_id) {
-                (UniverseDecisionKind::Included, UniverseSelectionReason::ExplicitInclude)
+                (
+                    UniverseDecisionKind::Included,
+                    UniverseSelectionReason::ExplicitInclude,
+                )
             } else if policy.active_only && !market.is_tradable() {
-                (UniverseDecisionKind::Excluded, UniverseSelectionReason::InactiveStatus)
+                (
+                    UniverseDecisionKind::Excluded,
+                    UniverseSelectionReason::InactiveStatus,
+                )
             } else if policy.require_reward && market.reward.is_none() {
-                (UniverseDecisionKind::Excluded, UniverseSelectionReason::MissingReward)
+                (
+                    UniverseDecisionKind::Excluded,
+                    UniverseSelectionReason::MissingReward,
+                )
             } else {
-                (UniverseDecisionKind::Included, UniverseSelectionReason::Active)
+                (
+                    UniverseDecisionKind::Included,
+                    UniverseSelectionReason::Active,
+                )
             };
 
             if decision == UniverseDecisionKind::Included {
@@ -165,8 +177,7 @@ impl RegistrySnapshot {
 #[cfg(test)]
 mod tests {
     use std::{
-        env,
-        fs,
+        env, fs,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -176,11 +187,7 @@ mod tests {
         RewardParams, TickSize,
     };
 
-    fn market(
-        market_id: &str,
-        status: MarketStatus,
-        reward: bool,
-    ) -> (MarketId, MarketMeta) {
+    fn market(market_id: &str, status: MarketStatus, reward: bool) -> (MarketId, MarketMeta) {
         let market_id = MarketId::new(market_id);
         (
             market_id.clone(),

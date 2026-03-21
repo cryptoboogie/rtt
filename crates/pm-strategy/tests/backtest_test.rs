@@ -100,7 +100,10 @@ fn sample_normalized_updates() -> Vec<NormalizedUpdate> {
             notice: UpdateNotice {
                 source_id: source_id.clone(),
                 source_kind: SourceKind::PolymarketWs,
-                subject: rtt_core::InstrumentRef::asset(source_id.clone(), snapshot.asset_id.clone()),
+                subject: rtt_core::InstrumentRef::asset(
+                    source_id.clone(),
+                    snapshot.asset_id.clone(),
+                ),
                 kind: UpdateKind::BookSnapshot,
                 version: (index as u64) + 1,
                 source_hash: Some(snapshot.hash.clone()),
@@ -269,7 +272,10 @@ fn notice_replay_matches_snapshot_backtest_for_threshold_strategy() {
     );
 
     assert_eq!(notice_result.total_events, updates.len());
-    assert_eq!(notice_result.total_snapshots, snapshot_result.total_snapshots);
+    assert_eq!(
+        notice_result.total_snapshots,
+        snapshot_result.total_snapshots
+    );
     assert_eq!(notice_result.triggers.len(), snapshot_result.triggers.len());
     assert_eq!(notice_result.triggers[0].price, "0.44");
     assert_eq!(notice_result.triggers[2].price, "0.37");

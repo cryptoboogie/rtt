@@ -183,7 +183,8 @@ mod tests {
 
     #[test]
     fn diff_planner_produces_adds_removes_and_unchanged_deterministically() {
-        let diff = plan_subscription_diff(&set(&["asset-1", "asset-2"]), &set(&["asset-2", "asset-3"]));
+        let diff =
+            plan_subscription_diff(&set(&["asset-1", "asset-2"]), &set(&["asset-2", "asset-3"]));
 
         assert_eq!(diff.adds, vec!["asset-3".to_string()]);
         assert_eq!(diff.removes, vec!["asset-1".to_string()]);
@@ -205,9 +206,15 @@ mod tests {
 
         assert_eq!(commands.len(), 3);
         assert_eq!(commands[0].operation, SubscriptionOperation::Subscribe);
-        assert_eq!(commands[0].asset_ids, vec!["a1".to_string(), "a2".to_string()]);
+        assert_eq!(
+            commands[0].asset_ids,
+            vec!["a1".to_string(), "a2".to_string()]
+        );
         assert_eq!(commands[0].pacing_ms, 0);
-        assert_eq!(commands[1].asset_ids, vec!["a3".to_string(), "a4".to_string()]);
+        assert_eq!(
+            commands[1].asset_ids,
+            vec!["a3".to_string(), "a4".to_string()]
+        );
         assert_eq!(commands[1].pacing_ms, 250);
         assert_eq!(commands[2].asset_ids, vec!["a5".to_string()]);
         assert_eq!(commands[2].pacing_ms, 250);

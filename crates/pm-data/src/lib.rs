@@ -1,5 +1,5 @@
-pub mod market_registry;
 pub mod feed;
+pub mod market_registry;
 pub mod orderbook;
 pub mod pipeline;
 pub mod reference_store;
