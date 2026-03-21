@@ -1758,3 +1758,18 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test --workspace`
 - **Commit**: N/A (working tree only)
 - **Deviation**: Kept the compatibility layer at executor startup instead of teaching every caller to materialize fire.sh-style signing params independently; this keeps the live runtime aligned with the historically successful operator contract without broadening env coupling across crates.
+
+### 13.12 — Normalize live GTD expirations against wall clock before quote submission
+- **Spec**: `specs/13-low-risk-liquidity-rewards.md`
+- **Files changed**: `crates/pm-executor/src/execution.rs`, `crates/pm-executor/src/main.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Fixed quote-mode GTD order building so live submissions no longer trust raw book timestamps for expiration; the executor now re-anchors GTD expirations against current wall-clock time
+  - Applied Polymarket's one-minute security threshold together with the configured `quote_ttl_secs`, preserving the intended quote lifetime while avoiding `invalid expiration value` rejects when feed timestamps are stale
+  - Added focused regression coverage for both the pure normalization rule and the live quote-order builder path
+- **Tests**:
+  - `cargo test -p pm-executor normalize_gtd_expiration -- --nocapture`
+  - `cargo test -p pm-executor quote_order_builder_normalizes_gtd_expiration_for_live_submission -- --nocapture`
+  - `cargo test --workspace --lib`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Kept the normalization in the executor instead of the strategy so quote planning, replay tests, and reconciliation stay feed-deterministic while the live submit path absorbs exchange-specific timing rules.

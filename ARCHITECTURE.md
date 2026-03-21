@@ -447,6 +447,7 @@ To stay compatible with the known-good `scripts/fire.sh` live-order lane, `pm-ex
   - Sends webhook alert on circuit breaker trip
 - `QuoteCommandPolicy`, `QuoteCommandThrottle`, and `retry_decision()` define the bounded retry/backoff/throttling seam for quote-maintenance commands without redesigning the current trigger hot path
 - `QuoteApiClient` signs `DesiredQuote` values directly (including GTD expirations), submits quote batches as documented post-only maker orders, batches `POST /orders` and `DELETE /orders`, issues `DELETE /cancel-all`, sends chained heartbeats to `/v1/heartbeats`, and samples `/rewards/user/percentages` plus `/rebates/current`
+- For GTD quotes, live submission re-anchors the requested expiration against wall-clock time using the configured `quote_ttl_secs` plus Polymarket's one-minute security buffer; this avoids stale feed timestamps producing expirations that are technically in the future but still too close for the exchange to accept
 - Quote-mode submit handling treats only `status = live` as a resting working quote; successful-but-non-resting statuses such as `matched`, `delayed`, and `unmatched` are journaled and fed back into reconciliation instead of being assumed open on exchange
 - Quote-mode execution is correctness-first rather than latency-first: it uses authenticated REST requests and deterministic batching instead of the trigger branch's dedicated HTTP/2 thread
 

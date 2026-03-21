@@ -22,6 +22,8 @@ use crate::order_manager::ExecutionCommand;
 use crate::order_state::WorkingQuote;
 use crate::safety::{CircuitBreaker, OrderGuard, RateLimiter};
 
+const POLYMARKET_GTD_SECURITY_BUFFER_SECS: u64 = 60;
+
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuoteCommandPolicy {
@@ -228,6 +230,7 @@ impl QuoteApiClient {
                 signer_params.signer_addr,
                 signer_params.fee_rate_bps,
                 signer_params.sig_type,
+                signer_params.quote_ttl_secs,
             )?;
             let signature = sign_order(&signer_params.signer, &order, signer_params.is_neg_risk)
                 .await
@@ -458,12 +461,33 @@ pub fn normalized_order_status(status: &str) -> String {
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
+fn normalize_gtd_expiration(
+    requested_expiration_unix_secs: Option<u64>,
+    order_type: rtt_core::trigger::OrderType,
+    now_unix_secs: u64,
+    quote_ttl_secs: u64,
+) -> u64 {
+    match order_type {
+        rtt_core::trigger::OrderType::GTD => {
+            let minimum_live_expiration = now_unix_secs
+                .saturating_add(POLYMARKET_GTD_SECURITY_BUFFER_SECS)
+                .saturating_add(quote_ttl_secs);
+            requested_expiration_unix_secs
+                .unwrap_or(minimum_live_expiration)
+                .max(minimum_live_expiration)
+        }
+        _ => requested_expiration_unix_secs.unwrap_or_default(),
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 fn build_quote_order(
     quote: &DesiredQuote,
     maker: Address,
     signer_addr: Address,
     fee_rate_bps: u64,
     signature_type: SignatureType,
+    quote_ttl_secs: u64,
 ) -> Result<Order, String> {
     let side = ClobSide::from(quote.side);
     let (maker_amount, taker_amount) = compute_amounts(&quote.price, &quote.size, side)
@@ -483,12 +507,24 @@ fn build_quote_order(
         tokenId: token_id,
         makerAmount: maker_amount,
         takerAmount: taker_amount,
-        expiration: U256::from(quote.expiration_unix_secs.unwrap_or_default()),
+        expiration: U256::from(normalize_gtd_expiration(
+            quote.expiration_unix_secs,
+            quote.order_type,
+            current_unix_secs(),
+            quote_ttl_secs,
+        )),
         nonce: U256::ZERO,
         feeRateBps: U256::from(fee_rate_bps),
         side: side as u8,
         signatureType: signature_type as u8,
     })
+}
+
+fn current_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 /// Build L2Credentials and PrivateKeySigner from executor config.
@@ -564,6 +600,7 @@ pub struct SignerParams {
     pub fee_rate_bps: u64,
     pub is_neg_risk: bool,
     pub sig_type: SignatureType,
+    pub quote_ttl_secs: u64,
     pub owner: String,
 }
 
@@ -973,7 +1010,22 @@ mod tests {
     }
 
     #[test]
-    fn quote_order_builder_preserves_gtd_expiration() {
+    fn normalize_gtd_expiration_reanchors_stale_feed_based_expiration_against_wall_clock() {
+        let normalized = normalize_gtd_expiration(Some(134), OrderType::GTD, 115, 30);
+
+        assert_eq!(normalized, 205);
+    }
+
+    #[test]
+    fn normalize_gtd_expiration_preserves_requested_value_when_it_is_safely_in_future() {
+        let normalized = normalize_gtd_expiration(Some(400), OrderType::GTD, 115, 30);
+
+        assert_eq!(normalized, 400);
+    }
+
+    #[test]
+    fn quote_order_builder_normalizes_gtd_expiration_for_live_submission() {
+        let now_unix_secs = current_unix_secs();
         let quote = DesiredQuote::new(
             QuoteId::new("quote-1"),
             "1234",
@@ -982,7 +1034,7 @@ mod tests {
             "10",
             OrderType::GTD,
         )
-        .with_expiration(1_700_000_000);
+        .with_expiration(now_unix_secs.saturating_add(5));
 
         let order = build_quote_order(
             &quote,
@@ -990,10 +1042,14 @@ mod tests {
             valid_creds().signer_address.parse().unwrap(),
             0,
             SignatureType::Poly,
+            30,
         )
         .unwrap();
 
-        assert_eq!(order.expiration, U256::from(1_700_000_000u64));
+        assert!(
+            order.expiration
+                >= U256::from(now_unix_secs + POLYMARKET_GTD_SECURITY_BUFFER_SECS + 30)
+        );
     }
 
     #[test]

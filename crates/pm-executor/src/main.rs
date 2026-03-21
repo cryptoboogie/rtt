@@ -155,6 +155,7 @@ fn build_signer_params(
         fee_rate_bps: config.execution.fee_rate_bps,
         is_neg_risk: config.execution.is_neg_risk,
         sig_type,
+        quote_ttl_secs: config.strategy.params.quote_ttl_secs.unwrap_or(30),
         owner: config.credentials.api_key.clone(),
     })
 }
