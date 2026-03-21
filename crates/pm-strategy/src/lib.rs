@@ -1,6 +1,8 @@
 pub mod backtest;
 pub mod config;
+pub mod liquidity_rewards;
 pub mod quote;
+pub mod reward_math;
 pub mod runner;
 pub mod runtime;
 pub mod spread;

@@ -182,6 +182,10 @@ impl SharedRuntimeScaffold {
     pub fn apply_inventory_delta(&mut self, delta: InventoryDelta) {
         self.inventory.apply_delta(delta);
     }
+
+    pub fn inventory_positions(&self) -> Vec<InventoryPosition> {
+        self.inventory.all_positions()
+    }
 }
 
 impl RuntimeTopologyPlan {
@@ -327,6 +331,10 @@ impl QuoteRuntime {
         self.scaffold.apply_inventory_delta(delta);
     }
 
+    pub fn inventory_positions(&self) -> Vec<InventoryPosition> {
+        self.scaffold.inventory_positions()
+    }
+
     pub fn handle_notice(&mut self, notice: &UpdateNotice) -> Option<DesiredQuotes> {
         let view = self.scaffold.resolve_view(notice)?;
         self.strategy.on_update(&view)
@@ -470,6 +478,10 @@ impl InventoryStore {
             })
             .cloned()
             .collect()
+    }
+
+    fn all_positions(&self) -> Vec<InventoryPosition> {
+        self.positions.values().cloned().collect()
     }
 }
 

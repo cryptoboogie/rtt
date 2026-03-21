@@ -1,3 +1,4 @@
+use pm_strategy::liquidity_rewards::{LiquidityRewardsMarket, LiquidityRewardsParams, LiquidityRewardsStrategy};
 use pm_strategy::quote::{DesiredQuote, DesiredQuotes, QuoteId};
 use pm_strategy::runtime::{ProvisionedTopology, QuoteRuntime, TriggerRuntime};
 use pm_strategy::strategy::{
@@ -22,36 +23,58 @@ fn sample_market_meta() -> MarketMeta {
         tick_size: TickSize::new("0.01"),
         min_order_size: Some(MinOrderSize::new("5")),
         status: MarketStatus::Active,
-        reward: None,
+        reward: Some(rtt_core::RewardParams {
+            rate_bps: None,
+            max_spread: Some(rtt_core::Price::new("0.04")),
+            min_size: Some(rtt_core::Size::new("50")),
+            min_notional: None,
+            native_daily_rate: Some(rtt_core::Notional::new("5")),
+            sponsored_daily_rate: None,
+            total_daily_rate: Some(rtt_core::Notional::new("5")),
+            market_competitiveness: Some("2".to_string()),
+            fee_enabled: Some(false),
+            updated_at_ms: Some(1_700_000_000_000),
+            freshness: rtt_core::RewardFreshness::Fresh,
+        }),
     }
 }
 
-fn snapshot_update(version: u64, ask: &str) -> NormalizedUpdate {
+fn snapshot_update_for_asset(version: u64, asset_id: &str, bid_1: &str, bid_2: &str, ask_1: &str, ask_2: &str) -> NormalizedUpdate {
     let source_id = SourceId::new("polymarket-public");
     NormalizedUpdate {
         notice: UpdateNotice {
             source_id: source_id.clone(),
             source_kind: SourceKind::PolymarketWs,
-            subject: rtt_core::InstrumentRef::asset(source_id.clone(), "token_abc"),
+            subject: rtt_core::InstrumentRef::asset(source_id.clone(), asset_id),
             kind: UpdateKind::BookSnapshot,
             version,
             source_hash: Some(format!("hash-{version}")),
         },
         payload: NormalizedUpdatePayload::BookSnapshot(BookSnapshotUpdate {
             market_id: MarketId::new("market-1"),
-            asset_id: AssetId::new("token_abc"),
+            asset_id: AssetId::new(asset_id),
             bids: vec![BookLevel {
-                price: Price::new("0.40"),
+                price: Price::new(bid_1),
+                size: rtt_core::Size::new("20"),
+            }, BookLevel {
+                price: Price::new(bid_2),
                 size: rtt_core::Size::new("100"),
             }],
             asks: vec![BookLevel {
-                price: Price::new(ask),
+                price: Price::new(ask_1),
+                size: rtt_core::Size::new("20"),
+            }, BookLevel {
+                price: Price::new(ask_2),
                 size: rtt_core::Size::new("100"),
             }],
             timestamp_ms: 1_700_000_000_000 + version,
             source_hash: Some(format!("hash-{version}")),
         }),
     }
+}
+
+fn snapshot_update(version: u64, ask: &str) -> NormalizedUpdate {
+    snapshot_update_for_asset(version, "token_abc", "0.40", "0.39", ask, "0.49")
 }
 
 fn reference_update(version: u64, price: &str) -> NormalizedUpdate {
@@ -255,4 +278,56 @@ fn quote_runtime_surfaces_inventory_deltas_back_to_quote_strategies() {
     assert_eq!(desired.quotes[0].quote_id, QuoteId::new("inventory-quote"));
     assert_eq!(desired.quotes[0].size, "7");
     assert_eq!(desired.quotes[0].price, "0.40");
+}
+
+#[test]
+fn liquidity_rewards_quote_runtime_resolves_selected_yes_no_books_into_desired_quotes() {
+    let store = HotStateStore::new();
+    store.register_market(&sample_market_meta());
+
+    let (_notice_tx, notice_rx) = mpsc::channel(16);
+    let (quote_tx, _quote_rx) = mpsc::channel(16);
+    let mut runtime = QuoteRuntime::new(
+        Box::new(LiquidityRewardsStrategy::new(
+            vec![LiquidityRewardsMarket {
+                condition_id: "condition-1".to_string(),
+                yes_asset_id: "token_abc".to_string(),
+                no_asset_id: "token_xyz".to_string(),
+                tick_size: "0.01".to_string(),
+                min_order_size: Some("5".to_string()),
+                reward_max_spread: "0.04".to_string(),
+                reward_min_size: "50".to_string(),
+                end_time_ms: Some(1_700_001_000_000),
+            }],
+            LiquidityRewardsParams {
+                initial_bankroll_usd: 100.0,
+                max_total_deployed_usd: 100.0,
+                max_markets: 1,
+                base_quote_size: 50.0,
+                edge_buffer: 0.02,
+                target_spread_cents: 2.0,
+                quote_ttl_secs: 30,
+                min_total_daily_rate: 1.0,
+                max_market_competitiveness: 10.0,
+                min_time_to_expiry_secs: 60,
+                max_inventory_per_market: 100.0,
+                max_unhedged_notional_per_market: 40.0,
+            },
+        )),
+        store.clone(),
+        notice_rx,
+        quote_tx,
+    );
+
+    let yes = snapshot_update_for_asset(1, "token_abc", "0.49", "0.47", "0.51", "0.55");
+    let no = snapshot_update_for_asset(2, "token_xyz", "0.48", "0.46", "0.52", "0.56");
+    store.apply_update(&yes);
+    store.apply_update(&no);
+
+    assert!(runtime.handle_notice(&yes.notice).is_none());
+    let desired = runtime.handle_notice(&no.notice).expect("desired quotes");
+
+    assert_eq!(desired.quotes.len(), 2);
+    assert_eq!(desired.quotes[0].quote_id, QuoteId::new("condition-1:yes:entry"));
+    assert_eq!(desired.quotes[1].quote_id, QuoteId::new("condition-1:no:entry"));
 }

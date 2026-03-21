@@ -1579,3 +1579,74 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test --workspace`
 - **Commit**: `feat: add 12d exchange sync and exposure seam`
 - **Deviation**: Left the legacy trigger execution loop as the runtime default; the new retry/throttle helpers and inventory seam are additive surfaces for later integration rather than a hot-path redesign in this spec.
+
+### 13.1 — Add reward-aware market selection, reward math, and liquidity-rewards quote strategy
+- **Spec**: `specs/13-low-risk-liquidity-rewards.md`
+- **Files changed**: `crates/rtt-core/src/market.rs`, `crates/rtt-core/src/hot_state.rs`, `crates/pm-data/src/registry_provider.rs`, `crates/pm-data/src/market_registry.rs`, `crates/pm-strategy/src/lib.rs`, `crates/pm-strategy/src/config.rs`, `crates/pm-strategy/src/quote.rs`, `crates/pm-strategy/src/reward_math.rs`, `crates/pm-strategy/src/liquidity_rewards.rs`, `crates/pm-strategy/tests/config_test.rs`, `crates/pm-strategy/tests/runtime_contract_test.rs`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Extended shared market and hot-state models to carry enriched liquidity-reward metadata plus depth slices suitable for size-cutoff-adjusted midpoint math
+  - Added reward discovery/enrichment helpers for current reward configs and raw market competitiveness, then layered deterministic startup ranking over reward-per-reserved-capital
+  - Implemented `reward_math` helpers plus `LiquidityRewardsStrategy`, including paired YES/NO entry bids, bounded completion-mode quoting, GTD expirations, inventory caps, and bankroll-aware desired quote generation
+- **Tests**:
+  - `cargo test -p rtt-core market_meta_supports_generic_and_reward_enriched_markets -- --nocapture`
+  - `cargo test -p rtt-core normalized_book_updates_convert_into_hot_market_units -- --nocapture`
+  - `cargo test -p rtt-core book_deltas_preserve_depth_ordering_for_reward_math_consumers -- --nocapture`
+  - `cargo test -p pm-data current_reward_configs_parse_into_enriched_reward_metadata -- --nocapture`
+  - `cargo test -p pm-data reward_selector_filters_ineligible_markets_deterministically -- --nocapture`
+  - `cargo test -p pm-data reward_selector_ranks_by_reward_per_reserved_capital -- --nocapture`
+  - `cargo test -p pm-data reward_enrichment_merges_current_rates_and_competitiveness_into_snapshot_markets -- --nocapture`
+  - `cargo test -p pm-strategy midpoint_uses_depth_cutoff_not_just_bbo -- --nocapture`
+  - `cargo test -p pm-strategy balanced_inventory_emits_paired_entry_quotes_with_stable_ids_and_gtd_expiry -- --nocapture`
+  - `cargo test -p pm-strategy one_sided_inventory_only_emits_completion_quote -- --nocapture`
+  - `cargo test -p pm-strategy inventory_caps_disable_market_when_unhedged_notional_is_too_large -- --nocapture`
+  - `cargo test -p pm-strategy parse_liquidity_rewards_config_from_toml -- --nocapture`
+  - `cargo test -p pm-strategy config_builds_liquidity_rewards_quote_strategy -- --nocapture`
+  - `cargo test -p pm-strategy liquidity_rewards_quote_runtime_resolves_selected_yes_no_books_into_desired_quotes -- --nocapture`
+  - `cargo test -p pm-strategy q_min_applies_single_sided_scaling_inside_midpoint_band_only -- --nocapture`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Startup discovery keeps the selected market set fixed until restart as planned, but it currently relies on reward freshness plus reward eligibility rather than a fully populated market-expiry field from Gamma metadata.
+
+### 13.2 — Add quote-mode capital accounting, SQLite journaling, user-feed parsing, and authenticated quote helpers
+- **Spec**: `specs/13-low-risk-liquidity-rewards.md`
+- **Files changed**: `crates/pm-executor/Cargo.toml`, `crates/pm-executor/src/capital.rs`, `crates/pm-executor/src/analysis_store.rs`, `crates/pm-executor/src/user_feed.rs`, `crates/pm-executor/src/execution.rs`, `crates/pm-strategy/src/runtime.rs`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added deployment-budget helpers that compute active working/notional capital and reject any command set that would exceed the configured bankroll cap
+  - Added an append-only SQLite `analysis_store` for selection decisions, quote emissions, command batches, kill switches, reward samples, and rebate samples
+  - Added authenticated user-feed parsing/state reduction plus a lightweight websocket adapter for Polymarket's documented user channel, along with quote REST helpers for batched place/cancel, cancel-all, heartbeat, reward percentages, and rebate sampling
+  - Exposed runtime inventory positions so the executor can enforce the same global deployment budget at command-execution time that the strategy uses while planning quotes
+- **Tests**:
+  - `cargo test -p pm-executor deployment_snapshot_counts_working_and_inventory_capital -- --nocapture`
+  - `cargo test -p pm-executor analysis_store_appends_material_operations -- --nocapture`
+  - `cargo test -p pm-executor user_feed_state_maps_events_into_exchange_snapshot_and_fills -- --nocapture`
+  - `cargo test -p pm-executor quote_action_plan_batches_place_and_cancel_operations -- --nocapture`
+  - `cargo test -p pm-executor`
+- **Commit**: N/A (working tree only)
+- **Deviation**: The user-feed reducer is intentionally non-authoritative for order absence because the documented websocket channel does not provide a startup snapshot; fail-closed behavior is still enforced on degradation or disconnect.
+
+### 13.3 — Wire liquidity-rewards quote mode into `pm-executor`, update config/docs, and verify the workspace
+- **Spec**: `specs/13-low-risk-liquidity-rewards.md`
+- **Files changed**: `crates/pm-executor/src/config.rs`, `crates/pm-executor/src/main.rs`, `config.toml`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Split executor startup into a legacy trigger branch and a new liquidity-rewards quote branch that performs startup reward discovery, registers hot-state markets, drives `QuoteRuntime`, reconciles desired quotes against user-feed observations, and fails closed on heartbeat/user-feed degradation
+  - Added quote-mode config for the analysis DB path, authenticated quote API base URL, user-channel WS URL, and heartbeat/telemetry polling intervals
+  - Updated the example config and architecture notes to describe the quote-mode controller, bankroll enforcement, SQLite journal, authenticated user feed, and quote REST helper path
+- **Tests**:
+  - `cargo test -p pm-executor`
+  - `cargo test --workspace --lib`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: The executor currently sends direct `CancelAll` on user-feed or heartbeat failure instead of attempting a private REST resync first; this is an intentional fail-closed choice for the initial low-risk deployment.
+
+### 13.4 — Add env-only deployment overrides for prod branch promotion
+- **Spec**: `specs/13-low-risk-liquidity-rewards.md`
+- **Files changed**: `crates/pm-executor/src/config.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Extended `ExecutorConfig::apply_env_overrides()` so checked-in configs can be promoted to live liquidity-rewards mode entirely from environment variables
+  - Added `RTT_*` overrides for strategy selection, `dry_run`, quote-mode runtime endpoints/paths, liquidity-rewards bankroll controls, safety thresholds, and log level
+  - Added coverage proving a tracked threshold config can be switched to `liquidity_rewards` with `dry_run = false` and runtime quote settings using env vars only
+- **Tests**:
+  - `cargo test -p pm-executor rtt_env_overrides_can_switch_checked_in_config_to_live_quote_mode -- --nocapture`
+  - `cargo test -p pm-executor`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Kept the override surface executor-local rather than teaching `pm-strategy` to read env vars directly; the executor remains the single place where deployment-time configuration is materialized.

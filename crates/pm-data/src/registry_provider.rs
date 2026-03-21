@@ -67,6 +67,31 @@ pub struct GammaRegistryProvider {
     base_url: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentRewardConfig {
+    pub condition_id: String,
+    pub reward: RewardParams,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawRewardToken {
+    pub token_id: String,
+    pub outcome: String,
+    pub price: Price,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawRewardMarket {
+    pub condition_id: String,
+    pub market_competitiveness: Option<String>,
+    pub tokens: Vec<RawRewardToken>,
+}
+
+pub struct PolymarketRewardProvider {
+    client: reqwest::Client,
+    base_url: String,
+}
+
 impl GammaRegistryProvider {
     pub fn new(provider_name: impl Into<String>) -> Self {
         Self::with_client_and_base_url(
@@ -126,6 +151,183 @@ impl GammaRegistryProvider {
     }
 }
 
+impl PolymarketRewardProvider {
+    pub fn new() -> Self {
+        Self::with_client_and_base_url(reqwest::Client::new(), "https://clob.polymarket.com")
+    }
+
+    pub fn with_client_and_base_url(
+        client: reqwest::Client,
+        base_url: impl Into<String>,
+    ) -> Self {
+        Self {
+            client,
+            base_url: base_url.into(),
+        }
+    }
+
+    pub async fn fetch_current_reward_configs(
+        &self,
+    ) -> Result<Vec<CurrentRewardConfig>, RegistryProviderError> {
+        let response = self
+            .client
+            .get(format!(
+                "{}/rewards/markets/current",
+                self.base_url.trim_end_matches('/')
+            ))
+            .send()
+            .await
+            .map_err(|err| {
+                RegistryProviderError::transient(format!(
+                    "current rewards request failed: {err}"
+                ))
+            })?;
+        let status = response.status();
+        let body = response.text().await.map_err(|err| {
+            RegistryProviderError::transient(format!(
+                "current rewards response body read failed: {err}"
+            ))
+        })?;
+
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            return Err(RegistryProviderError::transient(format!(
+                "current rewards returned {status}"
+            )));
+        }
+        if !status.is_success() {
+            return Err(RegistryProviderError::permanent(format!(
+                "current rewards returned {status}"
+            )));
+        }
+
+        Self::parse_current_reward_configs(&body, now_ms())
+    }
+
+    pub async fn fetch_raw_market_rewards(
+        &self,
+        condition_id: &str,
+    ) -> Result<Vec<RawRewardMarket>, RegistryProviderError> {
+        let response = self
+            .client
+            .get(format!(
+                "{}/rewards/markets/{}",
+                self.base_url.trim_end_matches('/'),
+                condition_id
+            ))
+            .send()
+            .await
+            .map_err(|err| {
+                RegistryProviderError::transient(format!(
+                    "raw market rewards request failed: {err}"
+                ))
+            })?;
+        let status = response.status();
+        let body = response.text().await.map_err(|err| {
+            RegistryProviderError::transient(format!(
+                "raw market rewards response body read failed: {err}"
+            ))
+        })?;
+
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            return Err(RegistryProviderError::transient(format!(
+                "raw market rewards returned {status}"
+            )));
+        }
+        if !status.is_success() {
+            return Err(RegistryProviderError::permanent(format!(
+                "raw market rewards returned {status}"
+            )));
+        }
+
+        Self::parse_raw_market_rewards(&body)
+    }
+
+    pub fn parse_current_reward_configs(
+        body: &str,
+        fetched_at_ms: u64,
+    ) -> Result<Vec<CurrentRewardConfig>, RegistryProviderError> {
+        let envelope: CurrentRewardsEnvelope = serde_json::from_str(body).map_err(|err| {
+            RegistryProviderError::permanent(format!(
+                "failed to parse current rewards response: {err}"
+            ))
+        })?;
+
+        envelope
+            .data
+            .into_iter()
+            .map(|row| {
+                let reward_max_spread = row
+                    .rewards_max_spread
+                    .map(ScalarField::into_string)
+                    .map(|value| cents_to_price_string(&value))
+                    .transpose()?
+                    .map(Price::new);
+                let reward_min_size = row
+                    .rewards_min_size
+                    .map(ScalarField::into_string)
+                    .map(Size::new);
+                let native_daily_rate = row
+                    .native_daily_rate
+                    .map(ScalarField::into_string)
+                    .map(rtt_core::Notional::new);
+                let sponsored_daily_rate = row
+                    .sponsored_daily_rate
+                    .map(ScalarField::into_string)
+                    .map(rtt_core::Notional::new);
+                let total_daily_rate = row
+                    .total_daily_rate
+                    .map(ScalarField::into_string)
+                    .map(rtt_core::Notional::new);
+
+                Ok(CurrentRewardConfig {
+                    condition_id: row.condition_id,
+                    reward: RewardParams {
+                        rate_bps: None,
+                        max_spread: reward_max_spread,
+                        min_size: reward_min_size,
+                        min_notional: None,
+                        native_daily_rate,
+                        sponsored_daily_rate,
+                        total_daily_rate,
+                        market_competitiveness: None,
+                        fee_enabled: None,
+                        updated_at_ms: Some(fetched_at_ms),
+                        freshness: RewardFreshness::Fresh,
+                    },
+                })
+            })
+            .collect()
+    }
+
+    pub fn parse_raw_market_rewards(
+        body: &str,
+    ) -> Result<Vec<RawRewardMarket>, RegistryProviderError> {
+        let envelope: RawRewardsEnvelope = serde_json::from_str(body).map_err(|err| {
+            RegistryProviderError::permanent(format!(
+                "failed to parse raw market rewards response: {err}"
+            ))
+        })?;
+
+        Ok(envelope
+            .data
+            .into_iter()
+            .map(|row| RawRewardMarket {
+                condition_id: row.condition_id,
+                market_competitiveness: row.market_competitiveness.map(|value| value.into_string()),
+                tokens: row
+                    .tokens
+                    .into_iter()
+                    .map(|token| RawRewardToken {
+                        token_id: token.token_id,
+                        outcome: token.outcome,
+                        price: Price::new(token.price.into_string()),
+                    })
+                    .collect(),
+            })
+            .collect())
+    }
+}
+
 #[async_trait]
 impl RegistryProvider for GammaRegistryProvider {
     fn provider_name(&self) -> &str {
@@ -174,6 +376,43 @@ impl RegistryProvider for GammaRegistryProvider {
 struct GammaEvent {
     #[serde(default)]
     markets: Vec<GammaMarket>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CurrentRewardsEnvelope {
+    #[serde(default)]
+    data: Vec<CurrentRewardConfigRow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CurrentRewardConfigRow {
+    condition_id: String,
+    rewards_max_spread: Option<ScalarField>,
+    rewards_min_size: Option<ScalarField>,
+    native_daily_rate: Option<ScalarField>,
+    sponsored_daily_rate: Option<ScalarField>,
+    total_daily_rate: Option<ScalarField>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawRewardsEnvelope {
+    #[serde(default)]
+    data: Vec<RawRewardMarketRow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawRewardMarketRow {
+    condition_id: String,
+    market_competitiveness: Option<ScalarField>,
+    #[serde(default)]
+    tokens: Vec<RawRewardTokenRow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawRewardTokenRow {
+    token_id: String,
+    outcome: String,
+    price: ScalarField,
 }
 
 #[derive(Debug, Deserialize)]
@@ -287,6 +526,10 @@ fn normalize_gamma_market(market: GammaMarket) -> Result<MarketMeta, QuarantineR
     let reward_max_spread = market
         .rewards_max_spread
         .map(ScalarField::into_string)
+        .map(|value| {
+            cents_to_price_string(&value).map_err(|_| quarantine(&market.id, "invalid_rewards_max_spread"))
+        })
+        .transpose()?
         .map(Price::new);
     let reward = if reward_min_size.is_some() || reward_max_spread.is_some() {
         Some(RewardParams {
@@ -294,6 +537,11 @@ fn normalize_gamma_market(market: GammaMarket) -> Result<MarketMeta, QuarantineR
             max_spread: reward_max_spread,
             min_size: reward_min_size,
             min_notional: None,
+            native_daily_rate: None,
+            sponsored_daily_rate: None,
+            total_daily_rate: None,
+            market_competitiveness: None,
+            fee_enabled: None,
             updated_at_ms: None,
             freshness: RewardFreshness::Unknown,
         })
@@ -327,6 +575,28 @@ fn quarantine(record_id: &str, reason: &str) -> QuarantineReason {
         record_id: Some(record_id.to_string()),
         reason: reason.to_string(),
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn cents_to_price_string(raw: &str) -> Result<String, RegistryProviderError> {
+    let cents = raw.parse::<f64>().map_err(|err| {
+        RegistryProviderError::permanent(format!("invalid rewards max spread '{raw}': {err}"))
+    })?;
+    let price_units = cents / 100.0;
+    let mut rendered = format!("{price_units:.6}");
+    while rendered.contains('.') && rendered.ends_with('0') {
+        rendered.pop();
+    }
+    if rendered.ends_with('.') {
+        rendered.pop();
+    }
+    Ok(rendered)
 }
 
 #[cfg(test)]
@@ -400,5 +670,75 @@ mod tests {
             page.quarantined[0].record_id.as_deref(),
             Some("market-bad")
         );
+    }
+
+    #[test]
+    fn current_reward_configs_parse_into_enriched_reward_metadata() {
+        let body = r#"
+{
+  "data": [
+    {
+      "condition_id": "condition-1",
+      "rewards_max_spread": 4.5,
+      "rewards_min_size": 50,
+      "native_daily_rate": 5,
+      "sponsored_daily_rate": 0.5,
+      "total_daily_rate": 5.5
+    }
+  ]
+}
+"#;
+
+        let parsed = PolymarketRewardProvider::parse_current_reward_configs(
+            body,
+            1_700_000_000_000,
+        )
+        .expect("reward configs");
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].condition_id, "condition-1");
+        assert_eq!(parsed[0].reward.max_spread.as_ref().unwrap().as_str(), "0.045");
+        assert_eq!(parsed[0].reward.min_size.as_ref().unwrap().as_str(), "50");
+        assert_eq!(
+            parsed[0]
+                .reward
+                .total_daily_rate
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            "5.5"
+        );
+        assert_eq!(parsed[0].reward.freshness, RewardFreshness::Fresh);
+    }
+
+    #[test]
+    fn raw_reward_market_rows_capture_competitiveness_and_token_prices() {
+        let body = r#"
+{
+  "data": [
+    {
+      "condition_id": "condition-1",
+      "market_competitiveness": 13.40604,
+      "tokens": [
+        { "token_id": "yes-token", "outcome": "Yes", "price": 0.0245 },
+        { "token_id": "no-token", "outcome": "No", "price": 0.9755 }
+      ]
+    }
+  ]
+}
+"#;
+
+        let parsed =
+            PolymarketRewardProvider::parse_raw_market_rewards(body).expect("raw market rewards");
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].condition_id, "condition-1");
+        assert_eq!(
+            parsed[0].market_competitiveness.as_deref(),
+            Some("13.40604")
+        );
+        assert_eq!(parsed[0].tokens.len(), 2);
+        assert_eq!(parsed[0].tokens[0].token_id, "yes-token");
+        assert_eq!(parsed[0].tokens[0].price.as_str(), "0.0245");
     }
 }

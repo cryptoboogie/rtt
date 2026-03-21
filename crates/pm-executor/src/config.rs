@@ -11,6 +11,8 @@ pub struct ExecutorConfig {
     pub websocket: WebSocketConfig,
     pub strategy: StrategyConfig,
     pub execution: ExecutionConfig,
+    #[serde(default)]
+    pub quote_mode: QuoteModeConfig,
     pub logging: LoggingConfig,
     #[serde(default)]
     pub safety: SafetyConfig,
@@ -125,6 +127,22 @@ pub struct ExecutionConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuoteModeConfig {
+    #[serde(default = "default_analysis_db_path")]
+    pub analysis_db_path: String,
+    #[serde(default = "default_quote_base_url")]
+    pub clob_base_url: String,
+    #[serde(default = "default_user_ws_url")]
+    pub user_ws_url: String,
+    #[serde(default = "default_heartbeat_interval_secs")]
+    pub heartbeat_interval_secs: u64,
+    #[serde(default = "default_reward_poll_interval_secs")]
+    pub reward_poll_interval_secs: u64,
+    #[serde(default = "default_rebate_poll_interval_secs")]
+    pub rebate_poll_interval_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingConfig {
     #[serde(default = "default_log_level")]
     pub level: String,
@@ -152,6 +170,19 @@ impl Default for SafetyConfig {
             max_triggers_per_second: default_max_triggers_per_second(),
             require_confirmation: default_require_confirmation(),
             alert_webhook_url: None,
+        }
+    }
+}
+
+impl Default for QuoteModeConfig {
+    fn default() -> Self {
+        Self {
+            analysis_db_path: default_analysis_db_path(),
+            clob_base_url: default_quote_base_url(),
+            user_ws_url: default_user_ws_url(),
+            heartbeat_interval_secs: default_heartbeat_interval_secs(),
+            reward_poll_interval_secs: default_reward_poll_interval_secs(),
+            rebate_poll_interval_secs: default_rebate_poll_interval_secs(),
         }
     }
 }
@@ -190,6 +221,24 @@ fn default_dry_run() -> bool {
 fn default_state_file() -> String {
     "state.json".to_string()
 }
+fn default_analysis_db_path() -> String {
+    "analysis.sqlite".to_string()
+}
+fn default_quote_base_url() -> String {
+    rtt_core::polymarket::CLOB_BASE_URL.to_string()
+}
+fn default_user_ws_url() -> String {
+    "wss://ws-subscriptions-clob.polymarket.com/ws/user".to_string()
+}
+fn default_heartbeat_interval_secs() -> u64 {
+    5
+}
+fn default_reward_poll_interval_secs() -> u64 {
+    60
+}
+fn default_rebate_poll_interval_secs() -> u64 {
+    300
+}
 fn default_log_level() -> String {
     "info".to_string()
 }
@@ -224,6 +273,81 @@ impl ExecutorConfig {
         if let Ok(v) = std::env::var("POLY_ALERT_WEBHOOK_URL") {
             self.safety.alert_webhook_url = Some(v);
         }
+
+        override_string("RTT_STRATEGY", &mut self.strategy.strategy);
+        override_string("RTT_TOKEN_ID", &mut self.strategy.token_id);
+        override_bool("RTT_DRY_RUN", &mut self.execution.dry_run);
+        override_string("RTT_ANALYSIS_DB_PATH", &mut self.quote_mode.analysis_db_path);
+        override_string("RTT_CLOB_BASE_URL", &mut self.quote_mode.clob_base_url);
+        override_string("RTT_USER_WS_URL", &mut self.quote_mode.user_ws_url);
+        override_u64(
+            "RTT_HEARTBEAT_INTERVAL_SECS",
+            &mut self.quote_mode.heartbeat_interval_secs,
+        );
+        override_u64(
+            "RTT_REWARD_POLL_INTERVAL_SECS",
+            &mut self.quote_mode.reward_poll_interval_secs,
+        );
+        override_u64(
+            "RTT_REBATE_POLL_INTERVAL_SECS",
+            &mut self.quote_mode.rebate_poll_interval_secs,
+        );
+        override_f64(
+            "RTT_INITIAL_BANKROLL_USD",
+            &mut self.strategy.params.initial_bankroll_usd,
+        );
+        override_f64(
+            "RTT_MAX_TOTAL_DEPLOYED_USD",
+            &mut self.strategy.params.max_total_deployed_usd,
+        );
+        override_usize("RTT_MAX_MARKETS", &mut self.strategy.params.max_markets);
+        override_f64(
+            "RTT_BASE_QUOTE_SIZE",
+            &mut self.strategy.params.base_quote_size,
+        );
+        override_f64("RTT_EDGE_BUFFER", &mut self.strategy.params.edge_buffer);
+        override_f64(
+            "RTT_TARGET_SPREAD_CENTS",
+            &mut self.strategy.params.target_spread_cents,
+        );
+        override_optional_u64(
+            "RTT_QUOTE_TTL_SECS",
+            &mut self.strategy.params.quote_ttl_secs,
+        );
+        override_f64(
+            "RTT_MIN_TOTAL_DAILY_RATE",
+            &mut self.strategy.params.min_total_daily_rate,
+        );
+        override_f64(
+            "RTT_MAX_MARKET_COMPETITIVENESS",
+            &mut self.strategy.params.max_market_competitiveness,
+        );
+        override_optional_u64(
+            "RTT_MIN_TIME_TO_EXPIRY_SECS",
+            &mut self.strategy.params.min_time_to_expiry_secs,
+        );
+        override_f64(
+            "RTT_MAX_INVENTORY_PER_MARKET",
+            &mut self.strategy.params.max_inventory_per_market,
+        );
+        override_f64(
+            "RTT_MAX_UNHEDGED_NOTIONAL_PER_MARKET",
+            &mut self.strategy.params.max_unhedged_notional_per_market,
+        );
+        override_u64("RTT_SAFETY_MAX_ORDERS", &mut self.safety.max_orders);
+        override_f64_required(
+            "RTT_SAFETY_MAX_USD_EXPOSURE",
+            &mut self.safety.max_usd_exposure,
+        );
+        override_u64(
+            "RTT_SAFETY_MAX_TRIGGERS_PER_SECOND",
+            &mut self.safety.max_triggers_per_second,
+        );
+        override_bool(
+            "RTT_REQUIRE_CONFIRMATION",
+            &mut self.safety.require_confirmation,
+        );
+        override_string("RTT_LOG_LEVEL", &mut self.logging.level);
     }
 
     pub fn resolved_subscription_asset_ids(&self) -> Vec<String> {
@@ -248,6 +372,60 @@ impl ExecutorConfig {
     }
 }
 
+fn override_string(name: &str, target: &mut String) {
+    if let Ok(value) = std::env::var(name) {
+        *target = value;
+    }
+}
+
+fn override_bool(name: &str, target: &mut bool) {
+    if let Ok(value) = std::env::var(name) {
+        if let Ok(parsed) = value.parse::<bool>() {
+            *target = parsed;
+        }
+    }
+}
+
+fn override_u64(name: &str, target: &mut u64) {
+    if let Ok(value) = std::env::var(name) {
+        if let Ok(parsed) = value.parse::<u64>() {
+            *target = parsed;
+        }
+    }
+}
+
+fn override_usize(name: &str, target: &mut Option<usize>) {
+    if let Ok(value) = std::env::var(name) {
+        if let Ok(parsed) = value.parse::<usize>() {
+            *target = Some(parsed);
+        }
+    }
+}
+
+fn override_f64(name: &str, target: &mut Option<f64>) {
+    if let Ok(value) = std::env::var(name) {
+        if let Ok(parsed) = value.parse::<f64>() {
+            *target = Some(parsed);
+        }
+    }
+}
+
+fn override_optional_u64(name: &str, target: &mut Option<u64>) {
+    if let Ok(value) = std::env::var(name) {
+        if let Ok(parsed) = value.parse::<u64>() {
+            *target = Some(parsed);
+        }
+    }
+}
+
+fn override_f64_required(name: &str, target: &mut f64) {
+    if let Ok(value) = std::env::var(name) {
+        if let Ok(parsed) = value.parse::<f64>() {
+            *target = parsed;
+        }
+    }
+}
+
 fn push_unique_asset_id(asset_ids: &mut Vec<AssetId>, candidate: AssetId) {
     if !asset_ids.iter().any(|existing| existing == &candidate) {
         asset_ids.push(candidate);
@@ -257,6 +435,9 @@ fn push_unique_asset_id(asset_ids: &mut Vec<AssetId>, candidate: AssetId) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     const VALID_TOML: &str = r#"
 [credentials]
@@ -343,6 +524,7 @@ threshold = 0.45
 
     #[test]
     fn env_var_overrides_config() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let config_toml = r#"
 [credentials]
 api_key = "from_file"
@@ -366,6 +548,58 @@ threshold = 0.5
         config.apply_env_overrides();
         assert_eq!(config.credentials.api_key, "from_env");
         std::env::remove_var("POLY_API_KEY");
+    }
+
+    #[test]
+    fn rtt_env_overrides_can_switch_checked_in_config_to_live_quote_mode() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config_toml = r#"
+[credentials]
+
+[connection]
+
+[websocket]
+asset_ids = ["legacy-asset"]
+
+[strategy]
+strategy = "threshold"
+token_id = "legacy-asset"
+side = "Buy"
+size = "1"
+order_type = "FOK"
+
+[strategy.params]
+threshold = 0.5
+
+[execution]
+dry_run = true
+
+[logging]
+"#;
+
+        std::env::set_var("RTT_STRATEGY", "liquidity_rewards");
+        std::env::set_var("RTT_DRY_RUN", "false");
+        std::env::set_var("RTT_MAX_TOTAL_DEPLOYED_USD", "100");
+        std::env::set_var("RTT_BASE_QUOTE_SIZE", "50");
+        std::env::set_var("RTT_ANALYSIS_DB_PATH", "/var/lib/rtt/analysis.sqlite");
+        std::env::set_var("RTT_LOG_LEVEL", "debug");
+
+        let mut config: ExecutorConfig = toml::from_str(config_toml).unwrap();
+        config.apply_env_overrides();
+
+        assert_eq!(config.strategy.strategy, "liquidity_rewards");
+        assert!(!config.execution.dry_run);
+        assert_eq!(config.strategy.params.max_total_deployed_usd, Some(100.0));
+        assert_eq!(config.strategy.params.base_quote_size, Some(50.0));
+        assert_eq!(config.quote_mode.analysis_db_path, "/var/lib/rtt/analysis.sqlite");
+        assert_eq!(config.logging.level, "debug");
+
+        std::env::remove_var("RTT_STRATEGY");
+        std::env::remove_var("RTT_DRY_RUN");
+        std::env::remove_var("RTT_MAX_TOTAL_DEPLOYED_USD");
+        std::env::remove_var("RTT_BASE_QUOTE_SIZE");
+        std::env::remove_var("RTT_ANALYSIS_DB_PATH");
+        std::env::remove_var("RTT_LOG_LEVEL");
     }
 
     #[test]
@@ -474,6 +708,63 @@ require_confirmation = false
         assert!((config.safety.max_usd_exposure - 100.0).abs() < 0.01);
         assert_eq!(config.safety.max_triggers_per_second, 5);
         assert!(!config.safety.require_confirmation);
+    }
+
+    #[test]
+    fn quote_mode_defaults_apply_without_section() {
+        let minimal_toml = r#"
+[credentials]
+[connection]
+[websocket]
+asset_ids = ["asset1"]
+[strategy]
+strategy = "threshold"
+token_id = "asset1"
+side = "Buy"
+size = "10"
+order_type = "FOK"
+[strategy.params]
+threshold = 0.45
+[execution]
+[logging]
+"#;
+        let config: ExecutorConfig = toml::from_str(minimal_toml).unwrap();
+        assert_eq!(config.quote_mode.analysis_db_path, "analysis.sqlite");
+        assert_eq!(config.quote_mode.heartbeat_interval_secs, 5);
+        assert_eq!(config.quote_mode.reward_poll_interval_secs, 60);
+        assert_eq!(config.quote_mode.rebate_poll_interval_secs, 300);
+    }
+
+    #[test]
+    fn quote_mode_section_parses_custom_values() {
+        let config_toml = r#"
+[credentials]
+[connection]
+[websocket]
+asset_ids = ["asset1"]
+[strategy]
+strategy = "liquidity_rewards"
+[strategy.params]
+initial_bankroll_usd = 100
+max_total_deployed_usd = 100
+base_quote_size = 50
+edge_buffer = 0.02
+[execution]
+[quote_mode]
+analysis_db_path = "tmp/liquidity.sqlite"
+clob_base_url = "https://clob-staging.polymarket.com"
+user_ws_url = "wss://staging/ws/user"
+heartbeat_interval_secs = 7
+reward_poll_interval_secs = 90
+rebate_poll_interval_secs = 600
+[logging]
+"#;
+
+        let config: ExecutorConfig = toml::from_str(config_toml).unwrap();
+        assert_eq!(config.quote_mode.analysis_db_path, "tmp/liquidity.sqlite");
+        assert_eq!(config.quote_mode.clob_base_url, "https://clob-staging.polymarket.com");
+        assert_eq!(config.quote_mode.user_ws_url, "wss://staging/ws/user");
+        assert_eq!(config.quote_mode.heartbeat_interval_secs, 7);
     }
 
     #[test]

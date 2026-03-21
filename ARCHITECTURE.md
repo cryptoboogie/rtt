@@ -371,13 +371,14 @@ Main binary. Wires all components together.
 1. Loads `config.toml` (or `--config <path>`)
 2. `--validate-creds` flag: validates credentials against live API and exits
 3. Builds credentials (validates only in live mode)
-4. Live mode: validates credentials against API, warms HTTP/2 pool, builds `SignerParams` for dynamic pricing
-5. Loads persisted state from `state.json` (restores circuit breaker counters)
-6. Creates channel pipeline: broadcast → mpsc → mpsc → crossbeam
-7. Spawns execution loop on dedicated OS thread (with signer for dynamic pricing)
-8. Starts WebSocket pipeline, bridges, strategy runner, health monitor, HTTP health server
-9. Waits for Ctrl+C, graceful shutdown with 5-second timeout
-10. Persists state (orders fired, USD committed, tripped status) on shutdown
+4. Branches by strategy mode:
+   - trigger strategies keep the legacy snapshot → trigger → execution-thread path
+   - `liquidity_rewards` runs a quote-mode controller that owns startup market selection, `QuoteRuntime`, reconciliation, quote execution, telemetry sampling, and fail-closed kill switches
+5. Live mode validates credentials against API; the legacy trigger branch also warms the HTTP/2 pool for hot-path order dispatch
+6. Loads persisted state from `state.json` (restores circuit breaker counters)
+7. Starts WebSocket pipeline, health monitor, and HTTP health server
+8. Waits for Ctrl+C, graceful shutdown with 5-second timeout
+9. Persists state (orders fired, USD committed, tripped status) on shutdown
 
 #### `config.rs` — Configuration
 ```rust
@@ -387,12 +388,28 @@ struct ExecutorConfig {
     websocket: WebSocketConfig,     // asset_ids, channel capacities
     strategy: StrategyConfig,       // reuses pm-strategy config
     execution: ExecutionConfig,     // presign_count=100, dry_run=true, state_file="state.json"
+    quote_mode: QuoteModeConfig,    // analysis_db_path, quote API base URL, user WS URL, heartbeat/telemetry intervals
     safety: SafetyConfig,           // max_orders=5, max_usd_exposure=10.0, alert_webhook_url
     health: HealthConfig,           // enabled=true, port=9090
     logging: LoggingConfig,         // level="info"
 }
 ```
 All credential fields support `POLY_*` env var overrides. `alert_webhook_url` supports `POLY_ALERT_WEBHOOK_URL`.
+Runtime switching for deployments also supports `RTT_*` env var overrides, including:
+- `RTT_STRATEGY=liquidity_rewards`
+- `RTT_DRY_RUN=false`
+- bankroll/quote controls such as `RTT_MAX_TOTAL_DEPLOYED_USD`, `RTT_BASE_QUOTE_SIZE`, `RTT_EDGE_BUFFER`
+- quote runtime settings such as `RTT_ANALYSIS_DB_PATH`, `RTT_CLOB_BASE_URL`, and `RTT_USER_WS_URL`
+
+#### `capital.rs` — Deployment-budget accounting
+- Computes active deployed capital as working quote notional plus unresolved inventory notional
+- Projects post-command capital so quote-mode execution can reject any place/cancel set that would breach the configured bankroll cap
+- Keeps the `$100` low-risk deployment limit enforced independently from strategy-side quote generation
+
+#### `analysis_store.rs` — Append-only SQLite operation journal
+- Opens a dedicated SQLite database at startup and fails fast if it cannot be created
+- Appends one row per material operation with timestamps, quote/order identifiers, requested price/size, status, error text, and capital before/after
+- Used only for offline research and operator diagnostics; it does not replace the JSON restart-state file
 
 #### `order_state.rs` — Local quote lifecycle state
 - `WorkingQuoteState` is explicit: `PendingSubmit`, `Working`, `PendingCancel`, `Canceled`, `Rejected`, `UnknownOrStale`
@@ -424,6 +441,8 @@ All credential fields support `POLY_*` env var overrides. `alert_webhook_url` su
   - Handles `DispatchOutcome` explicitly so build/request/pool failures do not masquerade as reconnect samples
   - Sends webhook alert on circuit breaker trip
 - `QuoteCommandPolicy`, `QuoteCommandThrottle`, and `retry_decision()` define the bounded retry/backoff/throttling seam for quote-maintenance commands without redesigning the current trigger hot path
+- `QuoteApiClient` signs `DesiredQuote` values directly (including GTD expirations), batches `POST /orders` and `DELETE /orders`, issues `DELETE /cancel-all`, sends `/heartbeats`, and samples `/rewards/user/percentages` plus `/rebates/current`
+- Quote-mode execution is correctness-first rather than latency-first: it uses authenticated REST requests and deterministic batching instead of the trigger branch's dedicated HTTP/2 thread
 
 #### `safety.rs` — Lock-free safety rails
 - **CircuitBreaker**: Atomic counters for orders fired and USD committed (cents). Once tripped, stays tripped (restart required). Limits: `max_orders=5`, `max_usd_exposure=10.0` (conservative defaults).
@@ -457,6 +476,12 @@ All credential fields support `POLY_*` env var overrides. `alert_webhook_url` su
 - `tracing_subscriber` with env-filter
 - Suppresses verbose rtt-core instrumentation modules and upstream library chatter
 - Respects `RUST_LOG` env var
+
+#### `user_feed.rs` — Authenticated Polymarket user-channel adapter
+- Parses documented user-channel order/trade events into executor-facing order observations and fill deltas
+- Maintains a non-authoritative exchange snapshot for quote reconciliation: observed working/canceled/rejected quotes plus deduplicated fills keyed by trade/order pair
+- Runs a lightweight WebSocket client against `wss://ws-subscriptions-clob.polymarket.com/ws/user`, authenticates with API key/secret/passphrase, subscribes to the selected condition set, sends `{}` pings every 10 seconds, and marks the controller degraded on disconnect or parse failure
+- Quote mode treats user-feed degradation as fail-closed: stop quoting, mark local quotes stale, and issue `CancelAll`
 
 ### rtt-bench
 

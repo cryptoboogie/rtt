@@ -60,11 +60,39 @@ order_type = "FOK"
 [strategy.params]
 threshold = 0.45
 
+# Liquidity rewards quote-mode example.
+# Uncomment this block and comment out the threshold strategy above to run
+# the low-risk paired-bid quote portfolio.
+# [strategy]
+# strategy = "liquidity_rewards"
+
+# [strategy.params]
+# initial_bankroll_usd = 100
+# max_total_deployed_usd = 100
+# max_markets = 2
+# base_quote_size = 50
+# edge_buffer = 0.02
+# target_spread_cents = 2
+# quote_ttl_secs = 30
+# min_total_daily_rate = 1
+# max_market_competitiveness = 10
+# min_time_to_expiry_secs = 300
+# max_inventory_per_market = 100
+# max_unhedged_notional_per_market = 40
+
 [execution]
 presign_count = 100
 is_neg_risk = false
 fee_rate_bps = 0
 dry_run = true   # SAFETY: set to false only when ready for real orders
+
+[quote_mode]
+analysis_db_path = "analysis.sqlite"
+clob_base_url = "https://clob.polymarket.com"
+user_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
+heartbeat_interval_secs = 5
+reward_poll_interval_secs = 60
+rebate_poll_interval_secs = 300
 
 [safety]
 max_orders = 5           # Circuit breaker: max orders before stopping

@@ -89,6 +89,11 @@ pub struct RewardParams {
     pub max_spread: Option<Price>,
     pub min_size: Option<Size>,
     pub min_notional: Option<Notional>,
+    pub native_daily_rate: Option<Notional>,
+    pub sponsored_daily_rate: Option<Notional>,
+    pub total_daily_rate: Option<Notional>,
+    pub market_competitiveness: Option<String>,
+    pub fee_enabled: Option<bool>,
     pub updated_at_ms: Option<u64>,
     pub freshness: RewardFreshness,
 }
@@ -213,6 +218,11 @@ mod tests {
                 max_spread: Some(Price::new("0.02")),
                 min_size: Some(Size::new("10")),
                 min_notional: Some(Notional::new("100")),
+                native_daily_rate: Some(Notional::new("5")),
+                sponsored_daily_rate: Some(Notional::new("0.5")),
+                total_daily_rate: Some(Notional::new("5.5")),
+                market_competitiveness: Some("12.75".to_string()),
+                fee_enabled: Some(true),
                 updated_at_ms: Some(1_700_000_000_000),
                 freshness: RewardFreshness::StaleButUsable,
             }),
@@ -222,6 +232,30 @@ mod tests {
         assert_eq!(
             reward_enriched.reward.as_ref().unwrap().freshness,
             RewardFreshness::StaleButUsable
+        );
+        assert_eq!(
+            reward_enriched
+                .reward
+                .as_ref()
+                .unwrap()
+                .total_daily_rate
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            "5.5"
+        );
+        assert_eq!(
+            reward_enriched
+                .reward
+                .as_ref()
+                .unwrap()
+                .market_competitiveness
+                .as_deref(),
+            Some("12.75")
+        );
+        assert_eq!(
+            reward_enriched.reward.as_ref().unwrap().fee_enabled,
+            Some(true)
         );
     }
 

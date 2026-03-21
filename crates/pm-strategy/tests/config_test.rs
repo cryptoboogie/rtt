@@ -1,4 +1,5 @@
 use pm_strategy::config::StrategyConfig;
+use pm_strategy::liquidity_rewards::LiquidityRewardsMarket;
 use pm_strategy::*;
 
 #[test]
@@ -184,4 +185,61 @@ max_spread = 0.02
     assert_eq!(config.params.max_spread, Some(0.02));
 
     std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn parse_liquidity_rewards_config_from_toml() {
+    let toml_str = r#"
+strategy = "liquidity_rewards"
+
+[params]
+initial_bankroll_usd = 100
+max_total_deployed_usd = 100
+max_markets = 2
+base_quote_size = 50
+edge_buffer = 0.02
+target_spread_cents = 2
+quote_ttl_secs = 30
+min_total_daily_rate = 1
+max_market_competitiveness = 10
+min_time_to_expiry_secs = 300
+max_inventory_per_market = 100
+max_unhedged_notional_per_market = 40
+"#;
+
+    let config: StrategyConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.strategy, "liquidity_rewards");
+    assert_eq!(config.token_id, "");
+    assert_eq!(config.order_type, OrderType::GTC);
+    assert_eq!(config.params.max_markets, Some(2));
+}
+
+#[test]
+fn config_builds_liquidity_rewards_quote_strategy() {
+    let toml_str = r#"
+strategy = "liquidity_rewards"
+
+[params]
+base_quote_size = 50
+"#;
+
+    let config: StrategyConfig = toml::from_str(toml_str).unwrap();
+    let strategy = config
+        .build_quote_strategy(vec![LiquidityRewardsMarket {
+            condition_id: "condition-1".to_string(),
+            yes_asset_id: "yes-asset".to_string(),
+            no_asset_id: "no-asset".to_string(),
+            tick_size: "0.01".to_string(),
+            min_order_size: Some("5".to_string()),
+            reward_max_spread: "0.04".to_string(),
+            reward_min_size: "50".to_string(),
+            end_time_ms: None,
+        }])
+        .unwrap();
+
+    assert_eq!(strategy.name(), "liquidity_rewards");
+    assert_eq!(
+        strategy.requirements().execution_mode,
+        pm_strategy::strategy::ExecutionMode::Quote
+    );
 }

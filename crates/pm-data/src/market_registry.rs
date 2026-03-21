@@ -5,11 +5,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use rtt_core::{MarketId, MarketMeta};
 use serde::Serialize;
 
 use crate::{
     registry_provider::{
-        RegistryPageRequest, RegistryProvider, RegistryProviderError,
+        CurrentRewardConfig, RawRewardMarket, RegistryPageRequest, RegistryProvider,
+        RegistryProviderError,
     },
     snapshot::{RegistrySnapshot, SelectedUniverse, UniverseSelectionPolicy},
 };
@@ -58,6 +60,60 @@ struct RegistryState {
     next_sequence: u64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RewardDiscoveryMarket {
+    pub market: MarketMeta,
+    pub end_time_ms: Option<u64>,
+    pub accepting_orders: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RewardSelectionPolicy {
+    pub max_markets: usize,
+    pub max_total_deployed_usd: f64,
+    pub base_quote_size: f64,
+    pub edge_buffer: f64,
+    pub min_total_daily_rate: f64,
+    pub max_market_competitiveness: f64,
+    pub min_time_to_expiry_secs: u64,
+    pub max_reward_age_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectedRewardMarket {
+    pub market: MarketMeta,
+    pub end_time_ms: Option<u64>,
+    pub reserved_capital_usd: f64,
+    pub reward_per_reserved_usd: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RewardMarketSelection {
+    pub selected: Vec<SelectedRewardMarket>,
+    pub decisions: Vec<RewardSelectionDecision>,
+    pub total_reserved_capital_usd: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RewardSelectionDecision {
+    pub market_id: MarketId,
+    pub reason: RewardSelectionReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RewardSelectionReason {
+    Selected,
+    InactiveStatus,
+    AcceptingOrdersDisabled,
+    MissingReward,
+    RewardStale,
+    NearExpiry,
+    UnderRewarded,
+    OverCompetitive,
+    InsufficientSpreadBudget,
+    DeploymentBudgetExceeded,
+}
+
 impl RetryPolicy {
     fn backoff_for_retry(&self, retry_index: usize) -> Duration {
         let multiplier = 1u32.checked_shl(retry_index as u32).unwrap_or(u32::MAX);
@@ -75,6 +131,215 @@ impl RegistryRefreshPolicy {
             }
         }
     }
+}
+
+pub fn select_reward_markets(
+    markets: &[RewardDiscoveryMarket],
+    policy: &RewardSelectionPolicy,
+    now_ms: u64,
+) -> RewardMarketSelection {
+    let mut decisions = Vec::with_capacity(markets.len());
+    let mut ranked = Vec::new();
+
+    for candidate in markets {
+        let Some(reward) = candidate.market.reward.as_ref() else {
+            decisions.push(RewardSelectionDecision {
+                market_id: candidate.market.market_id.clone(),
+                reason: RewardSelectionReason::MissingReward,
+            });
+            continue;
+        };
+
+        let reason = if !candidate.market.is_tradable() {
+            Some(RewardSelectionReason::InactiveStatus)
+        } else if !candidate.accepting_orders {
+            Some(RewardSelectionReason::AcceptingOrdersDisabled)
+        } else if reward.freshness != rtt_core::RewardFreshness::Fresh
+            || reward
+                .updated_at_ms
+                .map(|updated_at_ms| now_ms.saturating_sub(updated_at_ms) > policy.max_reward_age_ms)
+                .unwrap_or(true)
+        {
+            Some(RewardSelectionReason::RewardStale)
+        } else if candidate
+            .end_time_ms
+            .map(|end_time_ms| {
+                end_time_ms.saturating_sub(now_ms)
+                    < policy.min_time_to_expiry_secs.saturating_mul(1_000)
+            })
+            .unwrap_or(false)
+        {
+            Some(RewardSelectionReason::NearExpiry)
+        } else if reward_total_daily_rate(reward) < policy.min_total_daily_rate {
+            Some(RewardSelectionReason::UnderRewarded)
+        } else if reward_competitiveness(reward) > policy.max_market_competitiveness {
+            Some(RewardSelectionReason::OverCompetitive)
+        } else if reward_max_spread(reward) * 2.0 < policy.edge_buffer {
+            Some(RewardSelectionReason::InsufficientSpreadBudget)
+        } else {
+            None
+        };
+
+        if let Some(reason) = reason {
+            decisions.push(RewardSelectionDecision {
+                market_id: candidate.market.market_id.clone(),
+                reason,
+            });
+            continue;
+        }
+
+        let reserved_capital_usd = estimated_reserved_capital_usd(candidate, policy);
+        if reserved_capital_usd > policy.max_total_deployed_usd {
+            decisions.push(RewardSelectionDecision {
+                market_id: candidate.market.market_id.clone(),
+                reason: RewardSelectionReason::DeploymentBudgetExceeded,
+            });
+            continue;
+        }
+
+        ranked.push((
+            candidate.market.market_id.clone(),
+            SelectedRewardMarket {
+                market: candidate.market.clone(),
+                end_time_ms: candidate.end_time_ms,
+                reserved_capital_usd,
+                reward_per_reserved_usd: reward_total_daily_rate(reward) / reserved_capital_usd,
+            },
+        ));
+    }
+
+    ranked.sort_by(|(_, left), (_, right)| {
+        right
+            .reward_per_reserved_usd
+            .partial_cmp(&left.reward_per_reserved_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                left.market
+                    .market_id
+                    .as_str()
+                    .cmp(right.market.market_id.as_str())
+            })
+    });
+
+    let mut selected = Vec::new();
+    let mut remaining_budget = policy.max_total_deployed_usd;
+    for (market_id, candidate) in ranked {
+        if selected.len() >= policy.max_markets {
+            break;
+        }
+        if candidate.reserved_capital_usd > remaining_budget {
+            decisions.push(RewardSelectionDecision {
+                market_id,
+                reason: RewardSelectionReason::DeploymentBudgetExceeded,
+            });
+            continue;
+        }
+
+        remaining_budget -= candidate.reserved_capital_usd;
+        decisions.push(RewardSelectionDecision {
+            market_id,
+            reason: RewardSelectionReason::Selected,
+        });
+        selected.push(candidate);
+    }
+
+    RewardMarketSelection {
+        total_reserved_capital_usd: selected
+            .iter()
+            .map(|market| market.reserved_capital_usd)
+            .sum(),
+        selected,
+        decisions,
+    }
+}
+
+pub fn enrich_reward_markets(
+    markets: &[RewardDiscoveryMarket],
+    current_configs: &[CurrentRewardConfig],
+    raw_rewards: &[RawRewardMarket],
+) -> Vec<RewardDiscoveryMarket> {
+    let current_by_condition: BTreeMap<&str, &CurrentRewardConfig> = current_configs
+        .iter()
+        .map(|config| (config.condition_id.as_str(), config))
+        .collect();
+    let raw_by_condition: BTreeMap<&str, &RawRewardMarket> = raw_rewards
+        .iter()
+        .map(|market| (market.condition_id.as_str(), market))
+        .collect();
+
+    markets
+        .iter()
+        .cloned()
+        .map(|mut discovery| {
+            let Some(condition_id) = discovery.market.condition_id.as_deref() else {
+                return discovery;
+            };
+            let Some(current) = current_by_condition.get(condition_id) else {
+                return discovery;
+            };
+
+            let raw = raw_by_condition.get(condition_id).copied();
+            let existing_fee_enabled = discovery
+                .market
+                .reward
+                .as_ref()
+                .and_then(|reward| reward.fee_enabled);
+
+            let mut reward = current.reward.clone();
+            reward.market_competitiveness = raw.and_then(|row| row.market_competitiveness.clone());
+            reward.fee_enabled = existing_fee_enabled;
+            discovery.market.reward = Some(reward);
+            discovery
+        })
+        .collect()
+}
+
+fn reward_total_daily_rate(reward: &rtt_core::RewardParams) -> f64 {
+    reward
+        .total_daily_rate
+        .as_ref()
+        .and_then(|value| value.as_str().parse::<f64>().ok())
+        .unwrap_or(0.0)
+}
+
+fn reward_competitiveness(reward: &rtt_core::RewardParams) -> f64 {
+    reward
+        .market_competitiveness
+        .as_deref()
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(f64::INFINITY)
+}
+
+fn reward_max_spread(reward: &rtt_core::RewardParams) -> f64 {
+    reward
+        .max_spread
+        .as_ref()
+        .and_then(|value| value.as_str().parse::<f64>().ok())
+        .unwrap_or(0.0)
+}
+
+fn estimated_reserved_capital_usd(
+    candidate: &RewardDiscoveryMarket,
+    policy: &RewardSelectionPolicy,
+) -> f64 {
+    let reward_min_size = candidate
+        .market
+        .reward
+        .as_ref()
+        .and_then(|reward| reward.min_size.as_ref())
+        .and_then(|value| value.as_str().parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let market_min_size = candidate
+        .market
+        .min_order_size
+        .as_ref()
+        .and_then(|value| value.as_str().parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let quote_size = policy
+        .base_quote_size
+        .max(reward_min_size)
+        .max(market_min_size);
+    quote_size * (1.0 - policy.edge_buffer)
 }
 
 impl<P: RegistryProvider> MarketRegistry<P> {
@@ -216,8 +481,8 @@ mod tests {
     };
     use crate::snapshot::{QuarantinedMarketRecord, UniverseSelectionPolicy};
     use rtt_core::{
-        AssetId, MarketId, MarketMeta, MarketStatus, MinOrderSize, OutcomeSide, OutcomeToken,
-        TickSize,
+        AssetId, MarketId, MarketMeta, MarketStatus, MinOrderSize, Notional, OutcomeSide,
+        OutcomeToken, Price, RewardFreshness, RewardParams, Size, TickSize,
     };
     use tokio::task::yield_now;
     use tokio::time::advance;
@@ -309,6 +574,47 @@ mod tests {
                 initial_backoff: Duration::from_millis(50),
                 max_backoff: Duration::from_millis(200),
             },
+        }
+    }
+
+    fn reward_market(
+        market_id: &str,
+        total_daily_rate: &str,
+        competitiveness: &str,
+        min_size: &str,
+        updated_at_ms: u64,
+    ) -> RewardDiscoveryMarket {
+        RewardDiscoveryMarket {
+            market: MarketMeta {
+                market_id: MarketId::new(market_id),
+                yes_asset: OutcomeToken::new(
+                    AssetId::new(format!("{market_id}-yes")),
+                    OutcomeSide::Yes,
+                ),
+                no_asset: OutcomeToken::new(
+                    AssetId::new(format!("{market_id}-no")),
+                    OutcomeSide::No,
+                ),
+                condition_id: Some(format!("condition-{market_id}")),
+                tick_size: TickSize::new("0.01"),
+                min_order_size: Some(MinOrderSize::new("5")),
+                status: MarketStatus::Active,
+                reward: Some(RewardParams {
+                    rate_bps: None,
+                    max_spread: Some(Price::new("0.04")),
+                    min_size: Some(Size::new(min_size)),
+                    min_notional: None,
+                    native_daily_rate: Some(Notional::new(total_daily_rate)),
+                    sponsored_daily_rate: None,
+                    total_daily_rate: Some(Notional::new(total_daily_rate)),
+                    market_competitiveness: Some(competitiveness.to_string()),
+                    fee_enabled: Some(false),
+                    updated_at_ms: Some(updated_at_ms),
+                    freshness: RewardFreshness::Fresh,
+                }),
+            },
+            end_time_ms: Some(1_800_000_000_000),
+            accepting_orders: true,
         }
     }
 
@@ -433,5 +739,126 @@ mod tests {
         assert_eq!(first_json["universe"], second_json["universe"]);
         assert_eq!(second_json["degraded"], serde_json::json!(true));
         assert_eq!(second_json["error"], serde_json::json!("upstream timeout"));
+    }
+
+    #[test]
+    fn reward_selector_filters_ineligible_markets_deterministically() {
+        let now_ms = 1_700_000_000_000;
+        let mut stale = reward_market("stale", "5", "2.0", "50", now_ms - 120_000);
+        stale.market.reward.as_mut().unwrap().freshness = RewardFreshness::StaleButUsable;
+
+        let mut near_expiry = reward_market("near-expiry", "5", "2.0", "50", now_ms);
+        near_expiry.end_time_ms = Some(now_ms + 30_000);
+
+        let over_competitive = reward_market("over-competitive", "5", "25.0", "50", now_ms);
+        let selected = reward_market("selected", "5", "2.5", "50", now_ms);
+
+        let selection = select_reward_markets(
+            &[stale, near_expiry, over_competitive, selected],
+            &RewardSelectionPolicy {
+                max_markets: 2,
+                max_total_deployed_usd: 100.0,
+                base_quote_size: 50.0,
+                edge_buffer: 0.02,
+                min_total_daily_rate: 1.0,
+                max_market_competitiveness: 10.0,
+                min_time_to_expiry_secs: 60,
+                max_reward_age_ms: 60_000,
+            },
+            now_ms,
+        );
+
+        assert_eq!(selection.selected.len(), 1);
+        assert_eq!(selection.selected[0].market.market_id.as_str(), "selected");
+        assert_eq!(
+            selection.decisions[0].reason,
+            RewardSelectionReason::RewardStale
+        );
+        assert_eq!(
+            selection.decisions[1].reason,
+            RewardSelectionReason::NearExpiry
+        );
+        assert_eq!(
+            selection.decisions[2].reason,
+            RewardSelectionReason::OverCompetitive
+        );
+        assert_eq!(
+            selection.decisions[3].reason,
+            RewardSelectionReason::Selected
+        );
+    }
+
+    #[test]
+    fn reward_selector_ranks_by_reward_per_reserved_capital() {
+        let now_ms = 1_700_000_000_000;
+        let efficient = reward_market("efficient", "6", "2.0", "50", now_ms);
+        let capital_heavy = reward_market("capital-heavy", "6", "2.0", "150", now_ms);
+
+        let selection = select_reward_markets(
+            &[capital_heavy, efficient],
+            &RewardSelectionPolicy {
+                max_markets: 2,
+                max_total_deployed_usd: 100.0,
+                base_quote_size: 50.0,
+                edge_buffer: 0.02,
+                min_total_daily_rate: 1.0,
+                max_market_competitiveness: 10.0,
+                min_time_to_expiry_secs: 60,
+                max_reward_age_ms: 60_000,
+            },
+            now_ms,
+        );
+
+        assert_eq!(selection.selected.len(), 1);
+        assert_eq!(selection.selected[0].market.market_id.as_str(), "efficient");
+        assert_eq!(
+            selection.decisions[0].reason,
+            RewardSelectionReason::DeploymentBudgetExceeded
+        );
+        assert_eq!(
+            selection.decisions[1].reason,
+            RewardSelectionReason::Selected
+        );
+    }
+
+    #[test]
+    fn reward_enrichment_merges_current_rates_and_competitiveness_into_snapshot_markets() {
+        let discovery = RewardDiscoveryMarket {
+            market: market("market-1", MarketStatus::Active),
+            end_time_ms: None,
+            accepting_orders: true,
+        };
+
+        let enriched = enrich_reward_markets(
+            &[discovery],
+            &[crate::registry_provider::CurrentRewardConfig {
+                condition_id: "condition-market-1".to_string(),
+                reward: RewardParams {
+                    rate_bps: None,
+                    max_spread: Some(Price::new("0.045")),
+                    min_size: Some(Size::new("50")),
+                    min_notional: None,
+                    native_daily_rate: Some(Notional::new("5")),
+                    sponsored_daily_rate: Some(Notional::new("0.5")),
+                    total_daily_rate: Some(Notional::new("5.5")),
+                    market_competitiveness: None,
+                    fee_enabled: None,
+                    updated_at_ms: Some(1_700_000_000_000),
+                    freshness: RewardFreshness::Fresh,
+                },
+            }],
+            &[crate::registry_provider::RawRewardMarket {
+                condition_id: "condition-market-1".to_string(),
+                market_competitiveness: Some("13.40604".to_string()),
+                tokens: Vec::new(),
+            }],
+        );
+
+        let reward = enriched[0].market.reward.as_ref().expect("reward");
+        assert_eq!(reward.total_daily_rate.as_ref().unwrap().as_str(), "5.5");
+        assert_eq!(
+            reward.market_competitiveness.as_deref(),
+            Some("13.40604")
+        );
     }
 }

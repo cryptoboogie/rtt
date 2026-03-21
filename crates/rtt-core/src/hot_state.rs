@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::feed_source::{InstrumentRef, SourceId};
-use crate::market::{AssetId, MarketId, MarketMeta, MinOrderSize, TickSize};
+use crate::market::{AssetId, MarketId, MarketMeta, MinOrderSize, RewardParams, TickSize};
 use crate::public_event::{
     BestBidAskUpdate, BookLevel, BookSnapshotUpdate, NormalizedUpdate, NormalizedUpdatePayload,
     ReconnectUpdate, ReferencePriceUpdate, SourceStatusUpdate, TickSizeChangeUpdate,
@@ -30,7 +30,11 @@ pub struct HotBookLevel {
 pub struct HotBookState {
     pub notice: UpdateNotice,
     pub market_id: Option<MarketId>,
+    pub condition_id: Option<String>,
     pub asset_id: AssetId,
+    pub reward: Option<RewardParams>,
+    pub bids: Vec<HotBookLevel>,
+    pub asks: Vec<HotBookLevel>,
     pub best_bid: Option<HotBookLevel>,
     pub best_ask: Option<HotBookLevel>,
     pub midpoint: Option<HotStateValue>,
@@ -91,6 +95,8 @@ struct HotStateInner {
 #[derive(Debug, Clone)]
 struct RegisteredMarket {
     market_id: MarketId,
+    condition_id: Option<String>,
+    reward: Option<RewardParams>,
     tick_size: TickSize,
     tick_size_units: u64,
     lot_size: Option<MinOrderSize>,
@@ -118,6 +124,8 @@ impl HotStateStore {
 
         let registered = RegisteredMarket {
             market_id: market.market_id.clone(),
+            condition_id: market.condition_id.clone(),
+            reward: market.reward.clone(),
             tick_size: market.tick_size.clone(),
             tick_size_units,
             lot_size: market.min_order_size.clone(),
@@ -278,15 +286,21 @@ fn apply_book_snapshot_update(
     snapshot: &BookSnapshotUpdate,
 ) {
     let registered = inner.markets_by_asset.get(snapshot.asset_id.as_str()).cloned();
-    let best_bid = best_level(&snapshot.bids, true, registered.as_ref());
-    let best_ask = best_level(&snapshot.asks, false, registered.as_ref());
+    let bids = ordered_levels(&snapshot.bids, true, registered.as_ref());
+    let asks = ordered_levels(&snapshot.asks, false, registered.as_ref());
 
     let mut state = HotBookState {
         notice: notice.clone(),
         market_id: Some(snapshot.market_id.clone()),
+        condition_id: registered
+            .as_ref()
+            .and_then(|market| market.condition_id.clone()),
         asset_id: snapshot.asset_id.clone(),
-        best_bid,
-        best_ask,
+        reward: registered.as_ref().and_then(|market| market.reward.clone()),
+        bids,
+        asks,
+        best_bid: None,
+        best_ask: None,
         midpoint: None,
         tick_size: registered.as_ref().map(|market| market.tick_size.clone()),
         tick_size_units: registered.as_ref().map(|market| market.tick_size_units),
@@ -302,6 +316,7 @@ fn apply_book_snapshot_update(
     if let Some(registered) = registered.as_ref() {
         apply_registered_market(&mut state, registered);
     }
+    refresh_best_sides_from_depth(&mut state);
     state.midpoint = midpoint_for_levels(state.best_bid.as_ref(), state.best_ask.as_ref());
     inner
         .books
@@ -318,7 +333,13 @@ fn apply_book_delta_update(
     let mut state = inner.books.get(&key).cloned().unwrap_or_else(|| HotBookState {
         notice: notice.clone(),
         market_id: Some(delta.market_id.clone()),
+        condition_id: registered
+            .as_ref()
+            .and_then(|market| market.condition_id.clone()),
         asset_id: delta.asset_id.clone(),
+        reward: registered.as_ref().and_then(|market| market.reward.clone()),
+        bids: Vec::new(),
+        asks: Vec::new(),
         best_bid: None,
         best_ask: None,
         midpoint: None,
@@ -333,6 +354,10 @@ fn apply_book_delta_update(
 
     state.notice = notice.clone();
     state.market_id = Some(delta.market_id.clone());
+    state.condition_id = registered
+        .as_ref()
+        .and_then(|market| market.condition_id.clone());
+    state.reward = registered.as_ref().and_then(|market| market.reward.clone());
     state.version = notice.version;
     state.timestamp_ms = delta.timestamp_ms;
     state.source_hash = delta.source_hash.clone();
@@ -340,39 +365,38 @@ fn apply_book_delta_update(
     let candidate = make_book_level(delta.price.as_str(), delta.size.as_str(), registered.as_ref());
     match delta.side {
         crate::trigger::Side::Buy => {
-            if let Some(best_bid) = delta.best_bid.as_ref() {
-                let size = if best_bid.as_str() == delta.price.as_str() {
-                    delta.size.as_str()
-                } else {
-                    state
-                        .best_bid
-                        .as_ref()
-                        .map(|level| level.size.exact.as_str())
-                        .unwrap_or("0")
-                };
-                state.best_bid = make_book_level(best_bid.as_str(), size, registered.as_ref());
-            } else if updates_best_side(state.best_bid.as_ref(), candidate.as_ref(), true) {
-                state.best_bid = candidate;
-            }
+            apply_depth_delta(
+                &mut state.bids,
+                candidate,
+                delta.price.as_str(),
+                delta.size.as_str(),
+                true,
+            );
         }
         crate::trigger::Side::Sell => {
-            if let Some(best_ask) = delta.best_ask.as_ref() {
-                let size = if best_ask.as_str() == delta.price.as_str() {
-                    delta.size.as_str()
-                } else {
-                    state
-                        .best_ask
-                        .as_ref()
-                        .map(|level| level.size.exact.as_str())
-                        .unwrap_or("0")
-                };
-                state.best_ask = make_book_level(best_ask.as_str(), size, registered.as_ref());
-            } else if updates_best_side(state.best_ask.as_ref(), candidate.as_ref(), false) {
-                state.best_ask = candidate;
-            }
+            apply_depth_delta(
+                &mut state.asks,
+                candidate,
+                delta.price.as_str(),
+                delta.size.as_str(),
+                false,
+            );
         }
     }
 
+    refresh_best_sides_from_depth(&mut state);
+    if state.best_bid.is_none() {
+        state.best_bid = delta
+            .best_bid
+            .as_ref()
+            .and_then(|price| make_book_level(price.as_str(), "0", registered.as_ref()));
+    }
+    if state.best_ask.is_none() {
+        state.best_ask = delta
+            .best_ask
+            .as_ref()
+            .and_then(|price| make_book_level(price.as_str(), "0", registered.as_ref()));
+    }
     state.midpoint = midpoint_for_levels(state.best_bid.as_ref(), state.best_ask.as_ref());
     inner.books.insert(key, state);
 }
@@ -400,7 +424,13 @@ fn apply_orderbook_snapshot_resolution(
             .as_ref()
             .map(|market| market.market_id.clone())
             .or(existing_market_id),
+        condition_id: registered
+            .as_ref()
+            .and_then(|market| market.condition_id.clone()),
         asset_id: AssetId::new(snapshot.asset_id.clone()),
+        reward: registered.as_ref().and_then(|market| market.reward.clone()),
+        bids: best_bid.iter().cloned().collect(),
+        asks: best_ask.iter().cloned().collect(),
         best_bid,
         best_ask,
         midpoint: None,
@@ -433,7 +463,13 @@ fn apply_best_bid_ask_update(
     let mut state = inner.books.get(&key).cloned().unwrap_or_else(|| HotBookState {
         notice: notice.clone(),
         market_id: Some(update.market_id.clone()),
+        condition_id: registered
+            .as_ref()
+            .and_then(|market| market.condition_id.clone()),
         asset_id: update.asset_id.clone(),
+        reward: registered.as_ref().and_then(|market| market.reward.clone()),
+        bids: Vec::new(),
+        asks: Vec::new(),
         best_bid: None,
         best_ask: None,
         midpoint: None,
@@ -448,10 +484,16 @@ fn apply_best_bid_ask_update(
 
     state.notice = notice.clone();
     state.market_id = Some(update.market_id.clone());
+    state.condition_id = registered
+        .as_ref()
+        .and_then(|market| market.condition_id.clone());
+    state.reward = registered.as_ref().and_then(|market| market.reward.clone());
     state.version = notice.version;
     state.timestamp_ms = update.timestamp_ms;
     state.best_bid = make_book_level(update.best_bid.as_str(), "0", registered.as_ref());
     state.best_ask = make_book_level(update.best_ask.as_str(), "0", registered.as_ref());
+    state.bids = state.best_bid.iter().cloned().collect();
+    state.asks = state.best_ask.iter().cloned().collect();
     if let Some(registered) = registered.as_ref() {
         apply_registered_market(&mut state, registered);
     }
@@ -498,7 +540,13 @@ fn apply_tick_size_change_update(
     let mut state = inner.books.get(&key).cloned().unwrap_or_else(|| HotBookState {
         notice: notice.clone(),
         market_id: Some(update.market_id.clone()),
+        condition_id: registered
+            .as_ref()
+            .and_then(|market| market.condition_id.clone()),
         asset_id: update.asset_id.clone(),
+        reward: registered.as_ref().and_then(|market| market.reward.clone()),
+        bids: Vec::new(),
+        asks: Vec::new(),
         best_bid: None,
         best_ask: None,
         midpoint: None,
@@ -562,10 +610,14 @@ fn apply_reconnect_update(
 
 fn apply_registered_market(state: &mut HotBookState, registered: &RegisteredMarket) {
     state.market_id = Some(registered.market_id.clone());
+    state.condition_id = registered.condition_id.clone();
+    state.reward = registered.reward.clone();
     state.tick_size = Some(registered.tick_size.clone());
     state.tick_size_units = Some(registered.tick_size_units);
     state.lot_size = registered.lot_size.clone();
     state.lot_size_units = registered.lot_size_units;
+    refresh_book_side_units(&mut state.bids, state.tick_size_units, state.lot_size_units);
+    refresh_book_side_units(&mut state.asks, state.tick_size_units, state.lot_size_units);
     refresh_book_level_units(
         &mut state.best_bid,
         state.tick_size_units,
@@ -589,6 +641,17 @@ fn refresh_book_level_units(
     }
 }
 
+fn refresh_book_side_units(
+    levels: &mut [HotBookLevel],
+    tick_size_units: Option<u64>,
+    lot_size_units: Option<u64>,
+) {
+    for level in levels {
+        level.price_ticks = ticks_for(level.price.units, tick_size_units);
+        level.size_lots = ticks_for(level.size.units, lot_size_units);
+    }
+}
+
 fn empty_reference_state(notice: &UpdateNotice) -> HotReferenceState {
     HotReferenceState {
         notice: notice.clone(),
@@ -606,22 +669,23 @@ fn empty_reference_state(notice: &UpdateNotice) -> HotReferenceState {
     }
 }
 
-fn best_level(
+fn ordered_levels(
     levels: &[BookLevel],
-    take_max: bool,
+    descending: bool,
     registered: Option<&RegisteredMarket>,
-) -> Option<HotBookLevel> {
-    levels
+) -> Vec<HotBookLevel> {
+    let mut ordered: Vec<_> = levels
         .iter()
         .filter_map(|level| make_book_level(level.price.as_str(), level.size.as_str(), registered))
-        .reduce(|current, candidate| {
-            let replace = if take_max {
-                candidate.price.units > current.price.units
-            } else {
-                candidate.price.units < current.price.units
-            };
-            if replace { candidate } else { current }
-        })
+        .collect();
+    ordered.sort_by(|left, right| {
+        if descending {
+            right.price.units.cmp(&left.price.units)
+        } else {
+            left.price.units.cmp(&right.price.units)
+        }
+    });
+    ordered
 }
 
 fn make_book_level(
@@ -714,26 +778,48 @@ fn ticks_for(units: u64, step_units: Option<u64>) -> Option<u64> {
     Some(units / step_units)
 }
 
-fn updates_best_side(
-    current: Option<&HotBookLevel>,
-    candidate: Option<&HotBookLevel>,
-    take_max: bool,
-) -> bool {
-    let candidate = match candidate {
-        Some(candidate) => candidate,
-        None => return false,
+fn apply_depth_delta(
+    levels: &mut Vec<HotBookLevel>,
+    candidate: Option<HotBookLevel>,
+    price: &str,
+    size: &str,
+    descending: bool,
+) {
+    let Some(price_units) = parse_scaled(price) else {
+        return;
+    };
+    let Some(size_units) = parse_scaled(size) else {
+        return;
     };
 
-    match current {
-        Some(current) => {
-            if take_max {
-                candidate.price.units >= current.price.units
-            } else {
-                candidate.price.units <= current.price.units
-            }
-        }
-        None => true,
+    if size_units == 0 {
+        levels.retain(|level| level.price.units != price_units);
+        return;
     }
+
+    let Some(candidate) = candidate else {
+        return;
+    };
+    if let Some(existing) = levels
+        .iter_mut()
+        .find(|level| level.price.units == candidate.price.units)
+    {
+        *existing = candidate;
+    } else {
+        levels.push(candidate);
+    }
+    levels.sort_by(|left, right| {
+        if descending {
+            right.price.units.cmp(&left.price.units)
+        } else {
+            left.price.units.cmp(&right.price.units)
+        }
+    });
+}
+
+fn refresh_best_sides_from_depth(state: &mut HotBookState) {
+    state.best_bid = state.bids.first().cloned();
+    state.best_ask = state.asks.first().cloned();
 }
 
 #[cfg(test)]
@@ -771,6 +857,11 @@ mod tests {
                 max_spread: Some(Price::new("0.02")),
                 min_size: Some(Size::new("10")),
                 min_notional: Some(Notional::new("100")),
+                native_daily_rate: Some(Notional::new("5")),
+                sponsored_daily_rate: Some(Notional::new("0.5")),
+                total_daily_rate: Some(Notional::new("5.5")),
+                market_competitiveness: Some("12.75".to_string()),
+                fee_enabled: Some(true),
                 updated_at_ms: Some(1_700_000_000_000),
                 freshness: RewardFreshness::Fresh,
             }),
@@ -827,6 +918,44 @@ mod tests {
         assert_eq!(state.best_ask.as_ref().unwrap().size.units, 150_000_000);
         assert_eq!(state.best_ask.as_ref().unwrap().size_lots, Some(30));
         assert_eq!(state.midpoint.as_ref().unwrap().units, 555_000);
+        assert_eq!(state.bids.len(), 2);
+        assert_eq!(state.bids[0].price.exact, "0.55");
+        assert_eq!(state.bids[1].price.exact, "0.54");
+        assert_eq!(state.asks.len(), 2);
+        assert_eq!(state.asks[0].price.exact, "0.56");
+        assert_eq!(state.asks[1].price.exact, "0.57");
+        assert_eq!(state.condition_id.as_deref(), Some("condition-1"));
+        assert_eq!(state.reward.as_ref().unwrap().fee_enabled, Some(true));
+    }
+
+    #[test]
+    fn book_deltas_preserve_depth_ordering_for_reward_math_consumers() {
+        let store = HotStateStore::new();
+        store.register_market(&sample_market_meta());
+        store.apply_update(&book_snapshot_update());
+
+        let update = NormalizedUpdate {
+            notice: market_notice(UpdateKind::BookDelta, 12),
+            payload: NormalizedUpdatePayload::BookDelta(crate::public_event::BookDeltaUpdate {
+                market_id: MarketId::new("market-1"),
+                asset_id: AssetId::new("asset-yes"),
+                price: Price::new("0.545"),
+                size: Size::new("110"),
+                side: crate::trigger::Side::Buy,
+                timestamp_ms: 1_700_000_000_222,
+                best_bid: None,
+                best_ask: None,
+                source_hash: Some("delta-hash".to_string()),
+            }),
+        };
+
+        store.apply_update(&update);
+
+        let state = store
+            .book_state(&SourceId::new("polymarket-public"), "asset-yes")
+            .expect("book state");
+        let bid_prices: Vec<&str> = state.bids.iter().map(|level| level.price.exact.as_str()).collect();
+        assert_eq!(bid_prices, vec!["0.55", "0.545", "0.54"]);
     }
 
     #[test]

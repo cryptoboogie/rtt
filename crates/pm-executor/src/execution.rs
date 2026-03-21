@@ -1,19 +1,25 @@
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use alloy::primitives::Address;
+use alloy::primitives::{Address, U256};
 use alloy::signers::local::PrivateKeySigner;
 use crossbeam_channel::Receiver;
+use pm_strategy::quote::DesiredQuote;
 use rtt_core::clob_auth::L2Credentials;
 use rtt_core::clob_executor::{
     process_one_clob, sign_and_dispatch, DispatchError, DispatchOutcome, PreSignedOrderPool,
 };
-use rtt_core::clob_order::SignatureType;
+use rtt_core::clob_order::{compute_amounts, ClobSide, Order, SignatureType, SignedOrderPayload};
 use rtt_core::clob_response::parse_order_response;
+use rtt_core::clob_signer::sign_order;
 use rtt_core::connection::ConnectionPool;
 use rtt_core::trigger::TriggerMessage;
+use serde::{Deserialize, Serialize};
 
 use crate::config::CredentialsConfig;
+use crate::order_manager::ExecutionCommand;
+use crate::order_state::WorkingQuote;
 use crate::safety::{CircuitBreaker, OrderGuard, RateLimiter};
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -124,6 +130,308 @@ pub fn retry_decision(
             }
         }
     }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct QuoteActionPlan {
+    pub cancel_all: bool,
+    pub cancel_order_ids: Vec<String>,
+    pub place_quotes: Vec<DesiredQuote>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct BatchOrderResponse {
+    pub success: bool,
+    #[serde(rename = "orderID")]
+    pub order_id: String,
+    pub status: String,
+    #[serde(default, rename = "errorMsg")]
+    pub error_msg: String,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CancelOrdersResponse {
+    #[serde(default)]
+    pub canceled: Vec<String>,
+    #[serde(default)]
+    pub not_canceled: BTreeMap<String, String>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct RebateSample {
+    pub date: String,
+    pub condition_id: String,
+    pub asset_address: String,
+    pub maker_address: String,
+    pub rebated_fees_usdc: String,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone)]
+pub struct QuoteApiClient {
+    client: reqwest::Client,
+    base_url: String,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl QuoteApiClient {
+    #[allow(dead_code)]
+    pub fn new() -> Self {
+        Self::with_client_and_base_url(
+            reqwest::Client::new(),
+            rtt_core::polymarket::CLOB_BASE_URL,
+        )
+    }
+
+    pub fn with_client_and_base_url(
+        client: reqwest::Client,
+        base_url: impl Into<String>,
+    ) -> Self {
+        Self {
+            client,
+            base_url: base_url.into(),
+        }
+    }
+
+    pub async fn place_quotes(
+        &self,
+        quotes: &[DesiredQuote],
+        creds: &L2Credentials,
+        signer_params: &SignerParams,
+    ) -> Result<Vec<BatchOrderResponse>, String> {
+        let mut payloads = Vec::with_capacity(quotes.len());
+        for quote in quotes {
+            let order = build_quote_order(
+                quote,
+                signer_params.maker,
+                signer_params.signer_addr,
+                signer_params.fee_rate_bps,
+                signer_params.sig_type,
+            )?;
+            let signature = sign_order(&signer_params.signer, &order, signer_params.is_neg_risk)
+                .await
+                .map_err(|err| format!("quote signing failed: {err}"))?;
+            payloads.push(SignedOrderPayload::new(
+                &order,
+                &signature,
+                quote.order_type,
+                &signer_params.owner,
+            ));
+        }
+
+        let body = serde_json::to_string(&payloads)
+            .map_err(|err| format!("quote payload serialization failed: {err}"))?;
+        let url = format!("{}/orders", self.base_url.trim_end_matches('/'));
+        let response = self
+            .authed_request(reqwest::Method::POST, "/orders", &url, creds, &body)
+            .await?;
+
+        response
+            .json::<Vec<BatchOrderResponse>>()
+            .await
+            .map_err(|err| format!("quote response parse failed: {err}"))
+    }
+
+    pub async fn cancel_orders(
+        &self,
+        order_ids: &[String],
+        creds: &L2Credentials,
+    ) -> Result<CancelOrdersResponse, String> {
+        let body = serde_json::to_string(order_ids)
+            .map_err(|err| format!("cancel payload serialization failed: {err}"))?;
+        let url = format!("{}/orders", self.base_url.trim_end_matches('/'));
+        let response = self
+            .authed_request(reqwest::Method::DELETE, "/orders", &url, creds, &body)
+            .await?;
+
+        response
+            .json::<CancelOrdersResponse>()
+            .await
+            .map_err(|err| format!("cancel response parse failed: {err}"))
+    }
+
+    pub async fn cancel_all_orders(&self, creds: &L2Credentials) -> Result<(), String> {
+        let url = format!("{}/cancel-all", self.base_url.trim_end_matches('/'));
+        self.authed_request(
+            reqwest::Method::DELETE,
+            "/cancel-all",
+            &url,
+            creds,
+            "",
+        )
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn send_heartbeat(&self, creds: &L2Credentials) -> Result<(), String> {
+        let url = format!("{}/heartbeats", self.base_url.trim_end_matches('/'));
+        self.authed_request(reqwest::Method::POST, "/heartbeats", &url, creds, "")
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn fetch_reward_percentages(
+        &self,
+        creds: &L2Credentials,
+        signature_type: SignatureType,
+        maker_address: &str,
+    ) -> Result<BTreeMap<String, f64>, String> {
+        let query_path = format!(
+            "/rewards/user/percentages?signature_type={}&maker_address={}",
+            signature_type as u8, maker_address
+        );
+        let url = format!("{}{}", self.base_url.trim_end_matches('/'), query_path);
+        let response = self
+            .authed_request(reqwest::Method::GET, &query_path, &url, creds, "")
+            .await?;
+        let body = response
+            .text()
+            .await
+            .map_err(|err| format!("reward percentages body read failed: {err}"))?;
+        parse_reward_percentages(&body)
+    }
+
+    pub async fn fetch_rebates(
+        &self,
+        maker_address: &str,
+        date: &str,
+    ) -> Result<Vec<RebateSample>, String> {
+        let url = format!(
+            "{}/rebates/current?date={date}&maker_address={maker_address}",
+            self.base_url.trim_end_matches('/')
+        );
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|err| format!("rebates request failed: {err}"))?;
+        if !response.status().is_success() {
+            return Err(format!("rebates request returned {}", response.status()));
+        }
+        let body = response
+            .text()
+            .await
+            .map_err(|err| format!("rebates body read failed: {err}"))?;
+        parse_rebates(&body)
+    }
+
+    async fn authed_request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        url: &str,
+        creds: &L2Credentials,
+        body: &str,
+    ) -> Result<reqwest::Response, String> {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|err| format!("clock error: {err}"))?
+            .as_secs()
+            .to_string();
+        let headers = rtt_core::clob_auth::build_l2_headers(
+            creds,
+            &timestamp,
+            method.as_str(),
+            path,
+            body,
+        )
+        .map_err(|err| format!("auth header build failed: {err}"))?;
+
+        let mut request = self.client.request(method, url);
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        if !body.is_empty() {
+            request = request
+                .header("content-type", "application/json")
+                .body(body.to_string());
+        }
+
+        let response = request
+            .send()
+            .await
+            .map_err(|err| format!("request failed: {err}"))?;
+        if !response.status().is_success() {
+            return Err(format!("request returned {}", response.status()));
+        }
+        Ok(response)
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn build_quote_action_plan(
+    commands: &[ExecutionCommand],
+    working_quotes: &[WorkingQuote],
+) -> QuoteActionPlan {
+    let working_by_quote_id: BTreeMap<_, _> = working_quotes
+        .iter()
+        .filter_map(|quote| {
+            quote
+                .client_order_id
+                .clone()
+                .map(|order_id| (quote.quote_id.clone(), order_id))
+        })
+        .collect();
+
+    let mut plan = QuoteActionPlan::default();
+    for command in commands {
+        match command {
+            ExecutionCommand::Place(quote) => plan.place_quotes.push(quote.clone()),
+            ExecutionCommand::Cancel { quote_id } => {
+                if let Some(order_id) = working_by_quote_id.get(quote_id) {
+                    plan.cancel_order_ids.push(order_id.clone());
+                }
+            }
+            ExecutionCommand::CancelAll => plan.cancel_all = true,
+        }
+    }
+
+    plan
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn parse_reward_percentages(body: &str) -> Result<BTreeMap<String, f64>, String> {
+    serde_json::from_str(body).map_err(|err| format!("reward percentages parse failed: {err}"))
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn parse_rebates(body: &str) -> Result<Vec<RebateSample>, String> {
+    serde_json::from_str(body).map_err(|err| format!("rebates parse failed: {err}"))
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn build_quote_order(
+    quote: &DesiredQuote,
+    maker: Address,
+    signer_addr: Address,
+    fee_rate_bps: u64,
+    signature_type: SignatureType,
+) -> Result<Order, String> {
+    let side = ClobSide::from(quote.side);
+    let (maker_amount, taker_amount) = compute_amounts(&quote.price, &quote.size, side)
+        .map_err(|err| format!("quote amount build failed: {err}"))?;
+    let token_id = U256::from_str_radix(quote.asset_id.as_str(), 10)
+        .map_err(|_| format!("token_id is not a valid decimal integer: {}", quote.asset_id))?;
+
+    Ok(Order {
+        salt: U256::from(rtt_core::clob_order::generate_salt()),
+        maker,
+        signer: signer_addr,
+        taker: Address::ZERO,
+        tokenId: token_id,
+        makerAmount: maker_amount,
+        takerAmount: taker_amount,
+        expiration: U256::from(quote.expiration_unix_secs.unwrap_or_default()),
+        nonce: U256::ZERO,
+        feeRateBps: U256::from(fee_rate_bps),
+        side: side as u8,
+        signatureType: signature_type as u8,
+    })
 }
 
 /// Build L2Credentials and PrivateKeySigner from executor config.
@@ -407,6 +715,9 @@ pub fn run_execution_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::order_manager::ExecutionCommand;
+    use crate::order_state::WorkingQuote;
+    use pm_strategy::quote::{DesiredQuote, QuoteId};
     use rtt_core::trigger::{OrderType, Side};
 
     fn empty_creds() -> CredentialsConfig {
@@ -462,6 +773,15 @@ mod tests {
         (pool, presigned, creds)
     }
 
+    fn working_quote(id: &str, order_id: &str) -> WorkingQuote {
+        let mut quote = WorkingQuote::pending_submit(
+            DesiredQuote::new(QuoteId::new(id), "1234", Side::Buy, "0.45", "10", OrderType::GTD),
+            1_000,
+        );
+        quote.mark_working(order_id, 1_100);
+        quote
+    }
+
     #[test]
     fn build_credentials_dry_run_allows_empty() {
         let (l2, signer) = build_credentials(&empty_creds(), true).unwrap();
@@ -515,6 +835,84 @@ mod tests {
         run_execution_loop(
             rx, pool, presigned, creds, true, None, cb, &rl, og, shutdown, None,
         );
+    }
+
+    #[test]
+    fn quote_action_plan_batches_place_and_cancel_operations() {
+        let plan = build_quote_action_plan(
+            &[
+                ExecutionCommand::Cancel {
+                    quote_id: QuoteId::new("quote-1"),
+                },
+                ExecutionCommand::Place(
+                    DesiredQuote::new(
+                        QuoteId::new("quote-2"),
+                        "1234",
+                        Side::Buy,
+                        "0.44",
+                        "10",
+                        OrderType::GTD,
+                    )
+                    .with_expiration(1_700_000_000),
+                ),
+            ],
+            &[working_quote("quote-1", "exchange-1")],
+        );
+
+        assert!(!plan.cancel_all);
+        assert_eq!(plan.cancel_order_ids, vec!["exchange-1".to_string()]);
+        assert_eq!(plan.place_quotes.len(), 1);
+    }
+
+    #[test]
+    fn quote_order_builder_preserves_gtd_expiration() {
+        let quote = DesiredQuote::new(
+            QuoteId::new("quote-1"),
+            "1234",
+            Side::Buy,
+            "0.44",
+            "10",
+            OrderType::GTD,
+        )
+        .with_expiration(1_700_000_000);
+
+        let order = build_quote_order(
+            &quote,
+            valid_creds().maker_address.parse().unwrap(),
+            valid_creds().signer_address.parse().unwrap(),
+            0,
+            SignatureType::Poly,
+        )
+        .unwrap();
+
+        assert_eq!(order.expiration, U256::from(1_700_000_000u64));
+    }
+
+    #[test]
+    fn telemetry_parsers_accept_reward_percentage_and_rebate_shapes() {
+        let rewards = parse_reward_percentages(
+            r#"{
+                "0xcondition-1": 12.5,
+                "0xcondition-2": 7.25
+            }"#,
+        )
+        .unwrap();
+        let rebates = parse_rebates(
+            r#"[
+                {
+                    "date": "2026-02-27",
+                    "condition_id": "0xcondition-1",
+                    "asset_address": "0xasset",
+                    "maker_address": "0xmaker",
+                    "rebated_fees_usdc": "0.237519"
+                }
+            ]"#,
+        )
+        .unwrap();
+
+        assert_eq!(rewards.get("0xcondition-1"), Some(&12.5));
+        assert_eq!(rebates.len(), 1);
+        assert_eq!(rebates[0].rebated_fees_usdc, "0.237519");
     }
 
     #[test]

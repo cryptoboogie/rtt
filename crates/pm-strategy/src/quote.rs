@@ -15,6 +15,7 @@ pub struct DesiredQuote {
     pub price: String,
     pub size: String,
     pub order_type: OrderType,
+    pub expiration_unix_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -76,6 +77,12 @@ impl DesiredQuote {
             price: price.into(),
             size: size.into(),
             order_type,
+            expiration_unix_secs: None,
         }
+    }
+
+    pub fn with_expiration(mut self, expiration_unix_secs: u64) -> Self {
+        self.expiration_unix_secs = Some(expiration_unix_secs);
+        self
     }
 }
