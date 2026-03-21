@@ -387,7 +387,7 @@ struct ExecutorConfig {
     connection: ConnectionConfig,   // pool_size=2, address_family="auto"
     websocket: WebSocketConfig,     // asset_ids, channel capacities
     strategy: StrategyConfig,       // reuses pm-strategy config
-    execution: ExecutionConfig,     // presign_count=100, dry_run=true, state_file="state.json"
+    execution: ExecutionConfig,     // presign_count=100, dry_run=true, state_file="state.json", is_neg_risk/fee_rate_bps/signature_type live signing controls
     quote_mode: QuoteModeConfig,    // analysis_db_path, quote API base URL, user WS URL, heartbeat/telemetry intervals
     safety: SafetyConfig,           // max_orders=5, max_usd_exposure=10.0, alert_webhook_url
     health: HealthConfig,           // enabled=true, port=9090
@@ -399,8 +399,11 @@ For backwards compatibility with older deploys, `pm-executor` also accepts the l
 Runtime switching for deployments also supports `RTT_*` env var overrides, including:
 - `RTT_STRATEGY=liquidity_rewards`
 - `RTT_DRY_RUN=false`
+- signing controls such as `RTT_NEG_RISK`, `RTT_FEE_RATE_BPS`, and `RTT_SIG_TYPE`
 - bankroll/quote controls such as `RTT_MAX_TOTAL_DEPLOYED_USD`, `RTT_BASE_QUOTE_SIZE`, `RTT_EDGE_BUFFER`
 - quote runtime settings such as `RTT_ANALYSIS_DB_PATH`, `RTT_CLOB_BASE_URL`, and `RTT_USER_WS_URL`
+
+To stay compatible with the known-good `scripts/fire.sh` live-order lane, `pm-executor` also honors the older execution env names `NEG_RISK`, `FEE_RATE_BPS`, and `SIG_TYPE` when the `RTT_*` forms are absent. Live runtime signing therefore follows the same startup contract as `fire.sh`: explicit env-provided signing parameters win, and only missing `SIG_TYPE` falls back to address-based derivation.
 
 #### `capital.rs` — Deployment-budget accounting
 - Computes active deployed capital as working quote notional plus unresolved inventory notional
@@ -434,7 +437,7 @@ Runtime switching for deployments also supports `RTT_*` env var overrides, inclu
 
 #### `execution.rs` — Execution loop
 - `build_credentials()` — Dry-run allows empty creds; live validates all fields
-- `SignerParams` — Holds signer, maker, fee_rate_bps, etc. for dynamic pricing
+- `SignerParams` — Holds signer, maker, fee_rate_bps, neg-risk flag, signature type, and owner/api-key context for dynamic signing
 - `run_execution_loop()` — Spin loop on `crossbeam::try_recv()` with `yield_now()`
   - Creates dedicated tokio runtime inside OS thread
   - 4-layer safety: CircuitBreaker → RateLimiter → OrderGuard → CircuitBreaker amount check
@@ -450,6 +453,10 @@ Runtime switching for deployments also supports `RTT_*` env var overrides, inclu
 For liquidity-rewards quote generation, passive maker behavior is enforced twice:
 - the strategy clamps depth-aware bid prices to remain at least one tick below the current best ask, so a size-cutoff-adjusted midpoint cannot accidentally turn a quote marketable
 - the executor submits quote orders with `postOnly = true`, so any remaining cross-book race is rejected by the exchange instead of executing as taker flow
+
+Live signature type selection now follows a two-step rule:
+- if `ExecutionConfig.signature_type` is set via config/env (`RTT_SIG_TYPE` or legacy `SIG_TYPE`), that explicit value is used
+- otherwise the executor derives `EOA (0)` when maker and signer addresses match, or `GnosisSafe (2)` when a proxy maker differs from the signing EOA
 
 #### `safety.rs` — Lock-free safety rails
 - **CircuitBreaker**: Atomic counters for orders fired and USD committed (cents). Once tripped, stays tripped (restart required). Limits: `max_orders=5`, `max_usd_exposure=10.0` (conservative defaults).

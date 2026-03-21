@@ -146,7 +146,7 @@ fn build_signer_params(
         .maker_address
         .parse()
         .expect("invalid maker_address in config");
-    let sig_type = derive_signature_type(maker_addr, signer_addr);
+    let sig_type = resolve_signature_type(config.execution.signature_type, maker_addr, signer_addr);
 
     Some(execution::SignerParams {
         signer,
@@ -157,6 +157,28 @@ fn build_signer_params(
         sig_type,
         owner: config.credentials.api_key.clone(),
     })
+}
+
+fn resolve_signature_type(
+    configured_sig_type: Option<u8>,
+    maker_addr: alloy::primitives::Address,
+    signer_addr: alloy::primitives::Address,
+) -> rtt_core::clob_order::SignatureType {
+    match configured_sig_type {
+        Some(0) => rtt_core::clob_order::SignatureType::Eoa,
+        Some(1) => rtt_core::clob_order::SignatureType::Poly,
+        Some(2) => rtt_core::clob_order::SignatureType::GnosisSafe,
+        Some(other) => {
+            let derived = derive_signature_type(maker_addr, signer_addr);
+            tracing::warn!(
+                configured_sig_type = other,
+                derived_sig_type = derived as u8,
+                "Unsupported signature type override; falling back to derived signature type"
+            );
+            derived
+        }
+        None => derive_signature_type(maker_addr, signer_addr),
+    }
 }
 
 fn derive_signature_type(
@@ -1237,7 +1259,7 @@ fn upsert_working_quote(
 mod tests {
     use alloy::primitives::address;
 
-    use super::derive_signature_type;
+    use super::{derive_signature_type, resolve_signature_type};
 
     #[test]
     fn derive_signature_type_uses_eoa_when_maker_and_signer_match() {
@@ -1254,6 +1276,26 @@ mod tests {
         let signer = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
         let sig_type = derive_signature_type(maker, signer);
+
+        assert_eq!(sig_type, rtt_core::clob_order::SignatureType::GnosisSafe);
+    }
+
+    #[test]
+    fn resolve_signature_type_prefers_explicit_fire_sh_override() {
+        let maker = address!("1111111111111111111111111111111111111111");
+        let signer = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+
+        let sig_type = resolve_signature_type(Some(2), maker, signer);
+
+        assert_eq!(sig_type, rtt_core::clob_order::SignatureType::GnosisSafe);
+    }
+
+    #[test]
+    fn resolve_signature_type_falls_back_to_derived_when_override_is_invalid() {
+        let maker = address!("1111111111111111111111111111111111111111");
+        let signer = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+
+        let sig_type = resolve_signature_type(Some(7), maker, signer);
 
         assert_eq!(sig_type, rtt_core::clob_order::SignatureType::GnosisSafe);
     }

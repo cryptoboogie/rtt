@@ -1742,3 +1742,19 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test --workspace`
 - **Commit**: N/A (working tree only)
 - **Deviation**: Chose address-based derivation instead of introducing another prod config flag because the live maker/signer relationship is already explicit in config and the current deployment target only needs the EOA vs GnosisSafe split.
+
+### 13.11 — Align `pm-executor` live signing params with the known-good `fire.sh` env contract
+- **Spec**: `specs/13-low-risk-liquidity-rewards.md`
+- **Files changed**: `crates/pm-executor/src/config.rs`, `crates/pm-executor/src/main.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Extended executor env overrides so live runtime now honors `NEG_RISK`, `FEE_RATE_BPS`, and `SIG_TYPE` alongside the `RTT_NEG_RISK`, `RTT_FEE_RATE_BPS`, and `RTT_SIG_TYPE` forms
+  - Added `ExecutionConfig.signature_type` so `pm-executor` can consume the same explicit signature-type input that the proven `scripts/fire.sh` lane already uses
+  - Updated signer-param construction to prefer an explicit configured signature type when present, while preserving address-based derivation as the safe fallback for deployments that do not provide an override
+  - Added regression coverage for both the legacy env-name ingestion and the signer-param override/fallback behavior
+- **Tests**:
+  - `cargo test -p pm-executor fire_sh_env_names_populate_execution_signing_params -- --nocapture`
+  - `cargo test -p pm-executor resolve_signature_type -- --nocapture`
+  - `cargo test --workspace --lib`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Kept the compatibility layer at executor startup instead of teaching every caller to materialize fire.sh-style signing params independently; this keeps the live runtime aligned with the historically successful operator contract without broadening env coupling across crates.

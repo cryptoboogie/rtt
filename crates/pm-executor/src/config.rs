@@ -120,6 +120,8 @@ pub struct ExecutionConfig {
     pub is_neg_risk: bool,
     #[serde(default)]
     pub fee_rate_bps: u64,
+    #[serde(default)]
+    pub signature_type: Option<u8>,
     #[serde(default = "default_dry_run")]
     pub dry_run: bool,
     #[serde(default = "default_state_file")]
@@ -276,6 +278,17 @@ impl ExecutorConfig {
 
         override_string("RTT_STRATEGY", &mut self.strategy.strategy);
         override_string("RTT_TOKEN_ID", &mut self.strategy.token_id);
+        override_bool_alias("RTT_NEG_RISK", "NEG_RISK", &mut self.execution.is_neg_risk);
+        override_u64_alias(
+            "RTT_FEE_RATE_BPS",
+            "FEE_RATE_BPS",
+            &mut self.execution.fee_rate_bps,
+        );
+        override_u8_alias(
+            "RTT_SIG_TYPE",
+            "SIG_TYPE",
+            &mut self.execution.signature_type,
+        );
         override_bool("RTT_DRY_RUN", &mut self.execution.dry_run);
         override_string(
             "RTT_ANALYSIS_DB_PATH",
@@ -397,10 +410,46 @@ fn override_bool(name: &str, target: &mut bool) {
     }
 }
 
+fn override_bool_alias(primary: &str, fallback: &str, target: &mut bool) {
+    if let Ok(value) = std::env::var(primary) {
+        if let Ok(parsed) = value.parse::<bool>() {
+            *target = parsed;
+        }
+    } else if let Ok(value) = std::env::var(fallback) {
+        if let Ok(parsed) = value.parse::<bool>() {
+            *target = parsed;
+        }
+    }
+}
+
 fn override_u64(name: &str, target: &mut u64) {
     if let Ok(value) = std::env::var(name) {
         if let Ok(parsed) = value.parse::<u64>() {
             *target = parsed;
+        }
+    }
+}
+
+fn override_u64_alias(primary: &str, fallback: &str, target: &mut u64) {
+    if let Ok(value) = std::env::var(primary) {
+        if let Ok(parsed) = value.parse::<u64>() {
+            *target = parsed;
+        }
+    } else if let Ok(value) = std::env::var(fallback) {
+        if let Ok(parsed) = value.parse::<u64>() {
+            *target = parsed;
+        }
+    }
+}
+
+fn override_u8_alias(primary: &str, fallback: &str, target: &mut Option<u8>) {
+    if let Ok(value) = std::env::var(primary) {
+        if let Ok(parsed) = value.parse::<u8>() {
+            *target = Some(parsed);
+        }
+    } else if let Ok(value) = std::env::var(fallback) {
+        if let Ok(parsed) = value.parse::<u8>() {
+            *target = Some(parsed);
         }
     }
 }
@@ -482,6 +531,7 @@ threshold = 0.45
 presign_count = 50
 is_neg_risk = false
 fee_rate_bps = 0
+signature_type = 1
 dry_run = true
 
 [logging]
@@ -497,6 +547,7 @@ level = "debug"
         assert_eq!(config.websocket.asset_ids[0].as_str(), "asset1");
         assert_eq!(config.strategy.strategy, "threshold");
         assert_eq!(config.execution.presign_count, 50);
+        assert_eq!(config.execution.signature_type, Some(1));
         assert!(config.execution.dry_run);
         assert_eq!(config.logging.level, "debug");
     }
@@ -601,6 +652,50 @@ threshold = 0.5
         std::env::remove_var("POLY_SECRET");
         std::env::remove_var("POLY_ADDRESS");
         std::env::remove_var("POLY_PROXY_ADDRESS");
+    }
+
+    #[test]
+    fn fire_sh_env_names_populate_execution_signing_params() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config_toml = r#"
+[credentials]
+
+[connection]
+
+[websocket]
+asset_ids = ["legacy-asset"]
+
+[strategy]
+strategy = "threshold"
+token_id = "legacy-asset"
+side = "Buy"
+size = "1"
+order_type = "FOK"
+
+[strategy.params]
+threshold = 0.5
+
+[execution]
+is_neg_risk = false
+fee_rate_bps = 0
+
+[logging]
+"#;
+
+        std::env::set_var("NEG_RISK", "true");
+        std::env::set_var("FEE_RATE_BPS", "1000");
+        std::env::set_var("SIG_TYPE", "2");
+
+        let mut config: ExecutorConfig = toml::from_str(config_toml).unwrap();
+        config.apply_env_overrides();
+
+        assert!(config.execution.is_neg_risk);
+        assert_eq!(config.execution.fee_rate_bps, 1000);
+        assert_eq!(config.execution.signature_type, Some(2));
+
+        std::env::remove_var("NEG_RISK");
+        std::env::remove_var("FEE_RATE_BPS");
+        std::env::remove_var("SIG_TYPE");
     }
 
     #[test]
