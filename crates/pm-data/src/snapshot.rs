@@ -202,6 +202,7 @@ mod tests {
                     OutcomeSide::No,
                 ),
                 condition_id: Some(format!("condition-{market_id}")),
+                neg_risk: false,
                 tick_size: TickSize::new("0.01"),
                 min_order_size: Some(MinOrderSize::new("5")),
                 status,

@@ -921,6 +921,7 @@ mod tests {
             yes_asset: OutcomeToken::new(AssetId::new("asset-yes"), OutcomeSide::Yes),
             no_asset: OutcomeToken::new(AssetId::new("asset-no"), OutcomeSide::No),
             condition_id: Some("condition-1".to_string()),
+            neg_risk: false,
             tick_size: TickSize::new("0.01"),
             min_order_size: Some(MinOrderSize::new("5")),
             status: MarketStatus::Active,

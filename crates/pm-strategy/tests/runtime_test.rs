@@ -14,6 +14,7 @@ fn sample_market_meta() -> MarketMeta {
         yes_asset: OutcomeToken::new(AssetId::new("token_abc"), OutcomeSide::Yes),
         no_asset: OutcomeToken::new(AssetId::new("token_xyz"), OutcomeSide::No),
         condition_id: Some("condition-1".to_string()),
+        neg_risk: false,
         tick_size: TickSize::new("0.01"),
         min_order_size: Some(MinOrderSize::new("5")),
         status: MarketStatus::Active,

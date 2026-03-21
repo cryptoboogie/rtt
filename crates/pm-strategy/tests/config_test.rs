@@ -229,6 +229,7 @@ base_quote_size = 50
             condition_id: "condition-1".to_string(),
             yes_asset_id: "yes-asset".to_string(),
             no_asset_id: "no-asset".to_string(),
+            neg_risk: false,
             tick_size: "0.01".to_string(),
             min_order_size: Some("5".to_string()),
             reward_max_spread: "0.04".to_string(),

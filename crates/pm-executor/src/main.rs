@@ -154,6 +154,7 @@ fn build_signer_params(
         signer_addr,
         fee_rate_bps: config.execution.fee_rate_bps,
         is_neg_risk: config.execution.is_neg_risk,
+        quote_neg_risk_by_asset: std::collections::BTreeMap::new(),
         sig_type,
         quote_ttl_secs: config.strategy.params.quote_ttl_secs.unwrap_or(30),
         owner: config.credentials.api_key.clone(),
@@ -936,6 +937,10 @@ async fn run_quote_mode(
     let runtime = QuoteRuntime::new(quote_strategy, hot_store.clone(), notice_rx, quote_tx);
 
     let params = config.strategy.liquidity_rewards_params();
+    let signer_params = signer_params.map(|mut params_for_quotes| {
+        params_for_quotes.quote_neg_risk_by_asset = quote_neg_risk_by_asset(&portfolio.market_meta);
+        params_for_quotes
+    });
     let mut controller = QuoteModeController {
         runtime,
         hot_store: hot_store.clone(),
@@ -1208,6 +1213,7 @@ async fn discover_quote_portfolio(
             condition_id: condition_id.clone(),
             yes_asset_id: market.yes_asset.asset_id.to_string(),
             no_asset_id: market.no_asset.asset_id.to_string(),
+            neg_risk: market.neg_risk,
             tick_size: market.tick_size.to_string(),
             min_order_size: market.min_order_size.as_ref().map(ToString::to_string),
             reward_max_spread: reward
@@ -1256,11 +1262,22 @@ fn upsert_working_quote(
     working.push(WorkingQuote::pending_submit(desired, now_ms));
 }
 
+fn quote_neg_risk_by_asset(
+    markets: &[rtt_core::MarketMeta],
+) -> std::collections::BTreeMap<String, bool> {
+    let mut by_asset = std::collections::BTreeMap::new();
+    for market in markets {
+        by_asset.insert(market.yes_asset.asset_id.to_string(), market.neg_risk);
+        by_asset.insert(market.no_asset.asset_id.to_string(), market.neg_risk);
+    }
+    by_asset
+}
+
 #[cfg(test)]
 mod tests {
     use alloy::primitives::address;
 
-    use super::{derive_signature_type, resolve_signature_type};
+    use super::{derive_signature_type, quote_neg_risk_by_asset, resolve_signature_type};
 
     #[test]
     fn derive_signature_type_uses_eoa_when_maker_and_signer_match() {
@@ -1299,6 +1316,32 @@ mod tests {
         let sig_type = resolve_signature_type(Some(7), maker, signer);
 
         assert_eq!(sig_type, rtt_core::clob_order::SignatureType::GnosisSafe);
+    }
+
+    #[test]
+    fn quote_neg_risk_by_asset_maps_yes_and_no_tokens() {
+        let market = rtt_core::MarketMeta {
+            market_id: rtt_core::MarketId::new("market-1"),
+            yes_asset: rtt_core::OutcomeToken::new(
+                rtt_core::AssetId::new("yes-asset"),
+                rtt_core::OutcomeSide::Yes,
+            ),
+            no_asset: rtt_core::OutcomeToken::new(
+                rtt_core::AssetId::new("no-asset"),
+                rtt_core::OutcomeSide::No,
+            ),
+            condition_id: Some("condition-1".to_string()),
+            neg_risk: true,
+            tick_size: rtt_core::TickSize::new("0.01"),
+            min_order_size: Some(rtt_core::MinOrderSize::new("5")),
+            status: rtt_core::MarketStatus::Active,
+            reward: None,
+        };
+
+        let mapped = quote_neg_risk_by_asset(&[market]);
+
+        assert_eq!(mapped.get("yes-asset"), Some(&true));
+        assert_eq!(mapped.get("no-asset"), Some(&true));
     }
 }
 

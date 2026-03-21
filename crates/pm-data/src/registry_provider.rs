@@ -417,6 +417,8 @@ struct RawRewardTokenRow {
 struct GammaMarket {
     id: String,
     condition_id: Option<String>,
+    #[serde(default)]
+    neg_risk: bool,
     outcomes: Option<StringArrayField>,
     clob_token_ids: Option<StringArrayField>,
     active: bool,
@@ -561,6 +563,7 @@ fn normalize_gamma_market(market: GammaMarket) -> Result<MarketMeta, QuarantineR
         yes_asset,
         no_asset,
         condition_id: market.condition_id,
+        neg_risk: market.neg_risk,
         tick_size: TickSize::new(tick_size),
         min_order_size,
         status,
@@ -612,6 +615,7 @@ mod tests {
       {
         "id": "market-1",
         "conditionId": "condition-1",
+        "negRisk": true,
         "outcomes": "[\"Yes\",\"No\"]",
         "clobTokenIds": "[\"token-yes\",\"token-no\"]",
         "active": true,
@@ -654,6 +658,7 @@ mod tests {
         let market = &page.markets[0];
         assert_eq!(market.market_id.as_str(), "market-1");
         assert_eq!(market.status, MarketStatus::Active);
+        assert!(market.neg_risk);
         assert_eq!(market.yes_asset.side, OutcomeSide::Yes);
         assert_eq!(market.yes_asset.asset_id.as_str(), "token-yes");
         assert_eq!(market.no_asset.asset_id.as_str(), "token-no");

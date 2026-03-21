@@ -232,9 +232,13 @@ impl QuoteApiClient {
                 signer_params.sig_type,
                 signer_params.quote_ttl_secs,
             )?;
-            let signature = sign_order(&signer_params.signer, &order, signer_params.is_neg_risk)
-                .await
-                .map_err(|err| format!("quote signing failed: {err}"))?;
+            let signature = sign_order(
+                &signer_params.signer,
+                &order,
+                signer_params.is_neg_risk_for_asset(&quote.asset_id),
+            )
+            .await
+            .map_err(|err| format!("quote signing failed: {err}"))?;
             payloads.push(
                 SignedOrderPayload::new(&order, &signature, quote.order_type, &signer_params.owner)
                     .with_post_only(true),
@@ -599,9 +603,19 @@ pub struct SignerParams {
     pub signer_addr: Address,
     pub fee_rate_bps: u64,
     pub is_neg_risk: bool,
+    pub quote_neg_risk_by_asset: BTreeMap<String, bool>,
     pub sig_type: SignatureType,
     pub quote_ttl_secs: u64,
     pub owner: String,
+}
+
+impl SignerParams {
+    pub fn is_neg_risk_for_asset(&self, asset_id: &str) -> bool {
+        self.quote_neg_risk_by_asset
+            .get(asset_id)
+            .copied()
+            .unwrap_or(self.is_neg_risk)
+    }
 }
 
 /// The execution loop — runs on a dedicated OS thread (not tokio).
@@ -1050,6 +1064,28 @@ mod tests {
             order.expiration
                 >= U256::from(now_unix_secs + POLYMARKET_GTD_SECURITY_BUFFER_SECS + 30)
         );
+    }
+
+    #[test]
+    fn signer_params_prefers_asset_specific_neg_risk_when_present() {
+        let signer_params = SignerParams {
+            signer: valid_creds()
+                .private_key
+                .trim_start_matches("0x")
+                .parse()
+                .unwrap(),
+            maker: valid_creds().maker_address.parse().unwrap(),
+            signer_addr: valid_creds().signer_address.parse().unwrap(),
+            fee_rate_bps: 0,
+            is_neg_risk: false,
+            quote_neg_risk_by_asset: BTreeMap::from([("1234".to_string(), true)]),
+            sig_type: SignatureType::GnosisSafe,
+            quote_ttl_secs: 30,
+            owner: "test-key".to_string(),
+        };
+
+        assert!(signer_params.is_neg_risk_for_asset("1234"));
+        assert!(!signer_params.is_neg_risk_for_asset("other-asset"));
     }
 
     #[test]

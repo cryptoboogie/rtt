@@ -104,6 +104,8 @@ pub struct MarketMeta {
     pub yes_asset: OutcomeToken,
     pub no_asset: OutcomeToken,
     pub condition_id: Option<String>,
+    #[serde(default)]
+    pub neg_risk: bool,
     pub tick_size: TickSize,
     pub min_order_size: Option<MinOrderSize>,
     pub status: MarketStatus,
@@ -149,6 +151,7 @@ mod tests {
             yes_asset: OutcomeToken::new(AssetId::new("yes-asset"), OutcomeSide::Yes),
             no_asset: OutcomeToken::new(AssetId::new("no-asset"), OutcomeSide::No),
             condition_id: Some("condition-1".to_string()),
+            neg_risk: false,
             tick_size: TickSize::new("0.01"),
             min_order_size: Some(MinOrderSize::new("5")),
             status: MarketStatus::Active,

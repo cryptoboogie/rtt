@@ -98,7 +98,7 @@ This module remains the legacy executor/runtime DTO seam during the `11a`–`12a
 #### `market.rs` — Shared market identity, metadata, and exact values
 - `MarketId`, `AssetId`, `OutcomeSide`, `OutcomeToken`, `MarketStatus`
 - Exact-value wrappers: `Price`, `Size`, `Notional`, `TickSize`, `MinOrderSize`
-- `MarketMeta { market_id, yes_asset, no_asset, condition_id, tick_size, min_order_size, status, reward }`
+- `MarketMeta { market_id, yes_asset, no_asset, condition_id, neg_risk, tick_size, min_order_size, status, reward }`
 - `RewardParams` plus explicit `RewardFreshness::{Fresh, StaleButUsable, Unknown}`
 - Helper methods keep YES/NO pairing, market-to-asset lookup, and tradability checks explicit
 
@@ -265,7 +265,7 @@ Tagged by `event_type` field in JSON.
 
 #### `registry_provider.rs` — Discovery provider boundary
 - `RegistryProvider` is the async control-plane trait for paged market discovery
-- `GammaRegistryProvider` crawls Gamma `events` pages, normalizes valid records into shared `MarketMeta`, and quarantines malformed upstream markets instead of poisoning the whole refresh
+- `GammaRegistryProvider` crawls Gamma `events` pages, normalizes valid records into shared `MarketMeta`, preserves Gamma's `negRisk` flag for downstream signing, and quarantines malformed upstream markets instead of poisoning the whole refresh
 - `RegistryPageRequest` / `RegistryPage` make offset-based traversal explicit and keep retry/backoff policy out of the hot path
 
 #### `snapshot.rs` — Registry snapshots and universe selection
@@ -437,7 +437,7 @@ To stay compatible with the known-good `scripts/fire.sh` live-order lane, `pm-ex
 
 #### `execution.rs` — Execution loop
 - `build_credentials()` — Dry-run allows empty creds; live validates all fields
-- `SignerParams` — Holds signer, maker, fee_rate_bps, neg-risk flag, signature type, and owner/api-key context for dynamic signing
+- `SignerParams` — Holds signer, maker, fee_rate_bps, a global neg-risk fallback, per-asset neg-risk overrides, signature type, and owner/api-key context for dynamic signing
 - `run_execution_loop()` — Spin loop on `crossbeam::try_recv()` with `yield_now()`
   - Creates dedicated tokio runtime inside OS thread
   - 4-layer safety: CircuitBreaker → RateLimiter → OrderGuard → CircuitBreaker amount check
@@ -448,6 +448,7 @@ To stay compatible with the known-good `scripts/fire.sh` live-order lane, `pm-ex
 - `QuoteCommandPolicy`, `QuoteCommandThrottle`, and `retry_decision()` define the bounded retry/backoff/throttling seam for quote-maintenance commands without redesigning the current trigger hot path
 - `QuoteApiClient` signs `DesiredQuote` values directly (including GTD expirations), submits quote batches as documented post-only maker orders, batches `POST /orders` and `DELETE /orders`, issues `DELETE /cancel-all`, sends chained heartbeats to `/v1/heartbeats`, and samples `/rewards/user/percentages` plus `/rebates/current`
 - For GTD quotes, live submission re-anchors the requested expiration against wall-clock time using the configured `quote_ttl_secs` plus Polymarket's one-minute security buffer; this avoids stale feed timestamps producing expirations that are technically in the future but still too close for the exchange to accept
+- Quote-mode signing now chooses the neg-risk EIP-712 domain per asset from Gamma market metadata, falling back to the executor-wide `NEG_RISK` / `RTT_NEG_RISK` setting only when no per-asset market metadata is available
 - Quote-mode submit handling treats only `status = live` as a resting working quote; successful-but-non-resting statuses such as `matched`, `delayed`, and `unmatched` are journaled and fed back into reconciliation instead of being assumed open on exchange
 - Quote-mode execution is correctness-first rather than latency-first: it uses authenticated REST requests and deterministic batching instead of the trigger branch's dedicated HTTP/2 thread
 

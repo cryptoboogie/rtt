@@ -1773,3 +1773,20 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test --workspace`
 - **Commit**: N/A (working tree only)
 - **Deviation**: Kept the normalization in the executor instead of the strategy so quote planning, replay tests, and reconciliation stay feed-deterministic while the live submit path absorbs exchange-specific timing rules.
+
+### 13.13 — Preserve Gamma `negRisk` metadata and sign quote orders per selected market
+- **Spec**: `specs/13-low-risk-liquidity-rewards.md`
+- **Files changed**: `crates/rtt-core/src/market.rs`, `crates/rtt-core/src/hot_state.rs`, `crates/pm-data/src/registry_provider.rs`, `crates/pm-data/src/snapshot.rs`, `crates/pm-data/src/market_registry.rs`, `crates/pm-strategy/src/liquidity_rewards.rs`, `crates/pm-strategy/tests/backtest_contract_test.rs`, `crates/pm-strategy/tests/backtest_test.rs`, `crates/pm-strategy/tests/config_test.rs`, `crates/pm-strategy/tests/runtime_contract_test.rs`, `crates/pm-strategy/tests/runtime_test.rs`, `crates/pm-executor/src/execution.rs`, `crates/pm-executor/src/main.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added `neg_risk` to shared `MarketMeta` and taught Gamma normalization to preserve the upstream `negRisk` flag instead of discarding it during discovery
+  - Threaded `neg_risk` through selected liquidity-reward markets and built a per-asset neg-risk lookup for quote mode so live quote signing can choose the correct EIP-712 exchange domain for each selected market
+  - Kept the existing global `NEG_RISK` / `RTT_NEG_RISK` config as a fallback for trigger mode and for any quote path that lacks per-asset market metadata
+  - Added regression coverage proving Gamma `negRisk` survives parsing, per-asset neg-risk lookup is built correctly, and quote signer params prefer market-specific neg-risk over the global fallback
+- **Tests**:
+  - `cargo test -p pm-data gamma_page_normalizes_markets_and_quarantines_invalid_records -- --nocapture`
+  - `cargo test -p pm-executor signer_params_prefers_asset_specific_neg_risk_when_present -- --nocapture`
+  - `cargo test -p pm-executor quote_neg_risk_by_asset_maps_yes_and_no_tokens -- --nocapture`
+  - `cargo test --workspace --lib`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Kept the per-market neg-risk override executor-local instead of pushing it into the generic quote contract, because the live signing domain is an execution concern and the fallback global env contract still matters for the legacy trigger lane.
