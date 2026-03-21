@@ -252,24 +252,24 @@ impl ExecutorConfig {
     }
 
     fn apply_env_overrides(&mut self) {
-        if let Ok(v) = std::env::var("POLY_API_KEY") {
-            self.credentials.api_key = v;
-        }
-        if let Ok(v) = std::env::var("POLY_API_SECRET") {
-            self.credentials.api_secret = v;
-        }
-        if let Ok(v) = std::env::var("POLY_PASSPHRASE") {
-            self.credentials.passphrase = v;
-        }
-        if let Ok(v) = std::env::var("POLY_PRIVATE_KEY") {
-            self.credentials.private_key = v;
-        }
-        if let Ok(v) = std::env::var("POLY_MAKER_ADDRESS") {
-            self.credentials.maker_address = v;
-        }
-        if let Ok(v) = std::env::var("POLY_SIGNER_ADDRESS") {
-            self.credentials.signer_address = v;
-        }
+        override_string("POLY_API_KEY", &mut self.credentials.api_key);
+        override_string_alias(
+            "POLY_API_SECRET",
+            "POLY_SECRET",
+            &mut self.credentials.api_secret,
+        );
+        override_string("POLY_PASSPHRASE", &mut self.credentials.passphrase);
+        override_string("POLY_PRIVATE_KEY", &mut self.credentials.private_key);
+        override_string_alias(
+            "POLY_MAKER_ADDRESS",
+            "POLY_PROXY_ADDRESS",
+            &mut self.credentials.maker_address,
+        );
+        override_string_alias(
+            "POLY_SIGNER_ADDRESS",
+            "POLY_ADDRESS",
+            &mut self.credentials.signer_address,
+        );
         if let Ok(v) = std::env::var("POLY_ALERT_WEBHOOK_URL") {
             self.safety.alert_webhook_url = Some(v);
         }
@@ -374,6 +374,14 @@ impl ExecutorConfig {
 
 fn override_string(name: &str, target: &mut String) {
     if let Ok(value) = std::env::var(name) {
+        *target = value;
+    }
+}
+
+fn override_string_alias(primary: &str, fallback: &str, target: &mut String) {
+    if let Ok(value) = std::env::var(primary) {
+        *target = value;
+    } else if let Ok(value) = std::env::var(fallback) {
         *target = value;
     }
 }
@@ -548,6 +556,48 @@ threshold = 0.5
         config.apply_env_overrides();
         assert_eq!(config.credentials.api_key, "from_env");
         std::env::remove_var("POLY_API_KEY");
+    }
+
+    #[test]
+    fn legacy_polymarket_env_names_populate_live_credentials() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config_toml = r#"
+[credentials]
+
+[connection]
+
+[websocket]
+asset_ids = ["legacy-asset"]
+
+[strategy]
+strategy = "threshold"
+token_id = "legacy-asset"
+side = "Buy"
+size = "1"
+order_type = "FOK"
+
+[strategy.params]
+threshold = 0.5
+
+[execution]
+
+[logging]
+"#;
+
+        std::env::set_var("POLY_SECRET", "legacy-secret");
+        std::env::set_var("POLY_ADDRESS", "0xlegacy-signer");
+        std::env::set_var("POLY_PROXY_ADDRESS", "0xlegacy-maker");
+
+        let mut config: ExecutorConfig = toml::from_str(config_toml).unwrap();
+        config.apply_env_overrides();
+
+        assert_eq!(config.credentials.api_secret, "legacy-secret");
+        assert_eq!(config.credentials.signer_address, "0xlegacy-signer");
+        assert_eq!(config.credentials.maker_address, "0xlegacy-maker");
+
+        std::env::remove_var("POLY_SECRET");
+        std::env::remove_var("POLY_ADDRESS");
+        std::env::remove_var("POLY_PROXY_ADDRESS");
     }
 
     #[test]

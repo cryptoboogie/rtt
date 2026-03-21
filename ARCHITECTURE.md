@@ -395,6 +395,7 @@ struct ExecutorConfig {
 }
 ```
 All credential fields support `POLY_*` env var overrides. `alert_webhook_url` supports `POLY_ALERT_WEBHOOK_URL`.
+For backwards compatibility with older deploys, `pm-executor` also accepts the legacy Polymarket names `POLY_SECRET`, `POLY_ADDRESS`, and `POLY_PROXY_ADDRESS` as fallbacks for `POLY_API_SECRET`, `POLY_SIGNER_ADDRESS`, and `POLY_MAKER_ADDRESS`.
 Runtime switching for deployments also supports `RTT_*` env var overrides, including:
 - `RTT_STRATEGY=liquidity_rewards`
 - `RTT_DRY_RUN=false`
@@ -582,6 +583,7 @@ rtt-bench --trigger-test  # single trigger
 - **ALTERNATIVES CONSIDERED**: EOA (0), Poly Proxy (1)
 - **REASON**: Polymarket's Magic Link wallets are Gnosis Safe proxy contracts. The EOA signs, but the proxy wallet is the maker/funder. signatureType=2 tells the exchange to verify the EOA signature against the proxy wallet's authorized signers.
 - **TRADEOFFS**: Requires knowing both the EOA address (for auth) and proxy address (for order maker). These are separate env vars: `POLY_ADDRESS` (EOA, used in HMAC headers) and `POLY_PROXY_ADDRESS` / `POLY_MAKER_ADDRESS` (proxy, used in order struct).
+- The executor validates this separation in live mode: HMAC/L2 auth uses the signer EOA, order structs use the maker/proxy wallet, and a configured signer address must match the supplied private key.
 
 ## External Dependencies
 

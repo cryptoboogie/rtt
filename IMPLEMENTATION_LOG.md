@@ -1650,3 +1650,31 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test --workspace`
 - **Commit**: N/A (working tree only)
 - **Deviation**: Kept the override surface executor-local rather than teaching `pm-strategy` to read env vars directly; the executor remains the single place where deployment-time configuration is materialized.
+
+### 13.5 — Accept legacy Polymarket credential env names during live executor startup
+- **Spec**: `specs/13-low-risk-liquidity-rewards.md`
+- **Files changed**: `crates/pm-executor/src/config.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Added compatibility fallbacks so `pm-executor` accepts `POLY_SECRET`, `POLY_ADDRESS`, and `POLY_PROXY_ADDRESS` when the newer `POLY_API_SECRET`, `POLY_SIGNER_ADDRESS`, and `POLY_MAKER_ADDRESS` vars are absent
+  - Preserved precedence for the newer names so explicit executor-era env vars still win when both forms are present
+  - Documented the fallback behavior in the architecture notes so existing prod `.env` files can be reused without editing
+- **Tests**:
+  - `cargo test -p pm-executor legacy_polymarket_env_names_populate_live_credentials -- --nocapture`
+  - `cargo test -p pm-executor`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Limited the compatibility shim to executor config loading instead of broadening every crate's env-reading surface; this keeps the live entrypoint backwards-compatible without expanding implicit env coupling elsewhere.
+
+### 13.6 — Fix live executor auth to use signer EOA instead of maker proxy
+- **Spec**: `specs/13-low-risk-liquidity-rewards.md`
+- **Files changed**: `crates/pm-executor/src/execution.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Fixed `build_credentials()` so L2/HMAC auth uses `signer_address` (EOA) rather than `maker_address` (proxy wallet), matching Polymarket's expected `POLY_ADDRESS` semantics
+  - Added a guard that rejects live startup when the configured signer address does not match the supplied private key, turning a vague 401 into an immediate configuration error
+  - Kept maker/proxy handling unchanged for order construction and reward/rebate maker-address queries
+- **Tests**:
+  - `cargo test -p pm-executor build_credentials_uses_signer_address_for_l2_auth -- --nocapture`
+  - `cargo test -p pm-executor build_credentials_rejects_signer_address_mismatch -- --nocapture`
+  - `cargo test -p pm-executor`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Derived the authoritative live signer identity from the private key and treat the configured signer address as a consistency check, because auth failures at runtime are harder to diagnose than an early startup error.

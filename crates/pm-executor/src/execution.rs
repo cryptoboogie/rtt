@@ -442,14 +442,13 @@ pub fn build_credentials(
     creds: &CredentialsConfig,
     dry_run: bool,
 ) -> Result<(L2Credentials, Option<PrivateKeySigner>), Box<dyn std::error::Error>> {
-    let l2 = L2Credentials {
-        api_key: creds.api_key.clone(),
-        secret: creds.api_secret.clone(),
-        passphrase: creds.passphrase.clone(),
-        address: creds.maker_address.clone(),
-    };
-
     if dry_run {
+        let l2 = L2Credentials {
+            api_key: creds.api_key.clone(),
+            secret: creds.api_secret.clone(),
+            passphrase: creds.passphrase.clone(),
+            address: creds.signer_address.clone(),
+        };
         return Ok((l2, None));
     }
 
@@ -475,6 +474,27 @@ pub fn build_credentials(
         .strip_prefix("0x")
         .unwrap_or(&creds.private_key);
     let signer: PrivateKeySigner = pk_hex.parse()?;
+    let derived_signer_address = signer.address();
+
+    let auth_address = if creds.signer_address.is_empty() {
+        derived_signer_address.to_string()
+    } else {
+        let configured_signer_address: Address = creds
+            .signer_address
+            .parse()
+            .map_err(|_| "invalid signer_address in config")?;
+        if configured_signer_address != derived_signer_address {
+            return Err("signer_address does not match private_key".into());
+        }
+        creds.signer_address.clone()
+    };
+
+    let l2 = L2Credentials {
+        api_key: creds.api_key.clone(),
+        secret: creds.api_secret.clone(),
+        passphrase: creds.passphrase.clone(),
+        address: auth_address,
+    };
 
     Ok((l2, Some(signer)))
 }
@@ -817,6 +837,28 @@ mod tests {
         assert_eq!(l2.api_key, "test-key");
         assert_eq!(l2.secret, "dGVzdC1zZWNyZXQ=");
         assert_eq!(l2.address, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    }
+
+    #[test]
+    fn build_credentials_uses_signer_address_for_l2_auth() {
+        let mut creds = valid_creds();
+        creds.maker_address = "0x1111111111111111111111111111111111111111".to_string();
+        creds.signer_address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".to_string();
+
+        let (l2, signer) = build_credentials(&creds, false).unwrap();
+
+        assert!(signer.is_some());
+        assert_eq!(l2.address, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    }
+
+    #[test]
+    fn build_credentials_rejects_signer_address_mismatch() {
+        let mut creds = valid_creds();
+        creds.signer_address = "0x2222222222222222222222222222222222222222".to_string();
+
+        let err = build_credentials(&creds, false).unwrap_err();
+
+        assert!(err.to_string().contains("signer_address does not match private_key"));
     }
 
     #[test]
