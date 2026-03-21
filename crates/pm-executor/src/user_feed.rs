@@ -147,8 +147,11 @@ pub fn parse_user_feed_event(message: &str) -> Result<Option<UserFeedEvent>, Str
     if trimmed.is_empty() {
         return Ok(None);
     }
-    if trimmed == "{}" {
+    if trimmed.eq_ignore_ascii_case("PONG") || trimmed == "{}" {
         return Ok(Some(UserFeedEvent::Pong));
+    }
+    if trimmed.eq_ignore_ascii_case("PING") {
+        return Ok(None);
     }
 
     let envelope: serde_json::Value =
@@ -296,7 +299,7 @@ pub async fn run_user_feed(
                 }
             }
             _ = ping_interval.tick() => {
-                if stream.send(Message::Text("{}".to_string())).await.is_err() {
+                if stream.send(Message::Text("PING".to_string())).await.is_err() {
                     let _ = event_tx.send(UserFeedRuntimeEvent::Degraded("user_feed_ping_failed".to_string())).await;
                     break;
                 }
@@ -425,6 +428,17 @@ mod tests {
 
         assert!(matches!(order, UserFeedEvent::Order(_)));
         assert!(matches!(trade, UserFeedEvent::Trade(_)));
+    }
+
+    #[test]
+    fn parses_plaintext_user_feed_heartbeats() {
+        let pong = parse_user_feed_event("PONG")
+            .unwrap()
+            .expect("pong event");
+        let ping = parse_user_feed_event("PING").unwrap();
+
+        assert!(matches!(pong, UserFeedEvent::Pong));
+        assert!(ping.is_none());
     }
 
     #[test]

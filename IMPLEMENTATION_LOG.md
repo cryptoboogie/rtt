@@ -1693,3 +1693,18 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test --workspace`
 - **Commit**: N/A (working tree only)
 - **Deviation**: Chose a conservative ignore-and-log-less stance for unknown informational events instead of surfacing them into the shared update model, because the runtime currently has no consumer for them and warning spam obscures actual feed problems.
+
+### 13.8 — Fix user-feed heartbeat handling so live quote mode does not self-cancel on keepalives
+- **Spec**: `specs/13-low-risk-liquidity-rewards.md`
+- **Files changed**: `crates/pm-executor/src/user_feed.rs`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Updated the authenticated user-feed heartbeat to send the documented plain-text `PING` frame instead of `"{}"`
+  - Taught the parser to accept plain-text `PONG` heartbeats and ignore incoming `PING` frames so keepalive traffic no longer trips the fail-closed path with `invalid user feed json`
+  - Added regression coverage for plain-text heartbeat frames alongside the existing order/trade parsing tests
+- **Tests**:
+  - `cargo test -p pm-executor parses_plaintext_user_feed_heartbeats -- --nocapture`
+  - `cargo test -p pm-executor parses_user_feed_order_and_trade_messages -- --nocapture`
+  - `cargo test -p pm-executor`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Kept the user-feed transport contract narrowly aligned to the published heartbeat format without broadening the parser to silently swallow arbitrary malformed text payloads; unknown heartbeat/control text is still ignored only where documented.

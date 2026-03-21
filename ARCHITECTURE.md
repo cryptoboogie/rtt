@@ -595,6 +595,7 @@ rtt-bench --trigger-test  # single trigger
 | Polygon RPC (via alloy) | Not used at runtime; only in `approve.js` setup script | No runtime impact |
 
 The Polymarket public WS parser is intentionally tolerant of newly-added informational `event_type` values. Unknown market events are ignored as no-ops unless they carry one of the supported book/trade/reference payloads used by the runtime.
+The authenticated user-feed path also follows the documented plain-text heartbeat contract for market/user sockets: send `PING`, accept `PONG`, and ignore non-payload heartbeat frames so quote mode does not fail closed on keepalive traffic.
 
 **Rust crate dependencies (key ones):**
 - `hyper` 1.x + `hyper-util` — HTTP/2 client
