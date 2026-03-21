@@ -414,10 +414,11 @@ Main binary. Wires all components together.
 - `run_binance_feed()` connects to the public Binance `BTCUSDT` agg-trade websocket, treats the first trade at or after each 5-minute boundary as the opening reference, and continuously refreshes short-horizon continuation/reversal state during the early entry window
 - A dedicated SQLite journal worker persists one row per BTC 5-minute action result (`first_leg`, `second_leg`, `cleanup`) including market slug/open time, side/outcome, size/price, cleanup reason/loss, and the exchange response fields (`order_id`, `status`, `transaction_hashes`, `trade_ids`) so post-trade agents can reconstruct a market's sequence directly from the database
 - `plan_market_action()` implements a staged pair-first state machine:
-  - during the `5-9s` probe window, require fresh Binance data, a modest aligned move, and an attractive contemporaneous `up_ask + down_ask <= carry_pair_sum_max`
-  - buy the Binance-aligned side first with a small probe or burst clip sized by `probe_budget_usd`, `initial_burst_budget_usd`, `max_pair_budget_usd`, `max_gross_deployed_per_market`, and top-of-book/min-order constraints
+  - during the early `5-21s` entry band, require fresh Binance data, a modest move, and an attractive contemporaneous `up_ask + down_ask <= carry_pair_sum_max`
+  - bias the first probe toward the Binance-aligned side, but fall back to the opposite leg when the aligned side cannot satisfy top-of-book/min-order constraints and the pair is still attractively priced
   - only complete the second leg while Binance is still fresh and the effective pair sum remains attractive
   - if the fast tape goes stale/reverses, the second leg stays unavailable, or cleanup mode has already been entered, stop adding risk and try to flatten the pending first leg at the bid
+  - when no first leg is attempted, log the current blocker (`pair_sum_too_high`, `candidate_below_min_size`, stale Binance, missing books, etc.) so silent skips can be diagnosed from runtime logs
 - Cleanup is a core transition, not an emergency path: failed pair completion, late entry, or Binance reversal can all move a market into cleanup; realized cleanup loss accumulates against `max_cleanup_loss_usd`, which can stop the session
 - The lower-confidence one-sided continuation branch and paired inventory recycling sells are still not enabled in the default small-account live profile; `allow_one_sided_continuation = false` keeps the runtime pair-first unless explicitly overridden
 
@@ -682,7 +683,7 @@ max_pair_budget_usd = 45.0
 max_single_side_budget_usd = 10.0
 max_gross_deployed_per_market = 50.0
 max_unpaired_exposure_usd = 12.0
-carry_pair_sum_max = 0.96
+carry_pair_sum_max = 0.98
 attempt_cooldown_ms = 1000
 cleanup_grace_ms = 1500
 max_cleanup_loss_usd = 5.0   # Session stop on realized cleanup loss from failed pair completion

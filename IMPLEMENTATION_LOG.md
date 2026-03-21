@@ -1670,3 +1670,20 @@ Implemented all 8 engineering specs from `specs/` in a single session.
   - `cargo test --workspace`
 - **Commit**: N/A (working tree only)
 - **Deviation**: Kept `signer_address` optional for live execution by deriving it from the private key when absent, but still reject mismatches when it is explicitly configured so auth failures surface locally before an order path hits the API.
+
+### 13.7 — Relax over-tight BTC 5m first-entry gating and add skip diagnostics
+- **Spec**: runtime-faithfulness follow-up for `specs/13-btc_5m_strategy_spec.md`
+- **Files changed**: `crates/pm-executor/src/btc5m.rs`, `crates/pm-strategy/src/config.rs`, `crates/pm-strategy/tests/config_test.rs`, `config.toml`, `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`
+- **Changes**:
+  - Extended first-leg eligibility from the narrow `5-9s` probe subwindow to the broader `5-21s` high-confidence entry band described by the spec, while still keeping the paired branch Binance-gated and cleanup-aware
+  - Changed first-leg planning to treat Binance as a bias/veto rather than a hard side lock: the runtime now prefers the Binance-aligned side first, but falls back to the opposite leg when the aligned side cannot satisfy min-order/top-of-book constraints and the pair remains attractively priced
+  - Raised the checked-in `carry_pair_sum_max` default from `0.96` to `0.98` so the live default sits inside the spec's realistic achieved same-window pair band instead of hugging its most restrictive edge
+  - Added runtime skip diagnostics so non-entry markets emit explicit blocker logs such as `pair_sum_too_high`, `candidate_below_min_size`, `missing_pair_books`, or stale Binance instead of failing silently
+- **Tests**:
+  - `cargo test -p pm-executor plan_market_action_allows_first_probe_later_in_entry_window`
+  - `cargo test -p pm-executor plan_market_action_falls_back_when_aligned_side_cannot_meet_min_size`
+  - `cargo test -p pm-executor`
+  - `cargo test -p pm-strategy parse_btc5m_config_with_defaults`
+  - `cargo test --workspace`
+- **Commit**: N/A (working tree only)
+- **Deviation**: Kept the one-sided continuation branch disabled by default; this change only makes the pair-first branch less over-constrained and more observable.

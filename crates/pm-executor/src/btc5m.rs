@@ -77,6 +77,17 @@ pub enum CleanupReason {
     OneSidedDisabled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FirstEntryBlocker {
+    OutsideEntryWindow,
+    MissingBinanceSignal,
+    BinanceStale,
+    BinanceMoveTooSmall,
+    MissingPairBooks,
+    PairSumTooHigh,
+    CandidateBelowMinSize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct BookTop {
     pub bid_price: Option<f64>,
@@ -122,6 +133,7 @@ pub struct MarketExecutionState {
     pub spent_pair_budget_usd: f64,
     pub spent_single_side_budget_usd: f64,
     pub gross_deployed_usd: f64,
+    last_entry_blocker: Option<FirstEntryBlocker>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -713,6 +725,7 @@ impl Btc5mRunner {
     async fn advance_market(&mut self, tracked_index: usize, now_ms: u64) -> Result<(), String> {
         for _ in 0..MAX_ADVANCE_STEPS_PER_EVENT {
             let Some(plan) = self.plan_market_action(tracked_index, now_ms) else {
+                self.maybe_log_first_entry_blocker(tracked_index, now_ms);
                 return Ok(());
             };
 
@@ -727,6 +740,60 @@ impl Btc5mRunner {
             "BTC 5m market advance loop hit safety cap"
         );
         Ok(())
+    }
+
+    fn maybe_log_first_entry_blocker(&mut self, tracked_index: usize, now_ms: u64) {
+        let blocker = {
+            let Some(tracked) = self.tracked_markets.get(tracked_index) else {
+                return;
+            };
+
+            if tracked.execution.blocked
+                || tracked.execution.completed
+                || tracked.execution.pending_first_leg.is_some()
+            {
+                return;
+            }
+
+            let offset_seconds = seconds_since_open(&tracked.market, now_ms);
+            if offset_seconds < self.params.entry_window_start_seconds {
+                return;
+            }
+
+            plan_first_leg(
+                &tracked.market,
+                &self.params,
+                &tracked.execution,
+                now_ms,
+                tracked.up_book.as_ref(),
+                tracked.down_book.as_ref(),
+            )
+            .err()
+        };
+
+        let Some(blocker) = blocker else {
+            return;
+        };
+
+        let tracked = &mut self.tracked_markets[tracked_index];
+        if tracked.execution.last_entry_blocker == Some(blocker) {
+            return;
+        }
+
+        tracked.execution.last_entry_blocker = Some(blocker);
+
+        let offset_seconds = seconds_since_open(&tracked.market, now_ms);
+        tracing::info!(
+            market = %tracked.market.slug,
+            offset_seconds = offset_seconds,
+            blocker = first_entry_blocker_label(blocker),
+            pair_sum = pair_sum_from_books(tracked.up_book.as_ref(), tracked.down_book.as_ref()),
+            up_ask = tracked.up_book.as_ref().and_then(|book| book.ask_price),
+            down_ask = tracked.down_book.as_ref().and_then(|book| book.ask_price),
+            binance_open_price = tracked.execution.binance.open_price,
+            binance_latest_price = tracked.execution.binance.latest_price,
+            "BTC 5m first entry blocked"
+        );
     }
 
     fn plan_market_action(
@@ -1312,78 +1379,9 @@ pub fn plan_market_action(
             .map(MarketActionPlan::BuySecondLeg);
     }
 
-    let offset_seconds = seconds_since_open(market, now_ms);
-    if offset_seconds < params.entry_window_start_seconds
-        || offset_seconds > params.probe_window_end_seconds
-    {
-        return None;
-    }
-
-    let signal = compute_binance_signal(state, params, now_ms)?;
-    if !signal.fresh || signal.absolute_move_bps < params.binance_min_move_bps {
-        return None;
-    }
-
-    let first_outcome = preferred_first_outcome(&signal)?;
-    let pair_sum = pair_sum_from_books(up_book, down_book)?;
-    if pair_sum <= 0.0 || pair_sum > params.carry_pair_sum_max {
-        return None;
-    }
-
-    let first_book = book_for_outcome(up_book, down_book, first_outcome)?;
-    let second_book = book_for_outcome(up_book, down_book, first_outcome.opposite())?;
-    let first_ask_price = first_book.ask_price?;
-    let first_ask_size = first_book.ask_size?;
-    let second_ask_size = second_book.ask_size?;
-    let min_order_size = market_min_order_size(market);
-
-    let purpose = if state.paired_size > 0.0 {
-        FirstLegPurpose::BurstPair
-    } else {
-        FirstLegPurpose::Probe
-    };
-
-    let size = match purpose {
-        FirstLegPurpose::Probe => {
-            let remaining_pair_budget =
-                (params.max_pair_budget_usd - state.spent_pair_budget_usd).max(0.0);
-            let remaining_gross =
-                (params.max_gross_deployed_per_market - state.gross_deployed_usd).max(0.0);
-            let probe_budget = params
-                .probe_budget_usd
-                .min(params.max_unpaired_exposure_usd)
-                .min(remaining_pair_budget)
-                .min(remaining_gross);
-            plan_shares_from_one_sided_budget(probe_budget, first_ask_price, first_ask_size, min_order_size)
-        }
-        FirstLegPurpose::BurstPair => {
-            let remaining_pair_budget =
-                (params.max_pair_budget_usd - state.spent_pair_budget_usd).max(0.0);
-            let remaining_gross =
-                (params.max_gross_deployed_per_market - state.gross_deployed_usd).max(0.0);
-            let burst_budget = params
-                .initial_burst_budget_usd
-                .min(remaining_pair_budget)
-                .min(remaining_gross);
-            plan_shares_from_pair_budget(
-                burst_budget,
-                pair_sum,
-                first_ask_size,
-                second_ask_size,
-                min_order_size,
-            )
-        }
-    }?;
-
-    Some(FirstLegPlan {
-        purpose,
-        mode_candidate: ModeCandidate::PairedNoSells,
-        outcome: first_outcome,
-        size: format_decimal(size),
-        price: format_decimal(first_ask_price),
-        cost_usd: size * first_ask_price,
-    }
-    .into())
+    plan_first_leg(market, params, state, now_ms, up_book, down_book)
+        .ok()
+        .map(MarketActionPlan::BuyFirstLeg)
 }
 
 fn plan_second_leg(
@@ -1535,14 +1533,120 @@ fn one_sided_eligible(
         && signal.aligned_recent_move_bps(outcome) > 0.0
 }
 
-fn preferred_first_outcome(signal: &BinanceSignal) -> Option<MarketOutcome> {
+fn preferred_first_outcomes(signal: &BinanceSignal) -> Option<[MarketOutcome; 2]> {
     if signal.signed_move_bps > 0.0 {
-        Some(MarketOutcome::Up)
+        Some([MarketOutcome::Up, MarketOutcome::Down])
     } else if signal.signed_move_bps < 0.0 {
-        Some(MarketOutcome::Down)
+        Some([MarketOutcome::Down, MarketOutcome::Up])
     } else {
         None
     }
+}
+
+fn plan_first_leg(
+    market: &Btc5mMarket,
+    params: &Btc5mParams,
+    state: &MarketExecutionState,
+    now_ms: u64,
+    up_book: Option<&BookTop>,
+    down_book: Option<&BookTop>,
+) -> Result<FirstLegPlan, FirstEntryBlocker> {
+    let offset_seconds = seconds_since_open(market, now_ms);
+    if offset_seconds < params.entry_window_start_seconds
+        || offset_seconds > params.entry_window_end_seconds
+    {
+        return Err(FirstEntryBlocker::OutsideEntryWindow);
+    }
+
+    let signal = compute_binance_signal(state, params, now_ms)
+        .ok_or(FirstEntryBlocker::MissingBinanceSignal)?;
+    if !signal.fresh {
+        return Err(FirstEntryBlocker::BinanceStale);
+    }
+    if signal.absolute_move_bps < params.binance_min_move_bps {
+        return Err(FirstEntryBlocker::BinanceMoveTooSmall);
+    }
+
+    let pair_sum =
+        pair_sum_from_books(up_book, down_book).ok_or(FirstEntryBlocker::MissingPairBooks)?;
+    if pair_sum <= 0.0 || pair_sum > params.carry_pair_sum_max {
+        return Err(FirstEntryBlocker::PairSumTooHigh);
+    }
+
+    let purpose = if state.paired_size > 0.0 {
+        FirstLegPurpose::BurstPair
+    } else {
+        FirstLegPurpose::Probe
+    };
+    let min_order_size = market_min_order_size(market);
+
+    for first_outcome in preferred_first_outcomes(&signal).into_iter().flatten() {
+        let Some(first_book) = book_for_outcome(up_book, down_book, first_outcome) else {
+            continue;
+        };
+        let Some(second_book) = book_for_outcome(up_book, down_book, first_outcome.opposite()) else {
+            continue;
+        };
+        let Some(first_ask_price) = first_book.ask_price else {
+            continue;
+        };
+        let Some(first_ask_size) = first_book.ask_size else {
+            continue;
+        };
+        let Some(second_ask_size) = second_book.ask_size else {
+            continue;
+        };
+
+        let size = match purpose {
+            FirstLegPurpose::Probe => {
+                let remaining_pair_budget =
+                    (params.max_pair_budget_usd - state.spent_pair_budget_usd).max(0.0);
+                let remaining_gross =
+                    (params.max_gross_deployed_per_market - state.gross_deployed_usd).max(0.0);
+                let probe_budget = params
+                    .probe_budget_usd
+                    .min(params.max_unpaired_exposure_usd)
+                    .min(remaining_pair_budget)
+                    .min(remaining_gross);
+                plan_shares_from_one_sided_budget(
+                    probe_budget,
+                    first_ask_price,
+                    first_ask_size,
+                    min_order_size,
+                )
+            }
+            FirstLegPurpose::BurstPair => {
+                let remaining_pair_budget =
+                    (params.max_pair_budget_usd - state.spent_pair_budget_usd).max(0.0);
+                let remaining_gross =
+                    (params.max_gross_deployed_per_market - state.gross_deployed_usd).max(0.0);
+                let burst_budget = params
+                    .initial_burst_budget_usd
+                    .min(remaining_pair_budget)
+                    .min(remaining_gross);
+                plan_shares_from_pair_budget(
+                    burst_budget,
+                    pair_sum,
+                    first_ask_size,
+                    second_ask_size,
+                    min_order_size,
+                )
+            }
+        };
+
+        if let Some(size) = size {
+            return Ok(FirstLegPlan {
+                purpose,
+                mode_candidate: ModeCandidate::PairedNoSells,
+                outcome: first_outcome,
+                size: format_decimal(size),
+                price: format_decimal(first_ask_price),
+                cost_usd: size * first_ask_price,
+            });
+        }
+    }
+
+    Err(FirstEntryBlocker::CandidateBelowMinSize)
 }
 
 fn desired_open_times(now_ts: u64, cadence_seconds: u64, prefetch_markets: usize) -> Vec<u64> {
@@ -1708,6 +1812,18 @@ fn cleanup_reason_label(reason: CleanupReason) -> &'static str {
         CleanupReason::PairUnavailable => "pair_unavailable",
         CleanupReason::EntryWindowExpired => "entry_window_expired",
         CleanupReason::OneSidedDisabled => "one_sided_disabled",
+    }
+}
+
+fn first_entry_blocker_label(blocker: FirstEntryBlocker) -> &'static str {
+    match blocker {
+        FirstEntryBlocker::OutsideEntryWindow => "outside_entry_window",
+        FirstEntryBlocker::MissingBinanceSignal => "missing_binance_signal",
+        FirstEntryBlocker::BinanceStale => "binance_stale",
+        FirstEntryBlocker::BinanceMoveTooSmall => "binance_move_too_small",
+        FirstEntryBlocker::MissingPairBooks => "missing_pair_books",
+        FirstEntryBlocker::PairSumTooHigh => "pair_sum_too_high",
+        FirstEntryBlocker::CandidateBelowMinSize => "candidate_below_min_size",
     }
 }
 
@@ -2024,6 +2140,67 @@ mod tests {
                 assert_eq!(plan.outcome, MarketOutcome::Up);
                 assert_eq!(plan.size, "6");
                 assert_eq!(plan.price, "0.49");
+            }
+            other => panic!("unexpected plan: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_market_action_allows_first_probe_later_in_entry_window() {
+        let market = sample_market();
+        let params = Btc5mParams::default();
+        let mut state =
+            sample_state_with_binance(100_000.0, 100_020.0, (market.open_ts + 15) * 1000);
+        state.last_attempt_at_ms = None;
+        let up_book = sample_book(0.49, 20.0);
+        let down_book = sample_book(0.48, 20.0);
+
+        let plan = plan_market_action(
+            &market,
+            &params,
+            &state,
+            (market.open_ts + 15) * 1000,
+            Some(&up_book),
+            Some(&down_book),
+        )
+        .expect("plan");
+
+        match plan {
+            MarketActionPlan::BuyFirstLeg(plan) => {
+                assert_eq!(plan.purpose, FirstLegPurpose::Probe);
+                assert_eq!(plan.outcome, MarketOutcome::Up);
+                assert_eq!(plan.size, "6");
+                assert_eq!(plan.price, "0.49");
+            }
+            other => panic!("unexpected plan: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_market_action_falls_back_when_aligned_side_cannot_meet_min_size() {
+        let market = sample_market();
+        let params = Btc5mParams::default();
+        let mut state = sample_state_with_binance(100_000.0, 100_020.0, (market.open_ts + 7) * 1000);
+        state.last_attempt_at_ms = None;
+        let up_book = sample_book(0.70, 20.0);
+        let down_book = sample_book(0.25, 20.0);
+
+        let plan = plan_market_action(
+            &market,
+            &params,
+            &state,
+            (market.open_ts + 7) * 1000,
+            Some(&up_book),
+            Some(&down_book),
+        )
+        .expect("plan");
+
+        match plan {
+            MarketActionPlan::BuyFirstLeg(plan) => {
+                assert_eq!(plan.purpose, FirstLegPurpose::Probe);
+                assert_eq!(plan.outcome, MarketOutcome::Down);
+                assert_eq!(plan.size, "12");
+                assert_eq!(plan.price, "0.25");
             }
             other => panic!("unexpected plan: {other:?}"),
         }

@@ -277,7 +277,7 @@ fn default_max_cleanup_loss_usd() -> f64 {
 }
 
 fn default_carry_pair_sum_max() -> f64 {
-    0.96
+    0.98
 }
 
 fn default_attempt_cooldown_ms() -> u64 {

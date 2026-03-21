@@ -215,7 +215,7 @@ strategy = "btc_5m"
     assert!((params.max_gross_deployed_per_market - 50.0).abs() < f64::EPSILON);
     assert!((params.max_unpaired_exposure_usd - 12.0).abs() < f64::EPSILON);
     assert!((params.max_cleanup_loss_usd - 5.0).abs() < f64::EPSILON);
-    assert!((params.carry_pair_sum_max - 0.96).abs() < f64::EPSILON);
+    assert!((params.carry_pair_sum_max - 0.98).abs() < f64::EPSILON);
     assert_eq!(params.attempt_cooldown_ms, 1_000);
     assert_eq!(params.cleanup_grace_ms, 1_500);
     assert_eq!(
